@@ -1,6 +1,7 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
@@ -104,13 +105,13 @@ export async function synthesizeClonedSpeech(request: CloneRequest): Promise<Buf
   await writeFile(textPath, request.text, 'utf8');
 
   try {
-    const result = await runWorker([
-      '--text-file', textPath,
-      '--ref-audio', request.referenceAudioPath,
-      '--ref-text', request.referenceText || '',
-      '--language', request.languageCode === 'hinglish' ? 'hi' : request.languageCode,
-      '--out', outPath,
-    ]);
+    const result = await runWorker({
+      textFile: textPath,
+      refAudio: request.referenceAudioPath,
+      refText: request.referenceText || '',
+      language: request.languageCode === 'hinglish' ? 'hi' : request.languageCode,
+      out: outPath,
+    });
     if (!result.ok) throw new Error(result.error || 'Voice cloning failed');
     if (!existsSync(outPath)) throw new Error('Voice cloning produced no audio');
     return await readFile(outPath);
@@ -125,45 +126,118 @@ interface WorkerResult {
   engine?: string;
 }
 
-function runWorker(args: string[]): Promise<WorkerResult> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(VENV_PYTHON, ['-W', 'ignore', WORKER_SCRIPT, ...args], {
-      cwd: serverRoot,
-      // The engines shell out to ffmpeg for decoding the reference clip.
-      env: {
-        ...process.env,
-        PATH: `${path.dirname(ffmpegInstaller.path)}${path.delimiter}${process.env.PATH || ''}`,
-        PYTHONIOENCODING: 'utf-8',
-      },
-    });
+/**
+ * Kept warm rather than respawned per clip, same reasoning as the forced-alignment worker
+ * (`ctcAlign.ts`): `from_pretrained()` for Chatterbox or IndicF5 is seconds of fixed cost,
+ * and a dub renders one clip per line back-to-back — a cloned-voice dub used to pay that
+ * cost again for *every line*, not just once per project. Spawned lazily on first use, shut
+ * down after a period of inactivity, and requests are serialized (this is CPU-bound local
+ * inference on one box; see ctcAlign.ts for why a pool of these would be worse, not faster).
+ */
+const IDLE_SHUTDOWN_MS = 10 * 60 * 1000;
 
-    let stdout = '';
-    let stderrTail = '';
-    proc.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on('data', (chunk: Buffer) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-4000);
-    });
+let worker: ChildProcessWithoutNullStreams | null = null;
+let current: {
+  proc: ChildProcessWithoutNullStreams;
+  resolve: (r: WorkerResult) => void;
+  reject: (err: Error) => void;
+} | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleIdleShutdown(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    worker?.stdin.end();
+    worker = null;
+  }, IDLE_SHUTDOWN_MS);
+}
+
+function getWorker(): ChildProcessWithoutNullStreams {
+  if (worker) return worker;
+
+  const proc = spawn(VENV_PYTHON, ['-W', 'ignore', WORKER_SCRIPT], {
+    cwd: serverRoot,
+    // The engines shell out to ffmpeg for decoding the reference clip.
+    env: {
+      ...process.env,
+      PATH: `${path.dirname(ffmpegInstaller.path)}${path.delimiter}${process.env.PATH || ''}`,
+      PYTHONIOENCODING: 'utf-8',
+    },
+  });
+
+  let stderrTail = '';
+  proc.stderr.on('data', (chunk: Buffer) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+  });
+
+  // One JSON response line per request, in order — safe to match by arrival order (rather
+  // than a request id) only because `runWorker` never has more than one call in flight, and
+  // the `current.proc === proc` guard stops a slow-to-exit retired worker's belated 'line'
+  // or 'exit' event from clobbering a request already running on its replacement.
+  createInterface({ input: proc.stdout }).on('line', (line) => {
+    if (!current || current.proc !== proc) return;
+    const waiting = current;
+    current = null;
+    try {
+      waiting.resolve(JSON.parse(line) as WorkerResult);
+    } catch {
+      waiting.reject(new Error(`Voice cloning worker returned invalid JSON: ${line.slice(0, 200)}`));
+    }
+  });
+
+  proc.on('exit', () => {
+    if (worker === proc) worker = null;
+    if (!current || current.proc !== proc) return;
+    const waiting = current;
+    current = null;
+    waiting.reject(new Error(`Voice cloning worker exited unexpectedly: ${stderrTail || 'no output'}`));
+  });
+
+  worker = proc;
+  return proc;
+}
+
+// Serialized: the worker handles one request at a time, and the line-arrival-order
+// matching in getWorker() above only holds if calls never interleave.
+let chain: Promise<unknown> = Promise.resolve();
+
+function runWorker(request: unknown): Promise<WorkerResult> {
+  const result = chain.then(() => runOne(request));
+  chain = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function runOne(request: unknown): Promise<WorkerResult> {
+  return new Promise((resolve, reject) => {
+    const proc = getWorker();
+    if (idleTimer) clearTimeout(idleTimer);
 
     const timer = setTimeout(() => {
+      current = null;
       proc.kill();
+      worker = null;
       reject(new Error('Voice cloning timed out'));
     }, CLONE_TIMEOUT_MS);
 
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    proc.on('close', () => {
-      clearTimeout(timer);
-      try {
-        resolve(JSON.parse(stdout.trim()) as WorkerResult);
-      } catch {
-        // The worker only ever prints JSON, so unparseable output means it died before
-        // reaching its own error handling — surface the Python stderr instead.
-        reject(new Error(`Voice cloning worker failed: ${stderrTail || stdout || 'no output'}`));
-      }
-    });
+    current = {
+      proc,
+      resolve: (r) => {
+        clearTimeout(timer);
+        scheduleIdleShutdown();
+        resolve(r);
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        scheduleIdleShutdown();
+        reject(err);
+      },
+    };
+
+    // Sent as one JSON line, never through argv — a Windows command line mangles
+    // Devanagari and Tamil.
+    proc.stdin.write(`${JSON.stringify(request)}\n`);
   });
 }

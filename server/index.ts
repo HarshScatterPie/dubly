@@ -1,7 +1,10 @@
 import { env } from './lib/env';
 import express from 'express';
 import cors from 'cors';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { requireAuth } from './lib/auth';
+import { repoRoot } from './lib/paths';
 import { healthRouter } from './routes/health';
 import { settingsRouter } from './routes/settings';
 import { usageRouter } from './routes/usage';
@@ -33,6 +36,19 @@ app.use('/api/tts', requireAuth, ttsRouter);
 app.use('/api/voices', requireAuth, voicesRouter);
 app.use('/api/projects', requireAuth, projectsRouter);
 app.use('/api/projects', requireAuth, dubRouter);
+
+// Serves the built frontend (`npm run build` -> dist/) when it's present, so one process
+// can be the whole deployment on a single small VM instead of needing a separate static
+// host. Skipped entirely in local dev, where Vite's own dev server serves the frontend on
+// its own port instead. The SPA has no server-side routes of its own (navigation is all
+// client-side state, not URL-based), so any unmatched GET just gets index.html.
+const distDir = path.join(repoRoot, 'dist');
+if (existsSync(distDir)) {
+  app.use(express.static(distDir));
+  app.get(/^(?!\/api).*/, (_req, res) => {
+    res.sendFile(path.join(distDir, 'index.html'));
+  });
+}
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {

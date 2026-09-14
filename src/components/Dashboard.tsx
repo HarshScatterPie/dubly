@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Video,
   Mic,
@@ -22,6 +22,7 @@ import {
 import { DubbingProject, NavigationTab } from '../types';
 import { SAMPLE_VIDEOS, LANGUAGES, VOICES } from '../data/mockData';
 import { videoService } from '../services/videoService';
+import { ConfirmDialog } from './ConfirmDialog';
 
 interface DashboardProps {
   projects: DubbingProject[];
@@ -38,6 +39,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onStartWithSample,
   onDeleteProject,
 }) => {
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+
   const getLangName = (code: string) => {
     const l = LANGUAGES.find((item) => item.code === code);
     return l ? `${l.flag} ${l.name}` : code;
@@ -346,7 +349,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       </button>
                       <button
                         type="button"
-                        onClick={() => onDeleteProject(project.id)}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPendingDeleteId(project.id);
+                        }}
                         className="p-1.5 text-[#94A3B8] hover:text-rose-600 rounded hover:bg-[#F8FAFC] transition-colors"
                         title="Delete"
                       >
@@ -360,6 +366,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        isOpen={pendingDeleteId !== null}
+        title="Delete this project?"
+        description="This permanently removes the project, its transcript, and any rendered dubs. This can't be undone."
+        confirmLabel="Delete Project"
+        onCancel={() => setPendingDeleteId(null)}
+        onConfirm={() => {
+          if (pendingDeleteId) onDeleteProject(pendingDeleteId);
+          setPendingDeleteId(null);
+        }}
+      />
     </div>
   );
 };

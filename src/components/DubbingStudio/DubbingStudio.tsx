@@ -176,6 +176,12 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const [isGeneratingDub, setIsGeneratingDub] = useState<boolean>(false);
   const [dubProgress, setDubProgress] = useState<number>(0);
   const [processingMessage, setProcessingMessage] = useState<string>('');
+  // A countdown here used to be a flat `(100 - progress) * 0.7` guess, shown identically for
+  // an 8-second clip and a 10-minute one, and wildly wrong whenever lip-sync or background
+  // separation is on (both are CPU-only and can add minutes). Elapsed time is never wrong —
+  // it just counts — so that's what the processing screen shows instead of a fabricated ETA.
+  const [dubElapsedSeconds, setDubElapsedSeconds] = useState<number>(0);
+  const dubStartedAtRef = useRef<number>(0);
 
   // Completed Project Holder
   const [completedProject, setCompletedProject] = useState<DubbingProject | null>(null);
@@ -187,6 +193,15 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Ticks the processing screen's elapsed-time readout once a second while a dub is running.
+  React.useEffect(() => {
+    if (!isGeneratingDub) return;
+    const tick = () => setDubElapsedSeconds(Math.floor((Date.now() - dubStartedAtRef.current) / 1000));
+    tick();
+    const interval = setInterval(tick, 1000);
+    return () => clearInterval(interval);
+  }, [isGeneratingDub]);
 
   const stepsList: { id: DubbingStep; label: string; num: string }[] = [
     { id: 'upload', label: 'Upload', num: '01' },
@@ -450,6 +465,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setCurrentStep('export');
     setDubProgress(5);
     setProcessingMessage('Starting dubbing pipeline...');
+    dubStartedAtRef.current = Date.now();
+    setDubElapsedSeconds(0);
 
     try {
       await projectService.startDub(projectId, {
@@ -622,7 +639,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const selectedVoice =
     [...customVoices, ...VOICES].find((v) => v.id === voiceForLanguage(voiceLanguageCode)) || VOICES[0];
   const wordsCount = transcriptSegments.reduce((sum, s) => sum + s.wordsCount, 0);
-  const secondsRemaining = Math.max(0, Math.round((100 - dubProgress) * 0.7));
 
   const currentStepIndex = STEP_ORDER.indexOf(currentStep);
   maxReachedIndexRef.current = Math.max(maxReachedIndexRef.current, currentStepIndex);
@@ -761,7 +777,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
             voiceName={selectedVoice.name}
             videoPreviewUrl={videoPreviewUrl || ''}
             progressPercent={dubProgress}
-            secondsRemaining={secondsRemaining}
+            elapsedSeconds={dubElapsedSeconds}
             statusMessage={processingMessage}
           />
         ) : (

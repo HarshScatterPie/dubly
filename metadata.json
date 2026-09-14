@@ -1,0 +1,6 @@
+{
+  "name": "Dubly",
+  "description": "AI video localization and dubbing studio. One video. Every language.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

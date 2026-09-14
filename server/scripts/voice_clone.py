@@ -15,16 +15,23 @@ Node side (Sarvam for Indic, Google otherwise):
 Both are optional installs. Missing engines are reported as a clean JSON error rather than
 a traceback, so the caller can fall back to a catalog voice instead of failing a render.
 
-Talks JSON over stdout: one object, `{"ok": true}` or `{"ok": false, "error": "..."}`.
-Text arrives in a UTF-8 file rather than argv — Devanagari and Tamil through a Windows
-command line is a mojibake generator.
+Persistent worker: reads one JSON request per line from stdin, writes one JSON response per
+line to stdout, for as long as the caller keeps the pipe open — rather than the one-shot
+CLI-args-in, one-clip-out process this used to be. A dub renders one clip per line back to
+back, and each engine's `from_pretrained()` is a multi-second-to-tens-of-seconds load, so the
+old shape paid that cost again for every single line of a cloned-voice dub. A warm worker
+loads each engine at most once per process lifetime and reuses it for every request after.
+
+Text arrives in a UTF-8 file path rather than inline in the request — Devanagari and Tamil
+round-tripping through stdin JSON works fine, but keeping the on-disk-file convention this
+already used avoids re-plumbing the Node side's temp-file handling for no benefit.
 """
-import argparse
+import io
 import json
 import os
 import sys
 
-# Model chatter goes to stderr; stdout stays a clean JSON channel for the caller.
+# Model chatter goes to stderr; stdout stays a clean JSON-lines channel for the caller.
 # Windows defaults stdout to cp1252, which cannot encode Devanagari or Tamil — the
 # process dies mid-write with a UnicodeEncodeError after having already emitted half
 # a JSON document. Callers can set PYTHONIOENCODING, but the worker should not depend
@@ -42,10 +49,11 @@ CHATTERBOX_LANGUAGES = {
 }
 
 
-def fail(message):
-    json.dump({"ok": False, "error": message}, sys.stdout)
+def respond(payload):
+    """One JSON object per line on stdout — the framing the persistent worker loop reads by."""
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    sys.stdout.write("\n")
     sys.stdout.flush()
-    sys.exit(1)
 
 
 def have(module_name):
@@ -74,17 +82,36 @@ def pick_engine(requested, language):
     return "none"
 
 
-def run_chatterbox(args, out_path):
-    import torch
-    from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+# Each engine loads into at most one instance for this process's whole lifetime — unlike the
+# forced-alignment worker there's no per-language model zoo here, just these two, so a plain
+# cache slot per engine (no eviction) is all that's needed.
+_chatterbox_model = None
+_indicf5_model = None
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    model = ChatterboxMultilingualTTS.from_pretrained(device=device)
-    wav = model.generate(
-        read_text(args.text_file),
-        language_id=args.language,
-        audio_prompt_path=args.ref_audio,
-    )
+
+def get_chatterbox_model():
+    global _chatterbox_model
+    if _chatterbox_model is None:
+        import torch
+        from chatterbox.mtl_tts import ChatterboxMultilingualTTS
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        _chatterbox_model = ChatterboxMultilingualTTS.from_pretrained(device=device)
+    return _chatterbox_model
+
+
+def get_indicf5_model():
+    global _indicf5_model
+    if _indicf5_model is None:
+        from transformers import AutoModel
+
+        _indicf5_model = AutoModel.from_pretrained("ai4bharat/IndicF5", trust_remote_code=True)
+    return _indicf5_model
+
+
+def run_chatterbox(text, ref_audio, language, out_path):
+    model = get_chatterbox_model()
+    wav = model.generate(text, language_id=language, audio_prompt_path=ref_audio)
 
     import torchaudio
 
@@ -92,20 +119,12 @@ def run_chatterbox(args, out_path):
     return model.sr
 
 
-def run_indicf5(args, out_path):
+def run_indicf5(text, ref_audio, ref_text, out_path):
     import numpy as np
     import soundfile as sf
-    from transformers import AutoModel
 
-    if not args.ref_text:
-        fail("IndicF5 needs the reference recording's transcript, which was not provided")
-
-    model = AutoModel.from_pretrained("ai4bharat/IndicF5", trust_remote_code=True)
-    audio = model(
-        read_text(args.text_file),
-        ref_audio_path=args.ref_audio,
-        ref_text=args.ref_text,
-    )
+    model = get_indicf5_model()
+    audio = model(text, ref_audio_path=ref_audio, ref_text=ref_text)
     audio = np.asarray(audio, dtype=np.float32)
     # IndicF5 returns int16-scaled floats; normalize before writing or the file clips.
     if np.max(np.abs(audio)) > 1.0:
@@ -119,51 +138,77 @@ def read_text(path):
         return handle.read().strip()
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    # Nothing is argparse-required: --probe is a standalone mode, and making these
-    # required would make it impossible to call. Checked by hand below instead.
-    parser.add_argument("--text-file", help="UTF-8 file holding the text to speak")
-    parser.add_argument("--ref-audio", help="the recording to clone the voice from")
-    parser.add_argument("--ref-text", default="", help="transcript of --ref-audio (IndicF5 needs it)")
-    parser.add_argument("--language")
-    parser.add_argument("--out")
-    parser.add_argument("--engine", default="auto", choices=["auto", "chatterbox", "indicf5"])
-    parser.add_argument("--probe", action="store_true", help="report installed engines and exit")
-    args = parser.parse_args()
+def handle_synthesize(request):
+    text_file = request.get("textFile")
+    ref_audio = request.get("refAudio")
+    ref_text = request.get("refText", "")
+    language = request.get("language")
+    out_path = request.get("out")
+    requested_engine = request.get("engine", "auto")
 
-    if args.probe:
-        json.dump(
-            {
-                "ok": True,
-                "engines": {"chatterbox": have("chatterbox"), "indicf5": have("f5_tts")},
-            },
-            sys.stdout,
-        )
-        return
-
-    missing = [n for n in ("text-file", "ref-audio", "language", "out") if not getattr(args, n.replace("-", "_"))]
+    missing = [k for k in ("textFile", "refAudio", "language", "out") if not request.get(k)]
     if missing:
-        fail("Missing required arguments: " + ", ".join("--" + m for m in missing))
+        return {"ok": False, "error": "Missing required fields: " + ", ".join(missing)}
+    if not os.path.exists(ref_audio):
+        return {"ok": False, "error": f"Reference recording not found: {ref_audio}"}
 
-    if not os.path.exists(args.ref_audio):
-        fail(f"Reference recording not found: {args.ref_audio}")
-
-    engine = pick_engine(args.engine, args.language)
+    engine = pick_engine(requested_engine, language)
     if engine == "none":
-        fail(
-            "No voice-cloning engine is installed. Install one into the server venv: "
-            "`pip install chatterbox-tts` (23 languages incl. Hindi), and/or "
-            "`pip install f5-tts` for the other Indian languages."
-        )
+        return {
+            "ok": False,
+            "error": (
+                "No voice-cloning engine is installed. Install one into the server venv: "
+                "`pip install chatterbox-tts` (23 languages incl. Hindi), and/or "
+                "`pip install f5-tts` for the other Indian languages."
+            ),
+        }
+    if engine == "indicf5" and not ref_text:
+        return {"ok": False, "error": "IndicF5 needs the reference recording's transcript, which was not provided"}
 
     try:
-        sample_rate = run_chatterbox(args, args.out) if engine == "chatterbox" else run_indicf5(args, args.out)
-    except Exception as err:  # surfaced to the user as a soft failure, not a crash
-        fail(f"{engine} failed: {err}")
+        text = read_text(text_file)
+        if engine == "chatterbox":
+            sample_rate = run_chatterbox(text, ref_audio, language, out_path)
+        else:
+            sample_rate = run_indicf5(text, ref_audio, ref_text, out_path)
+    except Exception as err:  # surfaced to the caller as a soft failure, not a crash
+        return {"ok": False, "error": f"{engine} failed: {err}"}
 
-    json.dump({"ok": True, "engine": engine, "sampleRate": sample_rate}, sys.stdout)
-    sys.stdout.flush()
+    return {"ok": True, "engine": engine, "sampleRate": sample_rate}
+
+
+def main():
+    """Persistent worker loop — see module docstring for why this isn't one-shot-per-clip."""
+    # TextIOWrapper over the raw buffer (rather than sys.stdin directly) so decoding is
+    # explicit utf-8 regardless of the console's codepage — Windows defaults stdin to
+    # cp1252, which mangles Devanagari and Tamil before json.loads ever sees it.
+    stream = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace", newline="\n")
+    first_line = True
+    for raw_line in stream:
+        # Tolerate a UTF-8 BOM on the very first line: some shells prepend one when piping.
+        line = raw_line.lstrip("﻿").strip() if first_line else raw_line.strip()
+        first_line = False
+        if not line:
+            continue
+
+        try:
+            request = json.loads(line)
+        except Exception as err:
+            respond({"ok": False, "error": f"Invalid request JSON: {err}"})
+            continue
+
+        if request.get("cmd") == "shutdown":
+            break
+
+        if request.get("probe"):
+            respond({"ok": True, "engines": {"chatterbox": have("chatterbox"), "indicf5": have("f5_tts")}})
+            continue
+
+        try:
+            respond(handle_synthesize(request))
+        except Exception as err:  # one bad request must not take the whole warm worker down
+            print(f"[voice_clone] request failed: {err}", file=sys.stderr)
+            respond({"ok": False, "error": str(err)})
 
 
 if __name__ == "__main__":

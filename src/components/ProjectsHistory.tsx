@@ -27,6 +27,8 @@ interface ProjectsHistoryProps {
   onOpenProject: (project: DubbingProject) => void;
   onDeleteProject: (projectId: string) => void;
   onNewDub: () => void;
+  /** Pre-fills the search box — set when arriving here from the header's global search. */
+  initialSearchTerm?: string;
 }
 
 export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
@@ -34,8 +36,9 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
   onOpenProject,
   onDeleteProject,
   onNewDub,
+  initialSearchTerm,
 }) => {
-  const [searchTerm, setSearchTerm] = useState('');
+  const [searchTerm, setSearchTerm] = useState(initialSearchTerm || '');
   const [filterLang, setFilterLang] = useState('all');
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 

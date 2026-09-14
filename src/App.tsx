@@ -3,25 +3,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { DubbingProject, NavigationTab, ToastMessage, UserUsageStats } from './types';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { WaveLoader } from './components/WaveLoader';
 import { Dashboard } from './components/Dashboard';
-import { DubbingStudio } from './components/DubbingStudio/DubbingStudio';
-import { TextToVoiceStudio } from './components/TextToVoiceStudio';
-import { VoiceCloneStudio } from './components/VoiceCloneStudio';
-import { ProjectsHistory } from './components/ProjectsHistory';
-import { UsageView } from './components/UsageView';
-import { ProjectWorkspace } from './components/ProjectWorkspace';
-import { SettingsModal } from './components/SettingsModal';
 import { ToastContainer } from './components/Toast';
 import { Login } from './components/Login';
 import { useAuth } from './context/AuthContext';
 import { textToSpeechService } from './services/textToSpeechService';
 import { projectService } from './services/projectService';
 import { apiGet } from './lib/apiClient';
+
+// Code-split everything past the landing dashboard: the single bundle these used to share
+// with it was 600KB+ and loaded in full before a first paint, even for a user who only ever
+// looks at the dashboard. Each of these is its own chunk now, fetched the first time its tab
+// is actually opened.
+const DubbingStudio = lazy(() =>
+  import('./components/DubbingStudio/DubbingStudio').then((m) => ({ default: m.DubbingStudio }))
+);
+const TextToVoiceStudio = lazy(() =>
+  import('./components/TextToVoiceStudio').then((m) => ({ default: m.TextToVoiceStudio }))
+);
+const VoiceCloneStudio = lazy(() =>
+  import('./components/VoiceCloneStudio').then((m) => ({ default: m.VoiceCloneStudio }))
+);
+const ProjectsHistory = lazy(() =>
+  import('./components/ProjectsHistory').then((m) => ({ default: m.ProjectsHistory }))
+);
+const UsageView = lazy(() => import('./components/UsageView').then((m) => ({ default: m.UsageView })));
+const ProjectWorkspace = lazy(() =>
+  import('./components/ProjectWorkspace').then((m) => ({ default: m.ProjectWorkspace }))
+);
+const SettingsModal = lazy(() =>
+  import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal }))
+);
 
 const EMPTY_USAGE: UserUsageStats = {
   minutesDubbed: 0,
@@ -46,6 +63,14 @@ export default function App() {
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
+  // Bumped on every header search so ProjectsHistory remounts (via `key`) even when the
+  // term is unchanged from last time — otherwise its own useState would keep the old value.
+  const [historySearch, setHistorySearch] = useState<{ term: string; nonce: number }>({ term: '', nonce: 0 });
+
+  const handleHeaderSearch = (query: string) => {
+    setHistorySearch((prev) => ({ term: query, nonce: prev.nonce + 1 }));
+    setActiveTab('history');
+  };
 
   const showToast = (
     title: string,
@@ -204,11 +229,19 @@ export default function App() {
             onOpenMobileMenu={() => setIsMobileOpen(true)}
             onOpenNewProject={() => handleStartDubbing()}
             onOpenSettings={() => setIsSettingsOpen(true)}
+            onSearch={handleHeaderSearch}
             isPlayingAudio={isPlayingAudio}
             onStopAudio={handleStopAudio}
           />
 
           <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center py-24">
+                  <WaveLoader label="loading…" />
+                </div>
+              }
+            >
             {activeTab === 'dashboard' && (
               <Dashboard
                 projects={projects}
@@ -247,10 +280,12 @@ export default function App() {
 
             {activeTab === 'history' && (
               <ProjectsHistory
+                key={historySearch.nonce}
                 projects={projects}
                 onOpenProject={handleOpenWorkspace}
                 onDeleteProject={handleDeleteProject}
                 onNewDub={() => handleStartDubbing()}
+                initialSearchTerm={historySearch.term}
               />
             )}
 
@@ -291,6 +326,7 @@ export default function App() {
                 </div>
               )
             )}
+            </Suspense>
           </main>
 
           <footer className="hidden md:flex items-center justify-center py-1.5 border-t border-[#E2E8F0] bg-[#FAFAF7] shrink-0">
@@ -301,12 +337,18 @@ export default function App() {
         </div>
       </div>
 
-      {/* Studio Settings Dialog */}
-      <SettingsModal
-        isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
-        onShowToast={showToast}
-      />
+      {/* Studio Settings Dialog — only mounted (and its chunk fetched) once actually opened;
+          `isSettingsOpen` alone isn't enough since a lazy component's import runs on first
+          render regardless of props, not on whatever condition its own JSX checks internally. */}
+      {isSettingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal
+            isOpen={isSettingsOpen}
+            onClose={() => setIsSettingsOpen(false)}
+            onShowToast={showToast}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

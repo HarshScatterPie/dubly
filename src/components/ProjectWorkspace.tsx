@@ -47,6 +47,10 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const [activeTab, setActiveTab] = useState<'overview' | 'transcript' | 'translation' | 'voice' | 'export'>('overview');
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  // Which language's translation the Translation tab is showing — a project can hold
+  // several, but only ever displayed the primary one regardless of what the tab's own
+  // label ("Translation (Tamil +1)") implied was there to look at.
+  const [translationLanguage, setTranslationLanguage] = useState<string>(project.targetLanguage);
   const [videoSeekTime, setVideoSeekTime] = useState<number | undefined>(undefined);
   const [activeTrack, setActiveTrack] = useState<'dubbed' | 'original'>('dubbed');
 
@@ -83,6 +87,20 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const savedVoiceForLanguage = (code: string) =>
     project.languageVoiceMap?.[code] || project.selectedVoiceId;
 
+  /**
+   * The primary language's segments live at the top level (`project.localizedSegments`,
+   * kept there for projects saved before multi-language dubbing existed); every other
+   * language's live under `languageOutputs`. Segment ids are namespaced per language
+   * (`loc-<lang>-...`), so there's no risk of the two ever colliding.
+   */
+  const translationSegments: LocalizedSegment[] =
+    translationLanguage === project.targetLanguage
+      ? project.localizedSegments
+      : project.languageOutputs?.[translationLanguage]?.localizedSegments || [];
+  const translationLang = LANGUAGES.find((l) => l.code === translationLanguage) || targetLang;
+  const translationVoice =
+    availableVoices.find((v) => v.id === savedVoiceForLanguage(translationLanguage)) || selectedVoice;
+
   const activeVoiceId = pendingVoiceId ?? savedVoiceForLanguage(voiceLanguage);
   const hasVoiceChange = pendingVoiceId !== null && pendingVoiceId !== savedVoiceForLanguage(voiceLanguage);
 
@@ -95,13 +113,22 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
     onShowToast('Transcript Updated', 'Segment text saved.', 'success');
   };
 
-  const handleUpdateLocalizedSegment = (locId: string, newText: string) => {
-    const updatedLoc = project.localizedSegments.map((s) =>
+  const handleUpdateLocalizedSegment = async (locId: string, newText: string) => {
+    const updatedLoc = translationSegments.map((s) =>
       s.id === locId ? { ...s, translatedText: newText, isEdited: true } : s
     );
-    onUpdateProject({ ...project, localizedSegments: updatedLoc });
-    setEditingSegId(null);
-    onShowToast('Translation Updated', 'Segment translation saved.', 'success');
+    try {
+      // The dedicated per-language endpoint, not the generic project patch: the generic
+      // one only ever writes the top-level (primary-language) `localizedSegments` field,
+      // so an edit made while viewing a secondary language would silently vanish — its
+      // segment ids (`loc-<lang>-...`) don't even appear in that array.
+      const saved = await projectService.updateLanguageSegments(project.id, translationLanguage, updatedLoc);
+      onUpdateProject(saved);
+      setEditingSegId(null);
+      onShowToast('Translation Updated', 'Segment translation saved.', 'success');
+    } catch (err) {
+      onShowToast('Save Failed', (err as Error).message, 'error');
+    }
   };
 
   /**
@@ -461,13 +488,48 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
         <div className="rounded-3xl glass-panel p-6 space-y-4">
           <div className="flex items-center justify-between pb-3 border-b border-[#E2E8F0]">
             <h3 className="text-sm font-bold text-[#0F172A]">
-              Dubbed Localization ({targetLang.name})
+              Dubbed Localization ({translationLang.name})
             </h3>
-            <span className="text-xs text-[#D94B2E] font-mono">{project.localizedSegments.length} Segments</span>
+            <span className="text-xs text-[#D94B2E] font-mono">{translationSegments.length} Segments</span>
           </div>
 
+          {/* Which language is showing — a project can hold several, and this is the only
+              place in the tab that lets you pick. */}
+          {projectLanguages.length > 1 && (
+            <div className="flex flex-wrap items-center gap-2 pb-1">
+              <span className="text-[11px] text-[#64748B]">Language:</span>
+              {projectLanguages.map((code) => {
+                const lang = LANGUAGES.find((l) => l.code === code);
+                if (!lang) return null;
+                const isActive = code === translationLanguage;
+                return (
+                  <button
+                    key={code}
+                    type="button"
+                    onClick={() => {
+                      setTranslationLanguage(code);
+                      setEditingSegId(null);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+                      isActive
+                        ? 'bg-[#F05637] text-white border-[#F05637]'
+                        : 'bg-[#F8FAFC] text-[#64748B] border-[#E2E8F0] hover:text-[#0F172A]'
+                    }`}
+                  >
+                    {lang.flag} {lang.name}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
           <div className="space-y-3">
-            {project.localizedSegments.map((loc) => {
+            {translationSegments.length === 0 && (
+              <p className="text-xs text-[#94A3B8] text-center py-8">
+                No translation yet for {translationLang.name}.
+              </p>
+            )}
+            {translationSegments.map((loc) => {
               const isEditing = editingSegId === loc.id;
               return (
                 <div key={loc.id} className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
@@ -479,7 +541,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                       <button
                         type="button"
                         onClick={() =>
-                          textToSpeechService.speakText(loc.translatedText, selectedVoice, project.targetLanguage, {
+                          textToSpeechService.speakText(loc.translatedText, translationVoice, translationLanguage, {
                             onError: (err) => onShowToast('Playback Failed', err.message, 'error'),
                           })
                         }

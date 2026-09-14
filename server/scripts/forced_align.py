@@ -21,6 +21,7 @@ place.
 
 Talks JSON over stdin/stdout so unicode never touches a Windows command line.
 """
+import io
 import json
 import os
 import sys
@@ -101,18 +102,69 @@ WINDOW_PAD_SECONDS = 0.35
 
 
 def respond(payload):
-    json.dump(payload, sys.stdout, ensure_ascii=False)
+    """One JSON object per line on stdout — the framing the persistent worker loop reads by."""
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    sys.stdout.write("\n")
     sys.stdout.flush()
-
-
-def fail(message):
-    respond({"ok": False, "error": message})
-    sys.exit(1)
 
 
 def models_for(language):
     """Candidate repos for a language, best first."""
     return ALIGN_MODELS.get("hi" if language == "hinglish" else language, [])
+
+
+# Loaded (model, processor) pairs, keyed by repo id, kept for the life of this process.
+# Bounded to 2: most sessions only ever touch one language, but a re-dub or a second
+# project in a different language shouldn't evict the first one just to load itself.
+_MODEL_CACHE: dict = {}
+_MODEL_CACHE_ORDER: list = []
+_MAX_CACHED_MODELS = 2
+
+
+def _touch_cache(key):
+    if key in _MODEL_CACHE_ORDER:
+        _MODEL_CACHE_ORDER.remove(key)
+    _MODEL_CACHE_ORDER.append(key)
+
+
+def _cache_model(key, model, processor):
+    _MODEL_CACHE[key] = (model, processor)
+    _touch_cache(key)
+    while len(_MODEL_CACHE_ORDER) > _MAX_CACHED_MODELS:
+        evicted = _MODEL_CACHE_ORDER.pop(0)
+        _MODEL_CACHE.pop(evicted, None)
+        print(f"[forced_align] evicted {evicted} from warm cache", file=sys.stderr)
+
+
+def get_model(language, token, Wav2Vec2ForCTC, Wav2Vec2Processor):
+    """
+    Returns (model, processor, repo, error) for `language`, reusing an already-loaded model
+    from this process's cache when one exists. `from_pretrained()` deserializing a
+    wav2vec2-large checkpoint is the single most expensive thing this worker does per
+    language — seconds, same order as the alignment inference itself — so paying it once
+    per warm-worker lifetime instead of once per request is the entire point of not
+    spawning a fresh process for every transcribe.
+    """
+    candidates = models_for(language)
+    if not candidates:
+        return None, None, None, f"No forced-alignment model is mapped for language '{language}'"
+
+    for candidate in candidates:
+        if candidate in _MODEL_CACHE:
+            _touch_cache(candidate)
+            model, processor = _MODEL_CACHE[candidate]
+            return model, processor, candidate, None
+
+    problems = []
+    for candidate in candidates:
+        try:
+            processor = Wav2Vec2Processor.from_pretrained(candidate, token=token)
+            model = Wav2Vec2ForCTC.from_pretrained(candidate, token=token).eval()
+            _cache_model(candidate, model, processor)
+            return model, processor, candidate, None
+        except Exception as err:
+            problems.append(f"{candidate}: {str(err).splitlines()[0][:120]}")
+    return None, None, None, "No alignment model could be loaded -> " + " | ".join(problems)
 
 
 def build_trellis(emission, tokens, blank_id=0):
@@ -282,23 +334,11 @@ def align_segment(model, processor, waveform, text, language, torch):
     ]
 
 
-def main():
-    # Tolerate a UTF-8 BOM: some shells prepend one when piping, and a BOM makes
-    # json.load fail in a way that looks nothing like the actual cause.
-    request = json.loads(sys.stdin.buffer.read().decode("utf-8-sig"))
-    if request.get("probe"):
-        from importlib.util import find_spec
-
-        respond({"ok": True, "ready": find_spec("transformers") is not None})
-        return
-
+def handle_align(request):
+    """Runs one alignment request against the (possibly cached) model and returns a response dict."""
     audio_path = request["audioPath"]
     language = request.get("language", "en")
     segments = request.get("segments", [])
-
-    candidates = models_for(language)
-    if not candidates:
-        fail(f"No forced-alignment model is mapped for language '{language}'")
 
     try:
         import numpy as np
@@ -306,32 +346,23 @@ def main():
         import torch
         from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
     except ImportError as err:
-        fail(f"Forced alignment needs `pip install transformers`: {err}")
+        return {"ok": False, "error": f"Forced alignment needs `pip install transformers`: {err}"}
 
     # A gated repo 403s until its terms are accepted, so walk the candidates and use the
     # first that actually loads rather than failing the whole pass on the preferred one.
     token = os.environ.get("HF_TOKEN") or None
-    model = processor = repo = None
-    problems = []
-    for candidate in candidates:
-        try:
-            processor = Wav2Vec2Processor.from_pretrained(candidate, token=token)
-            model = Wav2Vec2ForCTC.from_pretrained(candidate, token=token).eval()
-            repo = candidate
-            break
-        except Exception as err:
-            problems.append(f"{candidate}: {str(err).splitlines()[0][:120]}")
+    model, processor, repo, err = get_model(language, token, Wav2Vec2ForCTC, Wav2Vec2Processor)
     if model is None:
-        fail("No alignment model could be loaded -> " + " | ".join(problems))
+        return {"ok": False, "error": err}
 
     try:
         audio, rate = sf.read(audio_path, dtype="float32")
     except Exception as err:
-        fail(f"Could not read {audio_path}: {err}")
+        return {"ok": False, "error": f"Could not read {audio_path}: {err}"}
     if audio.ndim > 1:
         audio = audio.mean(axis=1)
     if rate != SAMPLE_RATE:
-        fail(f"Expected {SAMPLE_RATE}Hz audio, got {rate}Hz")
+        return {"ok": False, "error": f"Expected {SAMPLE_RATE}Hz audio, got {rate}Hz"}
 
     total_seconds = len(audio) / SAMPLE_RATE
     aligned = []
@@ -365,7 +396,55 @@ def main():
             }
         )
 
-    respond({"ok": True, "model": repo, "segments": aligned})
+    return {"ok": True, "model": repo, "segments": aligned}
+
+
+def main():
+    """
+    Persistent worker: reads one JSON request per line from stdin and writes one JSON
+    response per line to stdout, for as long as the caller keeps the pipe open, instead of
+    handling a single request and exiting.
+
+    The dominant cost on a cold run isn't the alignment math, it's standing up a fresh
+    interpreter and importing torch/transformers (seconds) and then deserializing a
+    wav2vec2 checkpoint from disk (more seconds) — both paid again on every request when
+    the caller spawns a new process each time. A warm worker pays the import cost once per
+    process lifetime for free (Python caches `sys.modules` regardless), and this loop adds
+    the other half: `get_model()` caches loaded checkpoints so a second segment, or a second
+    transcribe in the same language, only pays for the inference itself.
+    """
+    # TextIOWrapper over the raw buffer (rather than sys.stdin directly) so decoding is
+    # explicit utf-8 regardless of the console's codepage — Windows defaults stdin to
+    # cp1252, which mangles Devanagari and Tamil before json.loads ever sees it.
+    stream = io.TextIOWrapper(sys.stdin.buffer, encoding="utf-8", errors="replace", newline="\n")
+    first_line = True
+    for raw_line in stream:
+        # Tolerate a UTF-8 BOM on the very first line: some shells prepend one when piping.
+        line = raw_line.lstrip("﻿").strip() if first_line else raw_line.strip()
+        first_line = False
+        if not line:
+            continue
+
+        try:
+            request = json.loads(line)
+        except Exception as err:
+            respond({"ok": False, "error": f"Invalid request JSON: {err}"})
+            continue
+
+        if request.get("cmd") == "shutdown":
+            break
+
+        if request.get("probe"):
+            from importlib.util import find_spec
+
+            respond({"ok": True, "ready": find_spec("transformers") is not None})
+            continue
+
+        try:
+            respond(handle_align(request))
+        except Exception as err:  # one bad request must not take the whole warm worker down
+            print(f"[forced_align] request failed: {err}", file=sys.stderr)
+            respond({"ok": False, "error": str(err)})
 
 
 if __name__ == "__main__":

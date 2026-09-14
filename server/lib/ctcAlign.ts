@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { lipsyncDir, serverRoot } from './paths';
 import { env } from './env';
@@ -97,45 +98,125 @@ interface WorkerResponse {
   segments?: AlignedSegment[];
 }
 
-function runWorker(request: unknown): Promise<WorkerResponse> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(VENV_PYTHON, ['-W', 'ignore', WORKER_SCRIPT], {
-      cwd: serverRoot,
-      // HF_TOKEN is passed through so the gated AI4Bharat models can be used once their
-      // terms have been accepted; without it the worker falls back to ungated models.
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', HF_TOKEN: env.hfToken || '' },
-    });
+/**
+ * Kept warm rather than respawned per request: importing torch/transformers and
+ * deserializing a wav2vec2 checkpoint from disk are each seconds of fixed cost, and used to
+ * be paid again on *every* transcribe regardless of which cloud STT provider ran — the
+ * forced-alignment pass, not the STT call, was why a transcript could take longer locally
+ * than the network round-trip to Google/OpenAI/Sarvam suggested it should.
+ *
+ * Spawned lazily on first use (never at server startup) and shut down again after a period
+ * of inactivity, so the ~1-2GB a loaded model holds resident is only paid while dubbing is
+ * actually happening. Requests are serialized through one worker rather than pooled: this
+ * is CPU-bound local inference on one box, so N concurrent Python processes fighting over
+ * the same cores and each holding their own copy of the model in RAM is worse, not faster,
+ * than one warm process working through a queue.
+ */
+const IDLE_SHUTDOWN_MS = 10 * 60 * 1000;
 
-    let stdout = '';
-    let stderrTail = '';
-    proc.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    proc.stderr.on('data', (chunk: Buffer) => {
-      stderrTail = (stderrTail + chunk.toString()).slice(-4000);
-    });
+let worker: ChildProcessWithoutNullStreams | null = null;
+let current: {
+  proc: ChildProcessWithoutNullStreams;
+  resolve: (r: WorkerResponse) => void;
+  reject: (err: Error) => void;
+} | null = null;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleIdleShutdown(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    worker?.stdin.end();
+    worker = null;
+  }, IDLE_SHUTDOWN_MS);
+}
+
+function getWorker(): ChildProcessWithoutNullStreams {
+  if (worker) return worker;
+
+  const proc = spawn(VENV_PYTHON, ['-W', 'ignore', WORKER_SCRIPT], {
+    cwd: serverRoot,
+    // HF_TOKEN is passed through so the gated AI4Bharat models can be used once their
+    // terms have been accepted; without it the worker falls back to ungated models.
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', HF_TOKEN: env.hfToken || '' },
+  });
+
+  let stderrTail = '';
+  proc.stderr.on('data', (chunk: Buffer) => {
+    stderrTail = (stderrTail + chunk.toString()).slice(-4000);
+  });
+
+  // The worker responds with exactly one JSON line per request it receives, in order —
+  // matching lines to requests by arrival order (rather than a request id) is safe only
+  // because `runWorker` below never has more than one request in flight at a time. The
+  // `current.proc === proc` guard additionally protects against a stale event from a
+  // just-retired worker landing after a *new* worker has already taken its place (the idle
+  // shutdown closes stdin but the old process's `exit` event fires on its own time) —
+  // without it, a slow-to-exit old process could wrongly reject the new request.
+  createInterface({ input: proc.stdout }).on('line', (line) => {
+    if (!current || current.proc !== proc) return;
+    const waiting = current;
+    current = null;
+    try {
+      waiting.resolve(JSON.parse(line) as WorkerResponse);
+    } catch {
+      waiting.reject(new Error(`Forced alignment worker returned invalid JSON: ${line.slice(0, 200)}`));
+    }
+  });
+
+  proc.on('exit', () => {
+    if (worker === proc) worker = null;
+    if (!current || current.proc !== proc) return;
+    const waiting = current;
+    current = null;
+    waiting.reject(new Error(`Forced alignment worker exited unexpectedly: ${stderrTail || 'no output'}`));
+  });
+
+  worker = proc;
+  return proc;
+}
+
+// Calls are serialized through this chain — the worker is single-threaded (one request
+// processed at a time), and interleaving requests would break the line-arrival-order
+// matching in getWorker() above.
+let chain: Promise<unknown> = Promise.resolve();
+
+function runWorker(request: unknown): Promise<WorkerResponse> {
+  const result = chain.then(() => runOne(request));
+  chain = result.then(
+    () => undefined,
+    () => undefined
+  );
+  return result;
+}
+
+function runOne(request: unknown): Promise<WorkerResponse> {
+  return new Promise((resolve, reject) => {
+    const proc = getWorker();
+    if (idleTimer) clearTimeout(idleTimer);
 
     const timer = setTimeout(() => {
+      current = null;
       proc.kill();
+      worker = null;
       reject(new Error('Forced alignment timed out'));
     }, ALIGN_TIMEOUT_MS);
 
-    proc.on('error', (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-    proc.on('close', () => {
-      clearTimeout(timer);
-      try {
-        resolve(JSON.parse(stdout.trim()) as WorkerResponse);
-      } catch {
-        reject(new Error(`Forced alignment worker failed: ${stderrTail || stdout || 'no output'}`));
-      }
-    });
+    current = {
+      proc,
+      resolve: (r) => {
+        clearTimeout(timer);
+        scheduleIdleShutdown();
+        resolve(r);
+      },
+      reject: (err) => {
+        clearTimeout(timer);
+        scheduleIdleShutdown();
+        reject(err);
+      },
+    };
 
-    // The transcript goes over stdin as JSON, never through argv — a Windows command line
-    // mangles Devanagari and Tamil.
-    proc.stdin.write(JSON.stringify(request));
-    proc.stdin.end();
+    // The transcript goes over stdin as one JSON line, never through argv — a Windows
+    // command line mangles Devanagari and Tamil.
+    proc.stdin.write(`${JSON.stringify(request)}\n`);
   });
 }

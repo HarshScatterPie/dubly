@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import { DubbingProject } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
+import { ConfirmDialog } from './ConfirmDialog';
 
 interface ProjectsHistoryProps {
   projects: DubbingProject[];
@@ -36,6 +37,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [filterLang, setFilterLang] = useState('all');
+  const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   const filteredProjects = projects.filter((p) => {
     const matchesSearch =
@@ -251,7 +253,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                           </button>
                           <button
                             type="button"
-                            onClick={() => onDeleteProject(p.id)}
+                            onClick={() => setPendingDeleteId(p.id)}
                             className="p-1.5 rounded-lg text-[#94A3B8] hover:text-rose-600 hover:bg-[#F8FAFC] transition-colors"
                             title="Delete Project"
                           >
@@ -267,6 +269,18 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={pendingDeleteId !== null}
+        title="Delete this project?"
+        description="This permanently removes the project, its transcript, and any rendered dubs. This can't be undone."
+        confirmLabel="Delete Project"
+        onCancel={() => setPendingDeleteId(null)}
+        onConfirm={() => {
+          if (pendingDeleteId) onDeleteProject(pendingDeleteId);
+          setPendingDeleteId(null);
+        }}
+      />
     </div>
   );
 };

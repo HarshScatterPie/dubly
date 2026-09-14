@@ -20,8 +20,16 @@ interface StepProcessingProps {
   voiceName: string;
   videoPreviewUrl: string;
   progressPercent: number; // 0 to 100
-  secondsRemaining: number;
+  elapsedSeconds: number;
   statusMessage?: string;
+}
+
+/** mm:ss once a minute has passed; otherwise just "Ns" — no fake precision for a short wait. */
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return `${minutes}m ${String(rest).padStart(2, '0')}s`;
 }
 
 export const StepProcessing: React.FC<StepProcessingProps> = ({
@@ -29,7 +37,7 @@ export const StepProcessing: React.FC<StepProcessingProps> = ({
   voiceName,
   videoPreviewUrl,
   progressPercent,
-  secondsRemaining,
+  elapsedSeconds,
   statusMessage,
 }) => {
   const steps = [
@@ -101,7 +109,7 @@ export const StepProcessing: React.FC<StepProcessingProps> = ({
             </div>
             <div className="flex items-center justify-between text-xs text-slate-400 font-mono">
               <span>{statusMessage || 'Status: Synthesizing Audio'}</span>
-              <span>Estimated time remaining: {secondsRemaining}s</span>
+              <span>Elapsed: {formatElapsed(elapsedSeconds)}</span>
             </div>
           </div>
 

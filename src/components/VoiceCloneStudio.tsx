@@ -9,6 +9,7 @@ import { CustomVoice } from '../types';
 import { LANGUAGES } from '../data/mockData';
 import { voiceCloneService, CloneEngines } from '../services/voiceCloneService';
 import { textToSpeechService } from '../services/textToSpeechService';
+import { ConfirmDialog } from './ConfirmDialog';
 
 /** Matches the server's own bounds, so the mic UI can warn before an upload is rejected. */
 const MIN_SAMPLE_SECONDS = 5;
@@ -38,6 +39,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({ onShowToast,
   const [pendingClip, setPendingClip] = useState<{ blob: Blob; url: string } | null>(null);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [playingId, setPlayingId] = useState<string | null>(null);
+  const [pendingDeleteVoice, setPendingDeleteVoice] = useState<CustomVoice | null>(null);
 
   // "Try it" panel: which saved voice is being tested, with what words, in what language.
   // Kept per-voice rather than global so switching voices does not lose what was typed.
@@ -439,7 +441,7 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({ onShowToast,
                 </button>
                 <button
                   type="button"
-                  onClick={() => handleDelete(voice)}
+                  onClick={() => setPendingDeleteVoice(voice)}
                   className="p-2 shrink-0 rounded-lg text-[#64748B] hover:text-red-600 hover:bg-red-50 transition-colors"
                   title="Delete this voice and its recording"
                 >
@@ -495,6 +497,18 @@ export const VoiceCloneStudio: React.FC<VoiceCloneStudioProps> = ({ onShowToast,
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={pendingDeleteVoice !== null}
+        title="Delete this voice?"
+        description={`This permanently removes "${pendingDeleteVoice?.name ?? ''}" and its recording. Any dubs already rendered in this voice are unaffected, but you won't be able to generate new lines in it.`}
+        confirmLabel="Delete Voice"
+        onCancel={() => setPendingDeleteVoice(null)}
+        onConfirm={() => {
+          if (pendingDeleteVoice) void handleDelete(pendingDeleteVoice);
+          setPendingDeleteVoice(null);
+        }}
+      />
     </div>
   );
 };

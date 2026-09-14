@@ -1,0 +1,21 @@
+# Mirrors ResembleAI's own ZeroGPU Space rather than installing chatterbox-tts from
+# PyPI, which pins torch==2.6.0 and cannot run on ZeroGPU (needs 2.8+). torch is left
+# unpinned so the Space image supplies a compatible build.
+spaces
+gradio
+numpy==1.26.0
+resampy==0.4.3
+librosa==0.10.0
+s3tokenizer
+transformers==4.46.3
+diffusers==0.29.0
+omegaconf==2.3.0
+resemble-perth==1.0.1
+silero-vad==5.1.2
+conformer==0.3.2
+safetensors
+soundfile
+
+# Language-specific text processing, matching the upstream Space.
+spacy_pkuseg
+pykakasi>=2.2.0

@@ -1,0 +1,26 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+server/credentials/
+server/tmp/
+*.json.key
+gcp-service-account*.json
+firebase-service-account*.json
+
+# Local model runtimes / caches — large, machine-specific, reproducible from setup docs
+server/lipsync/venv/
+server/lipsync/wav2lip_onnx/temp/
+server/lipsync/wav2lip_onnx/checkpoints/*.onnx
+server/cache/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# HF Space clone assets (mirrors an external repo, not project source)
+hf-space/__pycache__/
+

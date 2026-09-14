@@ -37,12 +37,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   onShowToast,
 }) => {
-  const { user, signOut } = useAuth();
+  const { user, updateDisplayName, signOut } = useAuth();
   const [activeTab, setActiveTab] = useState<'preferences' | 'profile'>('preferences');
   const [defaultTargetLang, setDefaultTargetLang] = useState('hi');
   const [defaultVoice, setDefaultVoice] = useState('riya');
   const [defaultStyle, setDefaultStyle] = useState('natural');
   const [adaptExpressions, setAdaptExpressions] = useState(true);
+  const [displayName, setDisplayName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -54,7 +55,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setDefaultStyle(saved.defaultStyle);
       setAdaptExpressions(saved.adaptExpressions);
     }
-  }, [isOpen]);
+    setDisplayName(user?.displayName || '');
+  }, [isOpen, user?.displayName]);
 
   if (!isOpen) return null;
 
@@ -65,6 +67,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         PREFS_STORAGE_KEY,
         JSON.stringify({ defaultTargetLang, defaultVoice, defaultStyle, adaptExpressions })
       );
+      const trimmedName = displayName.trim();
+      if (trimmedName && trimmedName !== (user?.displayName || '')) {
+        await updateDisplayName(trimmedName);
+      }
       onShowToast('Settings Saved', 'Studio configuration updated.', 'success');
       onClose();
     } catch (err) {
@@ -200,9 +206,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                 <label className="text-[#64748B] font-bold block">Account Display Name</label>
                 <input
                   type="text"
-                  readOnly
-                  value={user?.displayName || 'Unnamed'}
-                  className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="Your name"
+                  className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none focus:border-[#F05637]"
                 />
               </div>
 

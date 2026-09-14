@@ -10,6 +10,7 @@ import {
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
+  updateProfile,
   type User,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
@@ -21,6 +22,7 @@ interface AuthContextValue {
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   signUpWithEmail: (email: string, password: string) => Promise<void>;
+  updateDisplayName: (displayName: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -69,13 +71,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
+  /**
+   * There was previously no way to set this at all — Google sign-in fills it in, but
+   * email/password accounts (and the Settings modal's "Account Display Name" field) had
+   * nothing to write to, so it just sat on "Unnamed" forever.
+   */
+  const updateDisplayName = async (displayName: string) => {
+    if (!auth.currentUser) throw new Error('Not signed in');
+    await updateProfile(auth.currentUser, { displayName });
+    // updateProfile mutates the SDK's internal user record but doesn't fire
+    // onAuthStateChanged, so this context's own `user` state needs a manual nudge or the
+    // new name won't show up anywhere until the next full page load.
+    setUser({ ...auth.currentUser } as User);
+  };
+
   const signOut = async () => {
     await firebaseSignOut(auth);
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, loading, error, signInWithGoogle, signInWithEmail, signUpWithEmail, signOut }}
+      value={{ user, loading, error, signInWithGoogle, signInWithEmail, signUpWithEmail, updateDisplayName, signOut }}
     >
       {children}
     </AuthContext.Provider>

@@ -37,13 +37,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onClose,
   onShowToast,
 }) => {
-  const { user, updateDisplayName, signOut } = useAuth();
+  const { user, profile, signOut } = useAuth();
   const [activeTab, setActiveTab] = useState<'preferences' | 'profile'>('preferences');
   const [defaultTargetLang, setDefaultTargetLang] = useState('hi');
   const [defaultVoice, setDefaultVoice] = useState('riya');
   const [defaultStyle, setDefaultStyle] = useState('natural');
   const [adaptExpressions, setAdaptExpressions] = useState(true);
-  const [displayName, setDisplayName] = useState('');
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -55,8 +54,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
       setDefaultStyle(saved.defaultStyle);
       setAdaptExpressions(saved.adaptExpressions);
     }
-    setDisplayName(user?.displayName || '');
-  }, [isOpen, user?.displayName]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -67,10 +65,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         PREFS_STORAGE_KEY,
         JSON.stringify({ defaultTargetLang, defaultVoice, defaultStyle, adaptExpressions })
       );
-      const trimmedName = displayName.trim();
-      if (trimmedName && trimmedName !== (user?.displayName || '')) {
-        await updateDisplayName(trimmedName);
-      }
       onShowToast('Settings Saved', 'Studio configuration updated.', 'success');
       onClose();
     } catch (err) {
@@ -202,36 +196,56 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {activeTab === 'profile' && (
             <div className="space-y-4">
-              <div className="space-y-1.5">
-                <label className="text-[#64748B] font-bold block">Account Display Name</label>
-                <input
-                  type="text"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  placeholder="Your name"
-                  className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none focus:border-[#F05637]"
-                />
-              </div>
+              {profile === undefined ? (
+                <p className="text-[#94A3B8]">Loading profile...</p>
+              ) : (
+                <>
+                  <div className="space-y-1.5">
+                    <label className="text-[#64748B] font-bold block">Account Display Name</label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={profile?.name || user?.displayName || 'Unnamed'}
+                      className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none"
+                    />
+                    <p className="text-[10px] text-[#94A3B8]">
+                      Managed in ScatterStudio, not here — this is the same profile every ScatterStudio tool uses.
+                    </p>
+                  </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[#64748B] font-bold block">Email Address</label>
-                <input
-                  type="email"
-                  readOnly
-                  value={user?.email || ''}
-                  className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none"
-                />
-              </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[#64748B] font-bold block">Email Address</label>
+                    <input
+                      type="email"
+                      readOnly
+                      value={user?.email || ''}
+                      className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none"
+                    />
+                  </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[#64748B] font-bold block">Workspace</label>
-                <input
-                  type="text"
-                  readOnly
-                  value="ScatterStudio"
-                  className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none"
-                />
-              </div>
+                  <div className="space-y-1.5">
+                    <label className="text-[#64748B] font-bold block">Workspace</label>
+                    <input
+                      type="text"
+                      readOnly
+                      value={profile?.workspace || 'ScatterStudio'}
+                      className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none"
+                    />
+                  </div>
+
+                  {profile?.role && (
+                    <div className="space-y-1.5">
+                      <label className="text-[#64748B] font-bold block">Role</label>
+                      <input
+                        type="text"
+                        readOnly
+                        value={profile.role}
+                        className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] focus:outline-none capitalize"
+                      />
+                    </div>
+                  )}
+                </>
+              )}
 
               <button
                 type="button"

@@ -64,10 +64,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isMobileOpen = false,
   onCloseMobile,
 }) => {
-  const { user, signOut } = useAuth();
+  const { user, profile, signOut } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
 
-  const displayName = user?.displayName || user?.email || 'Studio User';
+  // ScatterStudio's own shared profile first — Firebase Auth's displayName is usually
+  // empty (only Google sign-in ever fills it), so falling back to it first showed
+  // "Studio User" for most accounts even when their real name was one API call away.
+  const displayName = profile?.name || user?.displayName || user?.email || 'Studio User';
   const initials = displayName
     .split(/\s+/)
     .map((p) => p[0])

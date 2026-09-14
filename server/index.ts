@@ -12,6 +12,7 @@ import { projectsRouter } from './routes/projects';
 import { dubRouter } from './routes/dub';
 import { ttsRouter } from './routes/tts';
 import { voicesRouter } from './routes/voices';
+import { profileRouter } from './routes/profile';
 
 const app = express();
 
@@ -30,6 +31,7 @@ app.use((req, res, next) => {
 app.get('/api/healthz', (_req, res) => res.json({ ok: true }));
 
 app.use('/api/health', requireAuth, healthRouter);
+app.use('/api/profile', requireAuth, profileRouter);
 app.use('/api/settings', requireAuth, settingsRouter);
 app.use('/api/usage', requireAuth, usageRouter);
 app.use('/api/tts', requireAuth, ttsRouter);

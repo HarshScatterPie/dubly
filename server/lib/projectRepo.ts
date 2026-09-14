@@ -240,3 +240,31 @@ export async function setSettings(uid: string, settings: Partial<ProviderSetting
   const snap = await ref.get();
   return { ...DEFAULT_PROVIDER_SETTINGS, ...(snap.data() as Partial<ProviderSettings>) };
 }
+
+export interface UserProfile {
+  name: string;
+  role: string;
+  workspace: string;
+}
+
+/**
+ * Reads the user's profile from `users/{uid}` directly — the parent doc, not one of Dubly's
+ * own subcollections under it. This project's Firestore is shared with the rest of
+ * ScatterStudio, and that doc (name/role/workspace/api_key/...) is provisioned by whatever
+ * ScatterStudio's own onboarding is, not by Dubly. Firebase Auth's displayName is usually
+ * empty (only Google sign-in ever fills it), so this is the actual source of truth for a
+ * user's name here — and the one other ScatterStudio tools already show.
+ *
+ * Deliberately whitelists fields rather than returning the doc as-is: it also holds
+ * `api_key`, which must never reach the client.
+ */
+export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  const snap = await db.collection('users').doc(uid).get();
+  if (!snap.exists) return null;
+  const data = snap.data() || {};
+  return {
+    name: typeof data.name === 'string' ? data.name : '',
+    role: typeof data.role === 'string' ? data.role : '',
+    workspace: typeof data.workspace === 'string' ? data.workspace : '',
+  };
+}

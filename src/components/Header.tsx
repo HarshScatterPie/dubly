@@ -3,12 +3,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Menu,
   Plus,
   VolumeX,
   Search,
+  Settings,
 } from 'lucide-react';
 import { NavigationTab } from '../types';
 
@@ -17,6 +18,7 @@ interface HeaderProps {
   onOpenMobileMenu: () => void;
   onOpenNewProject: () => void;
   onOpenSettings: () => void;
+  onSearch: (query: string) => void;
   isPlayingAudio: boolean;
   onStopAudio: () => void;
 }
@@ -25,9 +27,12 @@ export const Header: React.FC<HeaderProps> = ({
   activeTab,
   onOpenMobileMenu,
   onOpenNewProject,
+  onOpenSettings,
+  onSearch,
   isPlayingAudio,
   onStopAudio,
 }) => {
+  const [searchQuery, setSearchQuery] = useState('');
   const getTabDetails = (tab: NavigationTab) => {
     switch (tab) {
       case 'dashboard':
@@ -45,7 +50,7 @@ export const Header: React.FC<HeaderProps> = ({
       case 'usage':
         return { title: 'Usage & Quotas', subtitle: 'Monitor minutes, storage, and engine allocation' };
       case 'settings':
-        return { title: 'Settings & Integrations', subtitle: 'Configure neural models, voices, and export presets' };
+        return { title: 'Settings', subtitle: 'Dubbing preferences and workspace profile' };
       default:
         // Without this, adding a tab to NavigationTab and forgetting to name it here
         // returns undefined and the header crashes the whole page on `details.title`.
@@ -76,15 +81,23 @@ export const Header: React.FC<HeaderProps> = ({
           <p className="text-xs text-muted-foreground hidden md:block mt-0.5 truncate">{details.subtitle}</p>
         </div>
 
-        {/* Desktop search */}
+        {/* Desktop search — submits to Project History, which is where results land */}
         <div className="hidden md:flex items-center gap-2 flex-1 max-w-md ml-4">
-          <div className="relative w-full">
+          <form
+            className="relative w-full"
+            onSubmit={(e) => {
+              e.preventDefault();
+              onSearch(searchQuery);
+            }}
+          >
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
               placeholder="Search projects…"
               className="w-full pl-9 pr-3 py-2 rounded-md bg-white border border-border text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
             />
-          </div>
+          </form>
         </div>
 
         <div className="ml-auto flex items-center gap-3">
@@ -98,6 +111,15 @@ export const Header: React.FC<HeaderProps> = ({
               <span>Stop Audio</span>
             </button>
           )}
+
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-label="Open settings"
+            className="hidden sm:flex p-2 rounded-md text-slate-500 hover:text-foreground hover:bg-slate-100 transition-colors"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
 
           <button
             type="button"

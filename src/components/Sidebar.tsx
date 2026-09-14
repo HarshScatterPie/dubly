@@ -44,7 +44,7 @@ const NAV = [
 
 const NAV_BOTTOM = [
   { id: 'usage' as NavigationTab, label: 'Usage & Limits', Icon: BarChart3 },
-  { id: 'settings' as NavigationTab, label: 'Settings & APIs', Icon: Settings },
+  { id: 'settings' as NavigationTab, label: 'Settings', Icon: Settings },
 ];
 
 // 5 most-used destinations for the mobile bottom tab bar

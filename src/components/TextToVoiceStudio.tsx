@@ -57,7 +57,6 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
 
   /** Your voices first — a returning user is looking for those, not for voice #400. */
   const availableVoices = React.useMemo(() => [...customVoices, ...VOICES], [customVoices]);
-  const [selectedProviderFilter, setSelectedProviderFilter] = useState<'all' | 'google' | 'sarvam' | 'openai'>('all');
   const [speed, setSpeed] = useState<number>(1.0);
   const [pitch, setPitch] = useState<number>(1.0);
   const [emotion, setEmotion] = useState<VoiceEmotion>('friendly');
@@ -433,33 +432,11 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
             <div className="space-y-2.5">
               <div className="flex items-center justify-between">
                 <label className="text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
-                  Filter by AI Engine
+                  Voices
                 </label>
                 <span className="text-[10px] text-[#94A3B8] font-mono">
                   {availableVoices.length} Voices
                 </span>
-              </div>
-
-              {/* Provider Pills */}
-              <div className="grid grid-cols-3 gap-1 p-1 bg-[#F8FAFC] rounded-xl border border-[#E2E8F0]">
-                {[
-                  { id: 'all', label: 'All', icon: '⚡' },
-                  { id: 'vertex', label: 'Google', icon: '🔷' },
-                  { id: 'sarvam', label: 'Sarvam', icon: '🟧' },
-                ].map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => setSelectedProviderFilter(p.id as any)}
-                    className={`py-1 px-1.5 rounded-lg text-[10px] font-bold text-center transition-all ${
-                      selectedProviderFilter === p.id
-                        ? 'bg-[#F05637] text-white shadow-sm'
-                        : 'text-[#64748B] hover:text-[#0F172A]'
-                    }`}
-                  >
-                    <span>{p.icon}</span> <span>{p.label}</span>
-                  </button>
-                ))}
               </div>
 
               {/* Clone-your-voice entry point: the reason a user comes to this panel at
@@ -485,12 +462,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
               </button>
 
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
-                {availableVoices.filter((v) => {
-                  // A cloned voice has no engine, so an engine filter would hide it.
-                  if (v.provider === 'clone') return true;
-                  if (selectedProviderFilter !== 'all' && v.provider !== selectedProviderFilter) return false;
-                  return true;
-                }).map((v) => {
+                {availableVoices.map((v) => {
                   const isSelected = selectedVoiceId === v.id;
                   const isPreviewing = previewingVoiceId === v.id;
                   return (

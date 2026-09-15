@@ -101,9 +101,9 @@ interface WorkerResponse {
 /**
  * Kept warm rather than respawned per request: importing torch/transformers and
  * deserializing a wav2vec2 checkpoint from disk are each seconds of fixed cost, and used to
- * be paid again on *every* transcribe regardless of which cloud STT provider ran — the
- * forced-alignment pass, not the STT call, was why a transcript could take longer locally
- * than the network round-trip to Google/OpenAI/Sarvam suggested it should.
+ * be paid again on *every* transcribe — the forced-alignment pass, not the Gemini STT
+ * call, was why a transcript could take longer locally than the network round-trip
+ * suggested it should.
  *
  * Spawned lazily on first use (never at server startup) and shut down again after a period
  * of inactivity, so the ~1-2GB a loaded model holds resident is only paid while dubbing is

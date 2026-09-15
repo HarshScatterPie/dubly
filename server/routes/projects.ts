@@ -284,9 +284,9 @@ projectsRouter.post('/:id/transcribe', async (req, res) => {
     recordStt(costMeter, sttProviderUsed, (await probeMedia(audioLocalPath)).durationSeconds);
     console.log(`[cost] transcribe ${req.params.id}: ${summarizeCost(costMeter)}`);
 
-    // STT providers give accurate text but unreliable timing (Gemini estimates and drifts
-    // progressively; Sarvam returned a single blob spanning the whole clip). Timing is
-    // therefore rebuilt from the audio in two passes, coarse then fine.
+    // Gemini gives accurate text but unreliable timing (it estimates and drifts
+    // progressively across a long clip). Timing is therefore rebuilt from the audio in
+    // two passes, coarse then fine.
     //
     // Pass 1 (always): voice-activity detection finds where speech physically is, and the
     // transcript is partitioned onto those regions. This decides *which* stretch of audio
@@ -366,8 +366,7 @@ projectsRouter.post('/:id/translate', async (req, res) => {
   try {
     const settings = await getSettings(req.uid!);
     // Some STT chunks (e.g. a silent lead-in) come back with empty text — sending those
-    // to a translation provider is meaningless and some (Sarvam) reject empty input
-    // outright, failing the whole batch. Skip them; they map to an empty translation.
+    // to translation is meaningless. Skip them; they map to an empty translation.
     const translatable = stored.transcriptSegments.filter((s) => s.text.trim().length > 0);
     const sourceLines = translatable.map((s) => ({
       id: s.id,

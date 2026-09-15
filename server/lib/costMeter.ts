@@ -10,10 +10,6 @@ const USD_TO_INR = 83;
 
 // Google Cloud TTS list prices per 1M characters.
 const GOOGLE_CHIRP3_HD_PER_1M_USD = 30;
-// Sarvam Bulbul v3: ₹30 per 10K characters.
-const SARVAM_TTS_PER_1K_INR = 3;
-// Sarvam Saaras: ₹30 per hour of audio.
-const SARVAM_STT_PER_HOUR_INR = 30;
 // Gemini 2.5 Flash audio input, ~$1.00 per 1M tokens at roughly 32 audio tokens/second.
 const GEMINI_AUDIO_TOKENS_PER_SECOND = 32;
 const GEMINI_AUDIO_PER_1M_TOKENS_USD = 1;
@@ -41,13 +37,11 @@ export function recordStt(meter: CostMeter, provider: string, seconds: number): 
 }
 
 function ttsCostInr(provider: string, chars: number): number {
-  if (provider === 'sarvam') return (chars / 1000) * SARVAM_TTS_PER_1K_INR;
   if (provider === 'vertex') return (chars / 1_000_000) * GOOGLE_CHIRP3_HD_PER_1M_USD * USD_TO_INR;
   return 0;
 }
 
 function sttCostInr(provider: string, seconds: number): number {
-  if (provider === 'sarvam') return (seconds / 3600) * SARVAM_STT_PER_HOUR_INR;
   if (provider === 'vertex') {
     const tokens = seconds * GEMINI_AUDIO_TOKENS_PER_SECOND;
     return (tokens / 1_000_000) * GEMINI_AUDIO_PER_1M_TOKENS_USD * USD_TO_INR;

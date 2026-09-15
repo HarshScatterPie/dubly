@@ -48,10 +48,8 @@ export interface Voice {
   pitch: number;
   speed: number;
   /** Dedicated provider powering this voice. `clone` means it is the user's own voice, synthesized locally from their recording. */
-  provider: 'vertex' | 'sarvam' | 'clone';
+  provider: 'vertex' | 'clone';
   providerVoice: {
-    openai?: string;
-    sarvam?: string;
     vertex?: string;
     /** The cloned voice's own id — the reference recording is looked up from it at synthesis time. */
     clone?: string;
@@ -88,7 +86,7 @@ export interface TranscriptSegment {
   speaker: string;
   wordsCount: number;
   confidence: number;
-  /** Per-word timing within this segment — real when the STT provider supports it (Sarvam, OpenAI Whisper), proportionally estimated otherwise (Vertex/Gemini). Drives karaoke-style caption highlighting. */
+  /** Per-word timing within this segment — proportionally estimated from Gemini's segment-level timestamps (Vertex has no native word-level ASR). Refined further by forced alignment when available. Drives karaoke-style caption highlighting. */
   words?: TranscriptWord[];
 }
 

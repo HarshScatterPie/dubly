@@ -20,9 +20,9 @@ export interface TranscriptionResult {
 
 export class SpeechToTextService {
   /**
-   * Runs real speech-to-text (Sarvam saaras / OpenAI Whisper, routed server-side) on the
-   * video already uploaded/imported to `projectId`. Speaker count/voice-map come from a
-   * best-effort Gemini diarization pass run server-side right after transcription.
+   * Runs real speech-to-text (Gemini on Vertex AI, server-side) on the video already
+   * uploaded/imported to `projectId`. Speaker count/voice-map come from a best-effort
+   * Gemini diarization pass run server-side right after transcription.
    */
   public async transcribe(projectId: string): Promise<TranscriptionResult> {
     const {

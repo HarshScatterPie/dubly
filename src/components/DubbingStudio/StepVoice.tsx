@@ -86,7 +86,6 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   onShowToast,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<VoiceCategory | 'all'>('all');
-  const [selectedProviderFilter, setSelectedProviderFilter] = useState<'all' | 'vertex' | 'sarvam'>('all');
   const [activePlayingVoiceId, setActivePlayingVoiceId] = useState<string | null>(null);
 
   // Everything on this screen configures one language at a time: the voice, the
@@ -96,12 +95,6 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   const allTargetLangs = (targetLanguageCodes?.length ? targetLanguageCodes : [targetLanguageCode])
     .map((code) => LANGUAGES.find((l) => l.code === code))
     .filter((l): l is (typeof LANGUAGES)[number] => Boolean(l));
-
-  const providerFilters: { id: 'all' | 'vertex' | 'sarvam'; label: string; icon: string }[] = [
-    { id: 'all', label: 'All AI Engines', icon: '⚡' },
-    { id: 'vertex', label: 'Google Cloud TTS', icon: '🔷' },
-    { id: 'sarvam', label: 'Sarvam AI (Indic)', icon: '🟧' },
-  ];
 
   const categories: { id: VoiceCategory | 'all'; label: string }[] = [
     { id: 'all', label: 'All Categories' },
@@ -124,13 +117,9 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   // for, and there are only ever a handful of them against a catalog of thousands.
   const availableVoices = [...customVoices, ...VOICES];
 
-  const filteredVoices = availableVoices.filter((voice) => {
-    // A cloned voice belongs to no engine, so an engine filter would hide it entirely.
-    if (voice.provider === 'clone') return selectedCategory === 'all' || voice.category === selectedCategory;
-    if (selectedCategory !== 'all' && voice.category !== selectedCategory) return false;
-    if (selectedProviderFilter !== 'all' && voice.provider !== selectedProviderFilter) return false;
-    return true;
-  });
+  const filteredVoices = availableVoices.filter(
+    (voice) => selectedCategory === 'all' || voice.category === selectedCategory
+  );
 
   const handlePlayVoicePreview = async (e: React.MouseEvent, voice: Voice) => {
     e.stopPropagation();
@@ -170,7 +159,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           <p className="text-xs text-slate-400 mt-0.5">
             {allTargetLangs.length > 1
               ? 'Every language gets its own voice — switch language below to set the others'
-              : 'Select high-fidelity neural voices divided by dedicated AI providers (Google Cloud, Sarvam AI, OpenAI)'}
+              : 'Select high-fidelity Google Cloud Chirp3-HD neural voices, or use your own cloned voice'}
           </p>
         </div>
 
@@ -242,54 +231,27 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
         </div>
       )}
 
-      {/* Primary Provider Filter Bar */}
-      <div className="p-2 rounded-2xl glass-panel border border-[#E2E8F0] space-y-2">
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[11px] font-bold uppercase tracking-wider text-[#64748B]">
-            Filter By AI Voice Provider:
-          </span>
-          <span className="text-[10px] text-[#94A3B8] font-mono">
-            Showing {filteredVoices.length} of {VOICES.length} voices
-          </span>
-        </div>
-        <div className="grid grid-cols-3 gap-2">
-          {providerFilters.map((prov) => {
-            const isActive = selectedProviderFilter === prov.id;
-            return (
-              <button
-                key={prov.id}
-                type="button"
-                onClick={() => setSelectedProviderFilter(prov.id)}
-                className={`flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl text-xs font-bold transition-all ${
-                  isActive
-                    ? 'bg-[#F05637] text-white shadow-[0_0_15px_rgba(240,86,55,0.35)] ring-1 ring-[#F05637]'
-                    : 'bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] border border-[#E2E8F0] hover:bg-white'
-                }`}
-              >
-                <span>{prov.icon}</span>
-                <span>{prov.label}</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
       {/* Category Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar pb-1">
-        {categories.map((cat) => (
-          <button
-            key={cat.id}
-            type="button"
-            onClick={() => setSelectedCategory(cat.id)}
-            className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
-              selectedCategory === cat.id
-                ? 'bg-[#0F172A] text-white shadow-sm'
-                : 'bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] border border-[#E2E8F0]'
-            }`}
-          >
-            {cat.label}
-          </button>
-        ))}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar pb-1">
+          {categories.map((cat) => (
+            <button
+              key={cat.id}
+              type="button"
+              onClick={() => setSelectedCategory(cat.id)}
+              className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+                selectedCategory === cat.id
+                  ? 'bg-[#0F172A] text-white shadow-sm'
+                  : 'bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] border border-[#E2E8F0]'
+              }`}
+            >
+              {cat.label}
+            </button>
+          ))}
+        </div>
+        <span className="text-[10px] text-[#94A3B8] font-mono whitespace-nowrap">
+          Showing {filteredVoices.length} of {VOICES.length} voices
+        </span>
       </div>
 
       {/* Large Voice Cards Grid */}

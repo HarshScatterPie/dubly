@@ -56,8 +56,7 @@ async function computeWaveformPeaks(dataUri: string, sampleCount = 64): Promise<
 
 export class TextToSpeechService {
   /**
-   * Generates natural speech audio via Sarvam Bulbul / Google (Vertex Gemini) / OpenAI TTS,
-   * routed server-side by language + user provider preference.
+   * Generates natural speech audio via Google Cloud TTS (Chirp3-HD), routed server-side.
    */
   public async generateSpeech(text: string, options: TTSOptions): Promise<TTSResult> {
     const { audioUrl, durationSeconds, provider } = await apiPost<GenerateResponse>('/api/tts/generate', {

@@ -8,8 +8,8 @@ import { projectService } from './projectService';
 
 export class TranslationService {
   /**
-   * Translates the project's transcript into every language in `targetLangCodes` (Vertex
-   * Gemini / OpenAI / Sarvam, routed server-side per language + user provider preference).
+   * Translates the project's transcript into every language in `targetLangCodes`, via
+   * Gemini on Vertex AI, server-side.
    */
   public async translateSegments(
     projectId: string,

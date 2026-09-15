@@ -1,28 +1,18 @@
 import type { TranscriptSegment, Voice } from '../../src/types';
-import { getLanguageBcp47, getLanguageName, isIndicLanguage, isSarvamSupportedLanguage, toSarvamLanguageCode } from './languageMeta';
-import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments } from './vertexClient';
+import { getLanguageBcp47, getLanguageName } from './languageMeta';
+import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult } from './vertexClient';
 import { googleSynthesizeSpeech, isGoogleTtsConfigured } from './googleTtsClient';
 import { readTtsCache, ttsCacheKey, writeTtsCache } from './ttsCache';
-import {
-  isOpenAIConfigured,
-  openaiSynthesizeSpeech,
-  openaiTranscribe,
-  openaiTranslateSegments,
-  type OpenAIVoiceId,
-  type RawSttResult,
-} from './openaiClient';
-import {
-  isSarvamConfigured,
-  sarvamSynthesizeSpeech,
-  sarvamTranscribeChunked,
-  sarvamTranslateSegments,
-} from './sarvamClient';
 import { canCloneInLanguage, isVoiceCloneAvailable, synthesizeClonedSpeech } from './voiceClone';
 import { canSpaceCloneLanguage, isSpaceCloneConfigured, synthesizeViaSpace } from './spaceClone';
 
-export type SttProvider = 'auto' | 'sarvam' | 'openai' | 'vertex';
-export type TranslateProvider = 'auto' | 'vertex' | 'openai' | 'sarvam';
-export type TtsProvider = 'auto' | 'sarvam' | 'vertex' | 'openai';
+// Every provider here is Google's own (Vertex AI / Gemini for STT + translation, Google
+// Cloud TTS for synthesis). 'auto' and 'vertex' are equivalent today — the type keeps the
+// shape callers and stored per-project settings already expect, in case a second Google
+// engine (e.g. a dedicated Speech-to-Text model) is added later.
+export type SttProvider = 'auto' | 'vertex';
+export type TranslateProvider = 'auto' | 'vertex';
+export type TtsProvider = 'auto' | 'vertex';
 
 export interface ProviderSettings {
   sttProvider: SttProvider;
@@ -37,29 +27,32 @@ export const DEFAULT_PROVIDER_SETTINGS: ProviderSettings = {
 };
 
 export interface ProviderStatus {
-  sarvam: boolean;
-  openai: boolean;
   vertex: boolean;
 }
 
 export function getProviderStatus(): ProviderStatus {
-  return {
-    sarvam: isSarvamConfigured(),
-    openai: isOpenAIConfigured(),
-    vertex: isVertexConfigured(),
-  };
+  return { vertex: isVertexConfigured() };
 }
 
-/** Quota/rate-limit failures are transient and worth waiting out, unlike a bad request. */
-function isRateLimitError(err: unknown): boolean {
-  const candidate = err as { status?: number; message?: string };
-  if (candidate?.status === 429) return true;
-  return /RESOURCE_EXHAUSTED|Quota exceeded|rate limit|too many requests/i.test(String(candidate?.message ?? err));
+/**
+ * Rate limits, transient server errors and dropped connections are all worth waiting out
+ * rather than failing the render for, unlike a genuinely bad request. This matters more
+ * now than it used to: with Sarvam/OpenAI gone there is no second TTS provider to fall
+ * through to, so a blip on Google's end used to be absorbed by a fallback and now has to
+ * be absorbed by retrying the same call instead.
+ */
+function isTransientTtsError(err: unknown): boolean {
+  const candidate = err as { status?: number; code?: string; message?: string };
+  if (candidate?.status === 429 || candidate?.status === 500 || candidate?.status === 503) return true;
+  if (candidate?.code === 'ECONNRESET' || candidate?.code === 'ETIMEDOUT' || candidate?.code === 'ECONNREFUSED') return true;
+  return /RESOURCE_EXHAUSTED|UNAVAILABLE|INTERNAL|Quota exceeded|rate limit|too many requests|ECONNRESET|ETIMEDOUT|fetch failed/i.test(
+    String(candidate?.message ?? err)
+  );
 }
 
-const TTS_RATE_LIMIT_BACKOFF_MS = [4000, 10000, 20000];
+const TTS_RETRY_BACKOFF_MS = [4000, 10000, 20000];
 
-/** Converts one provider's raw {start,end,text,words?} segments into app-shaped TranscriptSegment[]. Speaker labels are filled in separately by the diarization pass, not here. */
+/** Converts the raw {start,end,text,words?} segments Vertex returns into app-shaped TranscriptSegment[]. Speaker labels are filled in separately by the diarization pass, not here. */
 function toTranscriptSegments(raw: RawSttResult['segments']): TranscriptSegment[] {
   return raw.map((seg, idx) => ({
     id: `seg-${idx + 1}`,
@@ -77,53 +70,12 @@ export async function routeTranscribe(
   filePath: string,
   targetLanguageCode: string,
   override: SttProvider
-): Promise<{ provider: 'sarvam' | 'openai' | 'vertex'; language: string; segments: TranscriptSegment[] }> {
-  type Attempt = { provider: 'sarvam' | 'openai' | 'vertex'; run: () => Promise<RawSttResult> };
-
-  const sarvamAttempt: Attempt = {
-    provider: 'sarvam',
-    // Chunked internally to work around Sarvam's 30s synchronous-call limit. Always
-    // auto-detect ('unknown') — this used to be handed the *dub target* language, which
-    // silently forced Sarvam to transcribe whatever was actually said (e.g. English NASA
-    // audio) as if it were spoken in the target language (e.g. Hindi), since the target
-    // and source language have no reliable relationship to each other.
-    run: () => sarvamTranscribeChunked(filePath, 'unknown'),
-  };
-  const openaiAttempt: Attempt = { provider: 'openai', run: () => openaiTranscribe(filePath) };
-  const vertexAttempt: Attempt = { provider: 'vertex', run: () => vertexTranscribe(filePath) };
-
-  // The source language is unknown until after transcription, so the *target* dub
-  // language is not a valid signal for provider choice (dubbing INTO Hindi very often
-  // means the SOURCE is English, not Hindi) — default order is fixed instead, favoring
-  // the general-purpose multilingual engines; Sarvam's Indic specialization is opted
-  // into via an explicit provider override, not guessed from the target language.
-  let ordered: Attempt[];
-  if (override === 'sarvam') ordered = [sarvamAttempt, vertexAttempt, openaiAttempt];
-  else if (override === 'openai') ordered = [openaiAttempt, vertexAttempt];
-  else if (override === 'vertex') ordered = [vertexAttempt, openaiAttempt];
-  else ordered = [vertexAttempt, openaiAttempt, sarvamAttempt];
-
-  ordered = ordered.filter((a) => {
-    if (a.provider === 'sarvam') return isSarvamConfigured();
-    if (a.provider === 'openai') return isOpenAIConfigured();
-    return isVertexConfigured();
-  });
-
-  if (ordered.length === 0) {
-    throw new Error('No speech-to-text provider is configured (set SARVAM_API_KEY, VERTEX_PROJECT_ID, or OPENAI_API_KEY).');
+): Promise<{ provider: 'vertex'; language: string; segments: TranscriptSegment[] }> {
+  if (!isVertexConfigured()) {
+    throw new Error('No speech-to-text provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
   }
-
-  let lastError: unknown;
-  for (const attempt of ordered) {
-    try {
-      const result = await attempt.run();
-      return { provider: attempt.provider, language: result.language, segments: toTranscriptSegments(result.segments) };
-    } catch (err) {
-      lastError = err;
-      console.error(`[modelRouter] STT via ${attempt.provider} failed, trying next provider`, err);
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error('Speech-to-text failed');
+  const result = await vertexTranscribe(filePath);
+  return { provider: 'vertex', language: result.language, segments: toTranscriptSegments(result.segments) };
 }
 
 export async function routeTranslateSegments(
@@ -132,54 +84,13 @@ export async function routeTranslateSegments(
   style: string,
   adaptExpressions: boolean,
   override: TranslateProvider
-): Promise<{ provider: 'vertex' | 'openai' | 'sarvam'; translations: Record<string, string> }> {
+): Promise<{ provider: 'vertex'; translations: Record<string, string> }> {
+  if (!isVertexConfigured()) {
+    throw new Error('No translation provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
+  }
   const targetLanguageName = getLanguageName(targetLanguageCode);
-  const sarvamViable = isSarvamSupportedLanguage(targetLanguageCode) && isSarvamConfigured();
-
-  type Attempt = { provider: 'vertex' | 'openai' | 'sarvam'; run: () => Promise<Record<string, string>> };
-  const vertexAttempt: Attempt = {
-    provider: 'vertex',
-    run: () => vertexTranslateSegments(segments, targetLanguageName, style, adaptExpressions),
-  };
-  const openaiAttempt: Attempt = {
-    provider: 'openai',
-    run: () => openaiTranslateSegments(segments, targetLanguageName, style, adaptExpressions),
-  };
-  const sarvamAttempt: Attempt = {
-    provider: 'sarvam',
-    run: () => sarvamTranslateSegments(segments, toSarvamLanguageCode(targetLanguageCode)!, style),
-  };
-
-  let ordered: Attempt[];
-  if (override === 'vertex') ordered = [vertexAttempt, openaiAttempt];
-  else if (override === 'openai') ordered = [openaiAttempt];
-  else if (override === 'sarvam') ordered = sarvamViable ? [sarvamAttempt, openaiAttempt] : [openaiAttempt];
-  else ordered = isIndicLanguage(targetLanguageCode) && sarvamViable
-    ? [sarvamAttempt, vertexAttempt, openaiAttempt]
-    : [vertexAttempt, openaiAttempt];
-
-  ordered = ordered.filter((a) => {
-    if (a.provider === 'vertex') return isVertexConfigured();
-    if (a.provider === 'openai') return isOpenAIConfigured();
-    if (a.provider === 'sarvam') return sarvamViable;
-    return false;
-  });
-
-  if (ordered.length === 0) {
-    throw new Error('No translation provider is configured (set VERTEX_PROJECT_ID, OPENAI_API_KEY, or SARVAM_API_KEY).');
-  }
-
-  let lastError: unknown;
-  for (const attempt of ordered) {
-    try {
-      const translations = await attempt.run();
-      return { provider: attempt.provider, translations };
-    } catch (err) {
-      lastError = err;
-      console.error(`[modelRouter] Translation via ${attempt.provider} failed, trying next provider`, err);
-    }
-  }
-  throw lastError instanceof Error ? lastError : new Error('Translation failed');
+  const translations = await vertexTranslateSegments(segments, targetLanguageName, style, adaptExpressions);
+  return { provider: 'vertex', translations };
 }
 
 export async function routeSynthesizeSpeech(
@@ -192,7 +103,7 @@ export async function routeSynthesizeSpeech(
    * Passed in rather than looked up here so this module stays free of storage concerns.
    */
   cloneReference?: { audioPath: string; transcript?: string }
-): Promise<{ provider: 'sarvam' | 'vertex' | 'openai' | 'clone'; audio: Buffer; fromCache: boolean }> {
+): Promise<{ provider: 'vertex' | 'clone'; audio: Buffer; fromCache: boolean }> {
   // A cloned voice is the user's own voice: substituting a stock voice for it would be
   // silently wrong in a way they would only notice after the render. So this path either
   // produces their voice or fails loudly, with no provider fallback.
@@ -249,52 +160,8 @@ export async function routeSynthesizeSpeech(
     return { provider: 'clone', audio, fromCache: false };
   }
 
-  const sarvamLangCode = toSarvamLanguageCode(targetLanguageCode);
-  const sarvamViable = Boolean(voice.providerVoice.sarvam) && Boolean(sarvamLangCode) && isSarvamConfigured();
-  const vertexViable = Boolean(voice.providerVoice.vertex) && isGoogleTtsConfigured();
-  const openaiViable = isOpenAIConfigured();
-
-  type Attempt = { provider: 'sarvam' | 'vertex' | 'openai'; run: () => Promise<Buffer> };
-  const sarvamAttempt: Attempt = {
-    provider: 'sarvam',
-    run: () => sarvamSynthesizeSpeech(text, voice.providerVoice.sarvam!, sarvamLangCode!),
-  };
-  // Google Cloud TTS rather than Gemini's preview TTS model — same GCP project and
-  // credits, but production quotas instead of a per-minute cap that a multi-segment dub
-  // exhausts, plus real per-language voices instead of one language-agnostic timbre.
-  const vertexAttempt: Attempt = {
-    provider: 'vertex',
-    run: () =>
-      googleSynthesizeSpeech(
-        text,
-        getLanguageBcp47(targetLanguageCode),
-        voice.providerVoice.vertex!,
-        voice.gender
-      ),
-  };
-  const openaiAttempt: Attempt = {
-    provider: 'openai',
-    run: () => openaiSynthesizeSpeech(text, voice.providerVoice.openai as OpenAIVoiceId),
-  };
-
-  let ordered: Attempt[];
-  if (voice.provider === 'vertex') ordered = vertexViable ? [vertexAttempt] : (sarvamViable ? [sarvamAttempt] : [vertexAttempt]);
-  else if (voice.provider === 'sarvam') ordered = sarvamViable ? [sarvamAttempt] : (vertexViable ? [vertexAttempt] : [sarvamAttempt]);
-  else if (override === 'sarvam') ordered = sarvamViable ? [sarvamAttempt] : [vertexAttempt];
-  else if (override === 'vertex') ordered = vertexViable ? [vertexAttempt] : [sarvamAttempt];
-  else if (isIndicLanguage(targetLanguageCode))
-    ordered = [
-      ...(vertexViable ? [vertexAttempt] : []),
-      ...(sarvamViable ? [sarvamAttempt] : []),
-    ];
-  else ordered = [...(vertexViable ? [vertexAttempt] : [])];
-
-  ordered = ordered.filter((a) =>
-    a.provider === 'sarvam' ? sarvamViable : a.provider === 'vertex' ? vertexViable : openaiViable
-  );
-
-  if (ordered.length === 0) {
-    throw new Error('No text-to-speech provider is configured (set SARVAM_API_KEY, VERTEX_PROJECT_ID, or OPENAI_API_KEY).');
+  if (!voice.providerVoice.vertex || !isGoogleTtsConfigured()) {
+    throw new Error('No text-to-speech provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
   }
 
   // Identical input yields identical audio, and TTS is billed per character — so never
@@ -303,33 +170,29 @@ export async function routeSynthesizeSpeech(
   const cacheKey = ttsCacheKey([override, voice.id, targetLanguageCode, text]);
   const cached = await readTtsCache(cacheKey);
   if (cached) {
-    return { provider: ordered[0].provider, audio: cached, fromCache: true };
+    return { provider: 'vertex', audio: cached, fromCache: true };
   }
 
-  let lastError: unknown;
-  for (const attempt of ordered) {
-    for (let retry = 0; ; retry++) {
-      try {
-        const audio = await attempt.run();
-        await writeTtsCache(cacheKey, audio);
-        return { provider: attempt.provider, audio, fromCache: false };
-      } catch (err) {
-        lastError = err;
-        // A dub synthesizes one clip per segment back-to-back, which is exactly the shape
-        // that trips per-minute quotas (Gemini's preview TTS model has a low one). Those
-        // are transient, so wait them out on the same provider rather than immediately
-        // falling through — falling through would otherwise burn the remaining providers
-        // on a problem that fixes itself in seconds, and fail the whole render.
-        if (isRateLimitError(err) && retry < TTS_RATE_LIMIT_BACKOFF_MS.length) {
-          const waitMs = TTS_RATE_LIMIT_BACKOFF_MS[retry];
-          console.warn(`[modelRouter] TTS via ${attempt.provider} rate-limited, retrying in ${waitMs}ms`);
-          await new Promise((resolve) => setTimeout(resolve, waitMs));
-          continue;
-        }
-        console.error(`[modelRouter] TTS via ${attempt.provider} failed, trying next provider`, err);
-        break;
+  for (let retry = 0; ; retry++) {
+    try {
+      // Google Cloud TTS rather than Gemini's preview TTS model — same GCP project and
+      // credits, but production quotas instead of a per-minute cap that a multi-segment
+      // dub exhausts, plus real per-language voices instead of one language-agnostic timbre.
+      const audio = await googleSynthesizeSpeech(text, getLanguageBcp47(targetLanguageCode), voice.providerVoice.vertex, voice.gender);
+      await writeTtsCache(cacheKey, audio);
+      return { provider: 'vertex', audio, fromCache: false };
+    } catch (err) {
+      // A dub synthesizes one clip per segment back-to-back, which is exactly the shape
+      // that trips per-minute quotas, and there's no second provider to fall through to
+      // any more. Wait transient failures out rather than failing the whole render.
+      if (isTransientTtsError(err) && retry < TTS_RETRY_BACKOFF_MS.length) {
+        const waitMs = TTS_RETRY_BACKOFF_MS[retry];
+        console.warn(`[modelRouter] TTS failed (attempt ${retry + 1}/${TTS_RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms`, err);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
       }
+      throw err;
     }
   }
-  throw lastError instanceof Error ? lastError : new Error('Text-to-speech failed');
 }
+

@@ -290,7 +290,7 @@ export function muxVideoWithAudio(videoPath: string, audioPath: string, outputPa
   });
 }
 
-/** Splits a WAV file into consecutive fixed-length chunks (used to work around STT providers with a max-duration-per-call limit, e.g. Sarvam's 30s sync cap). Returns chunk file paths in order. */
+/** Splits a WAV file into consecutive fixed-length chunks (used to work around Gemini's per-call inline-audio limit — see VERTEX_MAX_CHUNK_SECONDS in vertexClient.ts). Returns chunk file paths in order. */
 export async function splitAudioIntoChunks(
   inputWavPath: string,
   chunkSeconds: number,
@@ -310,6 +310,27 @@ export async function splitAudioIntoChunks(
   const { readdir } = await import('node:fs/promises');
   const files = (await readdir(workDir)).filter((f) => f.startsWith('chunk_') && f.endsWith('.wav')).sort();
   return files.map((f) => path.join(workDir, f));
+}
+
+/** Cuts a short audio-only clip out of a larger file, re-encoded to 16kHz mono WAV — used to build short per-speaker voice reference samples for chunked transcription. */
+export function extractAudioClip(
+  inputPath: string,
+  startSeconds: number,
+  durationSeconds: number,
+  outputWavPath: string
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    ffmpeg(inputPath)
+      .setStartTime(Math.max(0, startSeconds))
+      .duration(Math.max(0.1, durationSeconds))
+      .noVideo()
+      .audioCodec('pcm_s16le')
+      .audioChannels(1)
+      .audioFrequency(16000)
+      .on('error', reject)
+      .on('end', () => resolve())
+      .save(outputWavPath);
+  });
 }
 
 /** Grabs a single representative frame as a JPEG for use as a project thumbnail. */

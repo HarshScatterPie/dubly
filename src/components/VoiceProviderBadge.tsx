@@ -9,20 +9,14 @@ import { Voice } from '../types';
 /**
  * The little "who synthesizes this voice" chip on a voice card.
  *
- * Exists as one component because the two voice pickers each had their own
- * `provider === 'vertex' ? Google : Sarvam` ternary — a binary test for what is not a
- * binary field. Cloned voices landed in the `else` and were labelled "Sarvam AI", which is
- * both wrong and misleading about where the user's recording is being processed. Adding a
- * provider should mean editing this map, not hunting for ternaries.
+ * Exists as one component so every voice card renders the "who synthesizes this" chip
+ * identically, and so adding a provider means editing this map, not hunting for
+ * ternaries scattered across each voice picker.
  */
 const BADGES: Record<Voice['provider'], { label: string; className: string }> = {
   vertex: {
     label: '🔷 Google Cloud',
     className: 'bg-blue-50 text-blue-600 border-blue-200',
-  },
-  sarvam: {
-    label: '🟧 Sarvam AI',
-    className: 'bg-amber-50 text-amber-700 border-amber-200',
   },
   clone: {
     label: '🎙️ Your voice',

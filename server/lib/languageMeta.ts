@@ -1,37 +1,5 @@
 import { LANGUAGES } from '../../src/data/mockData';
 
-/**
- * Sarvam's translate/TTS models only cover Indic languages (+ en-IN). This maps our
- * app's language codes onto Sarvam's `xx-IN` codes for the languages it actually
- * supports — anything not in this map must go through Vertex/OpenAI instead.
- */
-const SARVAM_LANGUAGE_CODES: Record<string, string> = {
-  hi: 'hi-IN',
-  hinglish: 'hi-IN',
-  ta: 'ta-IN',
-  te: 'te-IN',
-  bn: 'bn-IN',
-  mr: 'mr-IN',
-  gu: 'gu-IN',
-  kn: 'kn-IN',
-  ml: 'ml-IN',
-  pa: 'pa-IN',
-  en: 'en-IN',
-};
-
-export function isSarvamSupportedLanguage(appLangCode: string): boolean {
-  return appLangCode in SARVAM_LANGUAGE_CODES;
-}
-
-/** True for Indic-content languages where Sarvam is the preferred ("auto") provider. English is excluded on purpose — it defaults to the general-purpose providers even though Sarvam technically covers en-IN. */
-export function isIndicLanguage(appLangCode: string): boolean {
-  return isSarvamSupportedLanguage(appLangCode) && appLangCode !== 'en';
-}
-
-export function toSarvamLanguageCode(appLangCode: string): string | null {
-  return SARVAM_LANGUAGE_CODES[appLangCode] ?? null;
-}
-
 export function getLanguageName(appLangCode: string): string {
   return LANGUAGES.find((l) => l.code === appLangCode)?.name || appLangCode;
 }
@@ -41,11 +9,10 @@ export function getLanguageBcp47(appLangCode: string): string {
 }
 
 /**
- * STT providers report the detected source language in different shapes — Sarvam
- * returns a BCP-47-ish code (e.g. "hi-IN"), OpenAI Whisper returns a bare lowercase
- * language name (e.g. "english"). Maps either onto our app's language codes so the
- * *actually detected* language gets persisted, instead of silently keeping whatever
- * default was set before analysis ran.
+ * Gemini reports the detected source language as a plain name (e.g. "English" or
+ * "Hindi"), not a code. Maps that onto our app's language codes so the *actually
+ * detected* language gets persisted, instead of silently keeping whatever default was
+ * set before analysis ran.
  */
 export function mapDetectedLanguageToAppCode(detected: string): string {
   const normalized = detected.trim().toLowerCase();

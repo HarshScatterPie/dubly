@@ -9,8 +9,6 @@ export const env = {
   vertexProjectId: process.env.VERTEX_PROJECT_ID || '',
   vertexLocation: process.env.VERTEX_LOCATION || 'us-central1',
   firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
-  sarvamApiKey: process.env.SARVAM_API_KEY || '',
-  openaiApiKey: process.env.OPENAI_API_KEY || '',
   webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
   // Optional voice-cloning worker on a Hugging Face ZeroGPU Space. Set both and
   // cloning runs there instead of on this machine's CPU.

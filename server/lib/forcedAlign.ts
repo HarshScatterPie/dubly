@@ -4,13 +4,12 @@ import { detectSpeechRegionsVad, isVadAvailable } from './vad';
 /**
  * Timestamp correction via real speech-region detection.
  *
- * Neither STT provider we can use gives trustworthy timing (verified empirically against
- * a clip with known ground truth): Gemini *estimates* timestamps and its error compounds
- * over the clip (~0.2s early at the start, ~1.6s early by 14s in), and Sarvam's
- * `with_timestamps` collapsed a whole 22s clip into a single "word" spanning 0->22s.
- * Their transcript *text* is accurate; only the timing is not.
+ * Gemini's STT doesn't give trustworthy timing (verified empirically against a clip with
+ * known ground truth): it *estimates* timestamps and the error compounds over the clip
+ * (~0.2s early at the start, ~1.6s early by 14s in). The transcript *text* is accurate;
+ * only the timing is not.
  *
- * So rather than trusting either, we measure where speech physically is in the audio
+ * So rather than trusting it, we measure where speech physically is in the audio
  * (ffmpeg `silencedetect`) and snap the transcript onto those regions. That makes segment
  * boundaries land on actual speech instead of drifting into silence, which is what keeps
  * captions and the dubbed audio locked to the picture.

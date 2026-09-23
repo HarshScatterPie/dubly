@@ -6,6 +6,7 @@ import { env } from './env';
 import { gcpServiceAccountPath, hasCredentialFile } from './credentials';
 import { buildTranslationPrompt, parseTranslationResponse, type TranslatableSegment } from './translatePrompt';
 import { probeMedia, splitAudioIntoChunks, extractAudioClip } from './ffmpeg';
+import { logGeminiCallCost } from './costMeter';
 
 export interface RawSttWord {
   text: string;
@@ -43,7 +44,7 @@ function getClient(): GoogleGenAI {
     client = new GoogleGenAI({
       vertexai: true,
       project: env.vertexProjectId,
-      location: env.vertexLocation,
+      location: env.vertexGeminiLocation,
       googleAuthOptions: { keyFile: gcpServiceAccountPath },
     });
   }
@@ -114,7 +115,7 @@ export async function vertexTranslateSegments(
 
   const response = await withRetry('translation', () =>
     ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: env.geminiTranslateModel,
       contents: prompt,
       config: {
         responseMimeType: 'application/json',
@@ -122,6 +123,7 @@ export async function vertexTranslateSegments(
       },
     })
   );
+  logGeminiCallCost('translate', env.geminiTranslateModel, response.usageMetadata);
 
   const text = response.text;
   if (!text) {
@@ -183,11 +185,12 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
 
   const response = await withRetry('transcription', () =>
     ai.models.generateContent({
-      model: 'gemini-2.5-flash',
+      model: env.geminiSttModel,
       contents: [{ role: 'user', parts }],
       config: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
     })
   );
+  logGeminiCallCost('transcribe', env.geminiSttModel, response.usageMetadata);
 
   const text = response.text;
   if (!text) {

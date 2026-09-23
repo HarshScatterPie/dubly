@@ -6,13 +6,61 @@
  * ignore free tiers and any negotiated rate, so treat the numbers as an upper-bound
  * estimate of what a render costs rather than an invoice.
  */
+import { env } from './env';
+
 const USD_TO_INR = 83;
 
 // Google Cloud TTS list prices per 1M characters.
 const GOOGLE_CHIRP3_HD_PER_1M_USD = 30;
-// Gemini 2.5 Flash audio input, ~$1.00 per 1M tokens at roughly 32 audio tokens/second.
 const GEMINI_AUDIO_TOKENS_PER_SECOND = 32;
-const GEMINI_AUDIO_PER_1M_TOKENS_USD = 1;
+
+interface GeminiPrice {
+  inputPer1M: number;
+  audioInputPer1M: number;
+  outputPer1M: number;
+}
+
+// Paid-tier USD list prices per 1M tokens (ai.google.dev/gemini-api/docs/pricing, Sep 2026); output includes thinking tokens.
+export const GEMINI_PRICES_USD: Record<string, GeminiPrice> = {
+  'gemini-3.5-flash-lite': { inputPer1M: 0.3, audioInputPer1M: 0.3, outputPer1M: 2.5 },
+  'gemini-3.1-flash-lite': { inputPer1M: 0.25, audioInputPer1M: 0.5, outputPer1M: 1.5 },
+  // 3.6/3.7/3.8 Flash are $0.75/$3.75 until 2026-12-31; the 2027 standard rate is used as the upper bound.
+  'gemini-3.8-flash': { inputPer1M: 1.5, audioInputPer1M: 1.5, outputPer1M: 7.5 },
+  'gemini-3.7-flash': { inputPer1M: 1.5, audioInputPer1M: 1.5, outputPer1M: 7.5 },
+  'gemini-3.6-flash': { inputPer1M: 1.5, audioInputPer1M: 1.5, outputPer1M: 7.5 },
+  'gemini-3.5-flash': { inputPer1M: 1.5, audioInputPer1M: 1.5, outputPer1M: 9 },
+  'gemini-2.5-flash': { inputPer1M: 0.3, audioInputPer1M: 1, outputPer1M: 2.5 },
+};
+
+export interface GeminiUsage {
+  promptTokenCount?: number;
+  candidatesTokenCount?: number;
+  thoughtsTokenCount?: number;
+  promptTokensDetails?: Array<{ modality?: string; tokenCount?: number }>;
+}
+
+/** Actual cost of one Gemini call in INR from its reported usage, or null for a model missing from the price table. */
+export function geminiCallCostInr(model: string, usage: GeminiUsage | undefined): number | null {
+  const price = GEMINI_PRICES_USD[model];
+  if (!price || !usage) return null;
+  const audioTokens = (usage.promptTokensDetails || [])
+    .filter((d) => d.modality === 'AUDIO')
+    .reduce((sum, d) => sum + (d.tokenCount || 0), 0);
+  const otherInputTokens = Math.max(0, (usage.promptTokenCount || 0) - audioTokens);
+  const outputTokens = (usage.candidatesTokenCount || 0) + (usage.thoughtsTokenCount || 0);
+  const usd =
+    (audioTokens * price.audioInputPer1M + otherInputTokens * price.inputPer1M + outputTokens * price.outputPer1M) / 1_000_000;
+  return usd * USD_TO_INR;
+}
+
+/** One log line per Gemini call so translation and STT spend both show up, not just the audio estimate. */
+export function logGeminiCallCost(label: string, model: string, usage: GeminiUsage | undefined): void {
+  const cost = geminiCallCostInr(model, usage);
+  const output = (usage?.candidatesTokenCount || 0) + (usage?.thoughtsTokenCount || 0);
+  console.log(
+    `[cost] gemini ${label} ${model} in=${usage?.promptTokenCount ?? '?'} out=${output} => ${cost === null ? 'price unknown' : `₹${cost.toFixed(4)}`}`
+  );
+}
 
 export interface CostMeter {
   ttsCharsByProvider: Record<string, number>;
@@ -44,7 +92,8 @@ function ttsCostInr(provider: string, chars: number): number {
 function sttCostInr(provider: string, seconds: number): number {
   if (provider === 'vertex') {
     const tokens = seconds * GEMINI_AUDIO_TOKENS_PER_SECOND;
-    return (tokens / 1_000_000) * GEMINI_AUDIO_PER_1M_TOKENS_USD * USD_TO_INR;
+    const price = GEMINI_PRICES_USD[env.geminiSttModel]?.audioInputPer1M ?? GEMINI_PRICES_USD['gemini-3.8-flash'].audioInputPer1M;
+    return (tokens / 1_000_000) * price * USD_TO_INR;
   }
   return 0;
 }

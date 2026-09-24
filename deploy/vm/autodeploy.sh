@@ -37,7 +37,11 @@ case "$RESULT" in
 esac
 
 log "CI passed for $HEAD; deploying (live: ${LIVE:-none})"
-if ! "$HERE/deploy.sh" "$HEAD"; then
+status=0
+"$HERE/deploy.sh" "$HEAD" || status=$?
+if [ "$status" -eq 75 ]; then
+  log "another deploy is in progress; will check again next tick"
+elif [ "$status" -ne 0 ]; then
   log "deploy of $HEAD failed; staying on ${LIVE:-previous release}"
   touch "$STATE/skip-$HEAD"
   exit 1

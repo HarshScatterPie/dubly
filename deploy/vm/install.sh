@@ -30,6 +30,16 @@ if [ "$(/opt/node-24/bin/node -v 2>/dev/null || true)" != "$NODE_VERSION" ]; the
   rm -rf "$tmp"
 fi
 
+# A 2 GB machine building a release while a dub renders can run out of memory; swap turns that into slowness instead of a kill.
+if ! swapon --show | grep -q /swapfile; then
+  log "adding a 2 GB swapfile"
+  sudo fallocate -l 2G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile >/dev/null
+  sudo swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
+fi
+
 # 2. Shared files, taken once from the existing hand-copied install.
 mkdir -p "$SHARED/credentials" "$SHARED/cache" "$RELEASES"
 chmod 700 "$SHARED/credentials"

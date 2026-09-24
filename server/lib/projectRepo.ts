@@ -272,10 +272,7 @@ export async function reserveDubMinutes(workspaceId: string, minutes: number): P
   });
 }
 
-/**
- * The read half of a reservation, for use inside a larger transaction: Firestore wants every read before any write,
- * so this reads and checks the allowance now and returns `commit` to write the charge once the caller's reads are done.
- */
+// Read half of a reservation inside a larger transaction: checks the allowance now and returns commit() for after the caller reads.
 export async function prepareReservation(
   tx: FirebaseFirestore.Transaction,
   workspaceId: string,

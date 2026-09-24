@@ -1,9 +1,5 @@
 #!/usr/bin/env bash
-# One-time (re-runnable) setup of the Dubly VM for release-based deploys:
-#   - Node 24 in /opt/node-24 (checksum-verified official build; the system Node is left alone)
-#   - ~/dubly-shared for secrets, client config and cache; ~/dubly-releases for builds; ~/dubly becomes a symlink
-#   - systemd units: dubly.service (from deploy/vm/dubly.service) and the auto-deploy timer
-# Run as the app user (it uses sudo where root is needed):  bash deploy/vm/install.sh
+# Re-runnable VM setup (run as the app user): Node 24 in /opt/node-24, swap, ~/dubly-shared + ~/dubly-releases layout, systemd units and timer.
 set -euo pipefail
 
 NODE_VERSION="${NODE_VERSION:-v24.21.0}"

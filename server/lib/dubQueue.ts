@@ -1,10 +1,6 @@
 import { limits } from './limits';
 
-/**
- * In-process admission for dub runs: at most `limits.maxDubsPerWorkspace` per workspace and `limits.maxActiveDubs` in total
- * render at once, first come first served; the rest wait here. The queue itself is memory only; the jobs are persisted with
- * status `queued`, so after a restart the new process picks up whatever was still waiting (see requeue in server/index.ts).
- */
+// In-process dub admission with per-workspace and server-wide caps, first come first served; waiting jobs persist as queued and resume after a restart.
 interface Entry {
   jobId: string;
   workspaceId: string;

@@ -3,10 +3,7 @@ import { log } from './log';
 
 const DAY = 24 * 60 * 60 * 1000;
 
-/**
- * Retention for short-lived records (documented in docs/SECURITY.md → Data retention). Each rule deletes at most `batch`
- * documents per run, oldest first, so one run stays cheap; it runs hourly from server/index.ts.
- */
+// Retention for short-lived records (docs/SECURITY.md); each rule deletes at most `batch` documents per hourly run, oldest first.
 export const RETENTION = [
   // Share links stop working after 24 h; the record is kept a week so "who shared what" can still be answered.
   { collection: 'shares', field: 'expiresAt', keepMs: 7 * DAY },

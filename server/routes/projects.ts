@@ -198,9 +198,7 @@ projectsRouter.delete('/:id', requireAdmin, async (req, res) => {
   const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
-  // Everything this project wrote lives under its own folder (source, every language's audio/video, captions, thumbnail),
-  // so the whole folder goes. Paths it references elsewhere came from copies of another workspace's project (made by the
-  // old add-member flow) and may still be in use there, so those are kept and logged for manual review, never deleted.
+  // Deletes the project's whole storage folder, but only logs referenced paths outside it (they may belong to another workspace's copy).
   const ownPrefix = `workspaces/${req.workspaceId}/projects/${req.params.id}/`;
   const referenced = [
     stored.videoStoragePath,
@@ -276,11 +274,7 @@ projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['us
   }
 });
 
-/**
- * Loads one of the built-in sample videos. The client names a sample by id and the URL comes from the server's own list, so
- * the server can never be pointed at an arbitrary (internal) address. Older clients that still send the sample's URL are
- * accepted only when it is exactly one of those URLs.
- */
+// Loads a built-in sample by id (the URL comes from the server list); an old client may send the exact sample URL instead.
 projectsRouter.post('/:id/import-sample', refuseWhenDraining, rateLimit('import-sample', [['user', rateRules.importSamplePerUser]]), validateBody(schemas.importSample), async (req, res) => {
   const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
@@ -320,11 +314,7 @@ export interface TranscriptionOutcome {
   result: { detectedLanguage: string; removedSegments: number; sanitizeNote: string };
 }
 
-/**
- * Analyzes a project's video as a job. Callers opt in to the asynchronous form with `Prefer: respond-async` and get 202 plus
- * a job id to poll (GET /api/projects/:id/jobs/:jobId); without it the request waits and answers as it always did, so an
- * older client keeps working. Either way the run owns the project, heartbeats, can be cancelled and survives a restart cleanly.
- */
+// Analyzes the video as a job: `Prefer: respond-async` gets 202 and a job id to poll, otherwise the request waits and answers as before.
 projectsRouter.post('/:id/transcribe', refuseWhenDraining, transcribeLimit, async (req, res) => {
   const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
@@ -353,10 +343,7 @@ projectsRouter.post('/:id/transcribe', refuseWhenDraining, transcribeLimit, asyn
   res.json({ ...(await toClientProject(updated)), ...finished.result });
 });
 
-/**
- * Runs one transcription job to its settlement. Resolves (never rejects) with the outcome, which the synchronous form of the
- * endpoint turns into its response.
- */
+// Runs a transcription job to settlement and resolves (never rejects) with the outcome the synchronous endpoint returns.
 function runTranscribeJob(
   job: DubJob,
   stored: StoredProject
@@ -418,8 +405,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
   await mkdir(jobDir, { recursive: true });
   const videoLocalPath = path.join(jobDir, 'source.mp4');
   const audioLocalPath = path.join(jobDir, 'audio.wav');
-  // Stage reports the client polls for. A failed write is not worth failing the analysis for, but losing the project or
-  // being cancelled is: those stop the run here.
+  // Progress reports; a failed write is ignored, but losing the project or a cancel request stops the run here.
   const report = async (progressPercent: number, currentProcessingMessage: string) => {
     try {
       await writeProjectForJob(job, { progressPercent, currentProcessingMessage }, { stage: currentProcessingMessage, progress: progressPercent });

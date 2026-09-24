@@ -43,11 +43,7 @@ const DEFAULT_ERROR_CODES: Record<number, string> = {
 };
 export const GENERIC_ERROR_MESSAGE = 'Something went wrong on our side. Please try again.';
 
-/**
- * Gives every JSON error the one shape `{ error: { code, message, request_id, ...details } }`. Routes keep answering with
- * `{ error: 'message', code? }`; a 5xx without an explicit code is an unplanned failure whose text may name providers,
- * paths or internals, so it is logged and replaced with a generic message the user can quote by request id.
- */
+// Gives every JSON error one shape { error: { code, message, request_id } }; unplanned 5xx text is logged and replaced with a generic message.
 export function normalizeErrorResponses(req: express.Request, res: express.Response, next: express.NextFunction): void {
   const send = res.json.bind(res);
   res.json = (body?: unknown) => {
@@ -107,8 +103,7 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   // Behind a proxy/tunnel the client address is in X-Forwarded-For; set TRUST_PROXY (e.g. 1 = one hop) so per-IP limits see it.
   if (process.env.TRUST_PROXY) app.set('trust proxy', /^\d+$/.test(process.env.TRUST_PROXY) ? Number(process.env.TRUST_PROXY) : process.env.TRUST_PROXY);
 
-  // Every request gets an id (a caller's own well-formed X-Request-Id is kept, so a trace can span services); every log line
-  // written while handling it carries that id, and the access log records the route template, status and latency.
+  // Every request gets an id (a well-formed incoming X-Request-Id is kept) that tags its log lines and access-log entry.
   app.use((req, res, next) => {
     const incoming = req.get('X-Request-Id');
     req.requestId = incoming && /^[A-Za-z0-9._-]{8,64}$/.test(incoming) ? incoming : randomUUID();

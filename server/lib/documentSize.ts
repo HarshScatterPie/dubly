@@ -1,11 +1,7 @@
 // Firestore's hard limit on one document's stored size.
 export const FIRESTORE_MAX_DOCUMENT_BYTES = 1_048_576;
 
-/**
- * Stored size of a value per Firestore's documented rules (cloud.google.com/firestore/docs/storage-size): strings are their
- * UTF-8 length + 1, numbers/timestamps 8, booleans/null 1, maps the sum of their keys (as strings) and values, arrays the
- * sum of their values. `undefined` fields are dropped by the Admin SDK (ignoreUndefinedProperties) and count as nothing.
- */
+// Stored size per Firestore's documented rules: strings UTF-8 + 1, numbers 8, booleans/null 1, maps keys + values, arrays their values.
 export function firestoreValueSize(value: unknown): number {
   if (value === undefined) return 0;
   if (value === null || typeof value === 'boolean') return 1;

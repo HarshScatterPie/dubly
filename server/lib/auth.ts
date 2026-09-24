@@ -26,10 +26,7 @@ export function clearAccountStateCache(uid?: string): void {
   else accountState.clear();
 }
 
-/**
- * What verifyIdToken(token, true) checks (disabled account, sessions revoked after this token was issued), with a short
- * per-user cache: the UI polls every second or so, and an uncached check would add an Auth API call to every request.
- */
+// verifyIdToken(token, true)'s checks (disabled, revoked since issue), cached per user briefly because the UI polls every second.
 async function isSessionRevoked(uid: string, authTimeSeconds: number): Promise<boolean> {
   let state = accountState.get(uid);
   if (!state || Date.now() - state.at > ACCOUNT_STATE_CACHE_MS) {

@@ -3,18 +3,7 @@ import { FIRESTORE_MAX_DOCUMENT_BYTES, firestoreDocumentSize } from './documentS
 import { HttpError } from './httpError';
 import type { StoredLanguageOutput, StoredProject } from './projectRepo';
 
-/**
- * How a project is laid out in Firestore.
- *
- * Measured (server/lib/documentSize.test.ts): with the transcript, word timings and every language's lines in one document,
- * a 60-minute video is at 96% of Firestore's 1 MiB document limit with one language and over it with three. So a project is
- * stored as a small metadata document plus one document per heavy part:
- *   workspaces/{ws}/projects/{id}                      metadata, per-language status and output paths
- *   workspaces/{ws}/projects/{id}/content/transcript   { segments: TranscriptSegment[] }
- *   workspaces/{ws}/projects/{id}/languages/{code}     { segments: LocalizedSegment[] }
- * Callers never see this: loadProject() reassembles the same StoredProject shape they always used, and planProjectWrite()
- * splits any patch. Projects saved before the split (no `segmentsStorage`) are read as they are and moved on their first write.
- */
+// Project layout: metadata doc + content/transcript + languages/{code} (a single doc overflows 1 MiB, see DATABASE.md); old single-doc projects move on first write.
 export const SPLIT = 'split';
 
 const transcriptRef = (project: DocumentReference) => project.collection('content').doc('transcript');
@@ -60,12 +49,7 @@ function checkSize(ref: DocumentReference, data: Record<string, unknown>): void 
   }
 }
 
-/**
- * Turns a patch in the old all-in-one shape into the metadata merge plus the segment documents to replace. `current` is the
- * document as it is now (undefined for a new project); if it is still in the old layout its inline segments are moved out in
- * the same write, so no data is ever left behind or duplicated. Top-level `localizedSegments` means the primary language,
- * taken from the patch's `targetLanguage` if it changes it, else the project's.
- */
+// Splits an all-in-one patch into the metadata merge and segment docs, moving an old-layout project out in the same write; top-level localizedSegments means the primary language.
 export function planProjectWrite(ref: DocumentReference, current: RawProject | undefined, patch: Partial<StoredProject>): WritePlan {
   const segmentsByPart = new Map<string, { ref: DocumentReference; segments: unknown[] }>();
   const setPart = (partRef: DocumentReference, segments: unknown[] | undefined) => {

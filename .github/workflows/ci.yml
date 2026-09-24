@@ -1,7 +1,6 @@
 name: CI
 
-# Every push and pull request must pass typecheck, tests (against Firebase emulators, never the real project), the production
-# build, a dependency audit and a secret scan, and the Docker image must build. Nothing here deploys.
+# Every push/PR: typecheck, emulator tests (never the real project), build, dependency audit, secret scan and image build; nothing deploys.
 on:
   push:
     branches: [main]

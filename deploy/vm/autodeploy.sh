@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# Run every 2 minutes by dubly-autodeploy.timer: if main has a new commit and that commit's "CI" workflow run succeeded,
-# deploy it. Pull-based on purpose: the VM needs no inbound access and GitHub holds no keys to it.
+# Run by dubly-autodeploy.timer: deploys main's new commit once its CI run passed (pull-based: no inbound access, no keys in GitHub).
 set -euo pipefail
 
 BASE="${DUBLY_BASE:-$HOME}"

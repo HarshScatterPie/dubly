@@ -43,11 +43,7 @@ function silentWav(sampleRate: number): Buffer {
   return Buffer.concat([header, Buffer.alloc(data)]);
 }
 
-/**
- * The base track when there is no background audio: one second of silence, looped for as long as the output runs. A plain
- * file rather than ffmpeg's generated `anullsrc`, because fluent-ffmpeg refuses the lavfi input on newer ffmpeg builds
- * (they list lavfi under -devices, which its format check does not read).
- */
+// Base track without background audio: a looped one-second silent WAV, because fluent-ffmpeg rejects lavfi input on newer ffmpeg builds.
 async function silenceInput(workDir: string, sampleRate: number) {
   const silencePath = path.join(workDir, 'silence.wav');
   await writeFile(silencePath, silentWav(sampleRate));

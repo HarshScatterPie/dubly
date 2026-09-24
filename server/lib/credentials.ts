@@ -5,8 +5,7 @@ import { credentialsDir as defaultCredentialsDir } from './paths';
 // Where key files are read from. On a developer machine point CREDENTIALS_DIR outside any synced folder (OneDrive, Dropbox).
 export const credentialsDir = process.env.CREDENTIALS_DIR ? path.resolve(process.env.CREDENTIALS_DIR) : defaultCredentialsDir;
 
-// CREDENTIALS_MODE=adc: authenticate as the machine's attached service account (Application Default Credentials), with no
-// key files at all. This is the production setting (docs/SECURITY.md); key files remain the default for local development.
+// CREDENTIALS_MODE=adc uses the machine's service account and no key files (production); key files stay the local default.
 export const useAdc = process.env.CREDENTIALS_MODE === 'adc';
 
 export function loadServiceAccount(filename: string): Record<string, unknown> {

@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Deploys one commit of Dubly on this VM: builds it in its own release folder, switches the live symlink to it, restarts the
-# service, and switches back automatically if the new release does not come up healthy. Run as the app user (sudo for restart).
-#   deploy/vm/deploy.sh <commit-sha>
+# Usage: deploy.sh <commit-sha>. Builds the commit in its own release folder, switches to it, restarts, and rolls back if unhealthy.
 set -euo pipefail
 
 SHA="${1:?usage: deploy.sh <commit-sha>}"

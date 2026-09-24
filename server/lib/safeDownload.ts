@@ -47,11 +47,7 @@ export function isPublicAddress(ip: string): boolean {
   return false;
 }
 
-/**
- * Checks a URL before the server fetches it: https only, the exact host on the allow-list, no credentials or odd ports,
- * and every address the host resolves to must be public. The allow-list is the real control; the DNS check stops an
- * allow-listed name that has been pointed at an internal address.
- */
+// Allows only https to an allow-listed host with no credentials or odd port, resolving only to public addresses (stops DNS pointed inward).
 export async function assertSafeDownloadUrl(rawUrl: string, allowedHosts: readonly string[], resolve: Resolver = defaultResolver): Promise<URL> {
   let url: URL;
   try {
@@ -74,10 +70,7 @@ export async function assertSafeDownloadUrl(rawUrl: string, allowedHosts: readon
   return url;
 }
 
-/**
- * Streams a response body to disk with a hard byte cap and an overall deadline, refusing redirects (a redirect could lead
- * anywhere the allow-list was meant to keep out). A partial file is removed on any failure.
- */
+// Streams a download to disk with a byte cap and deadline, refusing redirects; a partial file is removed on failure.
 export async function streamToFile(
   url: URL | string,
   destPath: string,

@@ -1,11 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { format } from 'node:util';
 
-/**
- * Structured logging. Every line is one JSON object on stdout/stderr carrying `severity`, `message` and the correlation ids
- * of whatever request or job produced it, which Cloud Logging (and any log shipper) indexes without parsing.
- * Log-based metrics are built on the `event` field; the catalogue is in docs/RUNBOOK.md.
- */
+// Structured logging: one JSON object per line with severity, message and the request/job correlation ids; event names are listed in docs/RUNBOOK.md.
 export interface LogContext {
   requestId?: string;
   userId?: string;
@@ -76,10 +72,7 @@ export const log = {
     write('ERROR', message, { event, ...fields, ...describeError(err) }),
 };
 
-/**
- * Routes the existing console.* calls through the structured writer, so the many `[module] …` lines across the server gain
- * severity, correlation ids and redaction without rewriting each one. Installed once at startup (server/index.ts).
- */
+// Routes console.* through the structured writer so existing log lines gain severity, correlation ids and redaction.
 export function installStructuredConsole(): void {
   const route = (severity: Severity) => (...args: unknown[]) => {
     const err = args.find((a) => a instanceof Error);

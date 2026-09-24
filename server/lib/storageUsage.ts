@@ -2,11 +2,7 @@ import { bucket } from './firebaseAdmin';
 import { HttpError } from './httpError';
 import { limits } from './limits';
 
-/**
- * A workspace's real storage use: the total size of the objects under workspaces/{id}/ in the bucket. This replaces the old
- * running counter, which added the source size once per rendered language and never went down on deletion. Listing the
- * prefix costs one API call per 1,000 objects, so the figure is cached briefly and refreshed after uploads and deletions.
- */
+// A workspace's storage is the total size of its objects in the bucket, cached briefly and refreshed after uploads and deletions.
 const CACHE_MS = 10 * 60 * 1000;
 const cache = new Map<string, { bytes: number; at: number }>();
 

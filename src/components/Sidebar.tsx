@@ -14,6 +14,7 @@ import {
   History,
   BarChart3,
   Users,
+  BookA,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -22,6 +23,7 @@ import {
 } from 'lucide-react';
 import { NavigationTab, UserUsageStats } from '../types';
 import { useAuth } from '../context/AuthContext';
+import scatterPieLogoWhite from '../assets/scatterpie-logo-white.png';
 
 interface SidebarProps {
   activeTab: NavigationTab;
@@ -45,6 +47,7 @@ const NAV = [
 
 const NAV_BOTTOM = [
   { id: 'team' as NavigationTab, label: 'Team', Icon: Users },
+  { id: 'glossary' as NavigationTab, label: 'Glossary', Icon: BookA },
   { id: 'usage' as NavigationTab, label: 'Usage & Limits', Icon: BarChart3 },
   { id: 'settings' as NavigationTab, label: 'Settings', Icon: Settings },
 ];
@@ -133,7 +136,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="w-8 h-8 bg-coral-500 rounded-lg flex items-center justify-center shadow-[0_0_15px_rgba(240,86,55,0.4)] shrink-0 group-hover:scale-105 transition-transform">
               <Languages className="w-4 h-4 text-white" />
             </div>
-            {!collapsed && <span className="text-lg font-bold tracking-tight truncate font-display">Dubly</span>}
+            {!collapsed && (
+              <div className="flex flex-col min-w-0 leading-none">
+                <span className="text-lg font-bold tracking-tight truncate font-display leading-tight">Dubly</span>
+                <img src={scatterPieLogoWhite} alt="ScatterPie" className="h-2.5 w-auto self-start mt-1 opacity-70" />
+              </div>
+            )}
           </div>
           {!collapsed && (
             <button
@@ -249,7 +257,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
           <div className="w-8 h-8 bg-coral-500 rounded-lg flex items-center justify-center shrink-0">
             <Languages className="w-4 h-4 text-white" />
           </div>
-          <span className="text-lg font-bold tracking-tight font-display">Dubly</span>
+          <div className="flex flex-col leading-none">
+            <span className="text-lg font-bold tracking-tight font-display leading-tight">Dubly</span>
+            <img src={scatterPieLogoWhite} alt="ScatterPie" className="h-2.5 w-auto self-start mt-1 opacity-70" />
+          </div>
         </div>
         <nav className="flex-1 px-2.5 mt-2 space-y-0.5 overflow-y-auto custom-scrollbar">
           {NAV.map((item) => (

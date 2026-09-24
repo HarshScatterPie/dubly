@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
-import { lipsyncDir, serverRoot } from './paths';
+import { serverRoot, venvPython, venvSitePackages } from './paths';
 import { env } from './env';
 import type { TranscriptSegment } from '../../src/types';
 
@@ -16,9 +16,9 @@ import type { TranscriptSegment } from '../../src/types';
  *
  * Optional like lip-sync and separation: without the model, the VAD-derived timings stand.
  */
-const VENV_PYTHON = path.join(lipsyncDir, 'venv', 'Scripts', 'python.exe');
+const VENV_PYTHON = venvPython;
 const WORKER_SCRIPT = path.join(serverRoot, 'scripts', 'forced_align.py');
-const SITE_PACKAGES = path.join(lipsyncDir, 'venv', 'Lib', 'site-packages');
+const SITE_PACKAGES = venvSitePackages();
 
 /**
  * Languages with a mapped alignment model, mirroring the worker's own table. Kept in sync

@@ -419,6 +419,9 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           {/* Emotion */}
           <div className="space-y-2">
             <span className="text-xs font-medium text-[#0F172A] block">Emotion & Style</span>
+            <span className="text-[10px] text-[#64748B] block">
+              The overall tone. Each line also keeps the delivery heard in the original (excited, calm, whispering…), which you can edit per line.
+            </span>
             <div className="flex flex-wrap gap-1.5">
               {emotions.map((emo) => (
                 <button

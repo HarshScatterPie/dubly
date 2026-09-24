@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import type { DubbingProject, LanguageOutput, UserUsageStats } from '../../src/types';
+import type { DubbingProject, LanguageOutput, UserPreferences, UserUsageStats } from '../../src/types';
+import { DEFAULT_VOICE_ID, withPreferenceDefaults } from '../../src/data/preferences';
 import { db, getSignedDownloadUrl } from './firebaseAdmin';
 import { DEFAULT_PROVIDER_SETTINGS, type ProviderSettings } from './modelRouter';
 import { applyPlan, loadProject, planProjectWrite } from './projectStorage';
@@ -145,7 +146,7 @@ export async function createProject(
     targetLanguage: data.targetLanguage || 'hi',
     targetLanguages: data.targetLanguages?.length ? data.targetLanguages : [data.targetLanguage || 'hi'],
     languageOutputs: data.languageOutputs || {},
-    selectedVoiceId: data.selectedVoiceId || 'riya',
+    selectedVoiceId: data.selectedVoiceId || DEFAULT_VOICE_ID,
     languageVoiceMap: data.languageVoiceMap || {},
     languageSpeakerVoiceMap: data.languageSpeakerVoiceMap || {},
     translationStyle: data.translationStyle || 'natural',
@@ -352,17 +353,30 @@ export async function recordCompletedDub(
   });
 }
 
-export async function getSettings(uid: string): Promise<ProviderSettings> {
-  const snap = await settingsDoc(uid).get();
-  if (!snap.exists) return DEFAULT_PROVIDER_SETTINGS;
-  return { ...DEFAULT_PROVIDER_SETTINGS, ...(snap.data() as Partial<ProviderSettings>) };
+// Provider choices plus the user's own defaults; missing fields fall back, so older settings documents read the same.
+export interface UserSettings extends ProviderSettings {
+  preferences: UserPreferences;
 }
 
-export async function setSettings(uid: string, settings: Partial<ProviderSettings>): Promise<ProviderSettings> {
+function toUserSettings(data: (Partial<ProviderSettings> & { preferences?: Partial<UserPreferences> }) | undefined): UserSettings {
+  const { preferences, ...providers } = data ?? {};
+  return { ...DEFAULT_PROVIDER_SETTINGS, ...providers, preferences: withPreferenceDefaults(preferences) };
+}
+
+export async function getSettings(uid: string): Promise<UserSettings> {
+  const snap = await settingsDoc(uid).get();
+  return toUserSettings(snap.exists ? snap.data() : undefined);
+}
+
+// A merge write: only the fields sent change, including single preferences.
+export async function setSettings(
+  uid: string,
+  settings: Partial<ProviderSettings> & { preferences?: Partial<UserPreferences> }
+): Promise<UserSettings> {
   const ref = settingsDoc(uid);
   await ref.set(settings, { merge: true });
   const snap = await ref.get();
-  return { ...DEFAULT_PROVIDER_SETTINGS, ...(snap.data() as Partial<ProviderSettings>) };
+  return toUserSettings(snap.data());
 }
 
 export interface UserProfile {

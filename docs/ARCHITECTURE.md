@@ -50,6 +50,8 @@ Dub runs go through an in-process admission queue (`server/lib/dubQueue.ts`): at
 ### Dub pipeline (per job)
 Download the source → optional background separation → for each language: TTS every line (condensing lines that don't fit their slot) → stitch over the ducked background → mux → optional lip-sync → check ownership → upload the outputs → progress written after each language → settle: bill the languages that rendered and refund the rest.
 
+Each line is voiced by Gemini-TTS with a style prompt: the project's emotion plus the line's `delivery`, which transcription hears in the original. Chirp3-HD takes over while Gemini-TTS is out of quota, refuses a language or is not enabled. The workspace glossary swaps in pronunciations for the spoken text only. After rendering, every line records a `renderKey` (a fingerprint of its text, delivery, voice and voice settings) and its review flags. A **retake** is an ordinary dub job for one language whose reserved minutes cover only the lines whose fingerprint no longer matches; the TTS cache makes the unchanged lines free to re-voice.
+
 ### Transcription pipeline (per job)
 Wait for a heavy slot → download → extract 16 kHz audio → Gemini STT in chunks → remove hallucinated filler → VAD alignment → optional CTC word timing (time-boxed) → speakers → settle, with the transcript applied atomically.
 
@@ -70,6 +72,7 @@ Measured: a single-document project would exceed Firestore's 1 MiB limit at 60 m
 | `server/lib/ffmpeg.ts`, `mediaTools.ts`, `mediaValidation.ts`, `safeDownload.ts` | Media handling and safety |
 | `server/lib/log.ts`, `costMeter.ts` | Structured logging, provider cost estimates |
 | `server/lib/vertexClient.ts`, `googleTtsClient.ts`, `modelRouter.ts`, `voiceClone.ts`, `spaceClone.ts` | AI providers |
+| `server/lib/speechStyle.ts`, `glossary.ts`, `glossaryStore.ts`, `lineReview.ts`, `retake.ts` | Voice direction, workspace glossary, line review flags, line fingerprints and retake pricing |
 | `server/lib/storageUsage.ts`, `recordSweeper.ts`, `tmpSweeper.ts` | Usage measurement and data retention |
 | `src/services/*`, `src/lib/apiClient.ts` | Frontend API layer |
 

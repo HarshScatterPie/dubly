@@ -10,7 +10,7 @@ settingsRouter.get('/', async (req, res) => {
 });
 
 settingsRouter.put('/', validateBody(schemas.settings), async (req, res) => {
-  const { sttProvider, translateProvider, ttsProvider } = req.body || {};
-  const settings = await setSettings(req.uid!, { sttProvider, translateProvider, ttsProvider });
+  const { sttProvider, translateProvider, ttsProvider, preferences } = req.body || {};
+  const settings = await setSettings(req.uid!, { sttProvider, translateProvider, ttsProvider, preferences });
   res.json(settings);
 });

@@ -1,3 +1,4 @@
+import type { Response } from 'express';
 import { Router } from '../lib/router';
 import path from 'node:path';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
@@ -51,8 +52,13 @@ import { tmpDir } from '../lib/paths';
 import { resolveVoice, type VoiceSelection } from '../lib/voiceResolution';
 import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
 import { VOICES } from '../../src/data/mockData';
-import type { LocalizedSegment } from '../../src/types';
+import type { GlossaryEntry, LocalizedSegment, QaFlag } from '../../src/types';
 import { schemas, validateBody } from '../lib/validation';
+import { getGlossary } from '../lib/glossaryStore';
+import { applySpokenForms, requiredRendering } from '../lib/glossary';
+import { buildStylePrompt } from '../lib/speechStyle';
+import { renderQaFlags, textQaFlags, withFlags } from '../lib/lineReview';
+import { currentLineKey, retakePlan } from '../lib/retake';
 
 export const dubRouter = Router();
 
@@ -143,33 +149,79 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
   }
   const minutesPerLanguage = stored.videoDuration / 60;
 
-  // Job, project ownership and minute reservation are one transaction: a double click or a second teammate gets a 409, never a second charge.
-  let started: { job: DubJob; replayed: boolean };
-  try {
-    started = await startDubJob({
-      workspaceId,
-      projectId,
-      userId: uid,
-      languages: languagesToRender,
-      minutes: minutesPerLanguage * languagesToRender.length,
-      idempotencyKey: req.get('Idempotency-Key') || undefined,
-    });
-  } catch (err) {
-    if (err instanceof QuotaExceededError) {
-      res.status(403).json({ error: err.message, code: 'QUOTA_EXCEEDED' });
-      return;
-    }
-    if (err instanceof JobConflictError) {
-      res.status(409).json({ error: err.message, code: 'JOB_ALREADY_RUNNING', jobId: err.jobId });
-      return;
-    }
-    throw err;
-  }
+  const started = await startJobOrRefuse(res, {
+    workspaceId,
+    projectId,
+    userId: uid,
+    languages: languagesToRender,
+    minutes: minutesPerLanguage * languagesToRender.length,
+    idempotencyKey: req.get('Idempotency-Key') || undefined,
+  });
+  if (!started) return;
   res.status(202).json({ status: 'processing', jobId: started.job.id });
 
   // The same request replayed: its job is already running (or finished), so nothing new is started.
   if (started.replayed) return;
   // The client polls GET /api/projects/:id for progress; the job starts as soon as the queue admits it.
+  enqueueDubJob(started.job);
+});
+
+// Job, project ownership and minute reservation are one transaction: a double click or a second teammate gets a 409, never a second charge.
+async function startJobOrRefuse(res: Response, input: Parameters<typeof startDubJob>[0]): Promise<{ job: DubJob; replayed: boolean } | null> {
+  try {
+    return await startDubJob(input);
+  } catch (err) {
+    if (err instanceof QuotaExceededError) {
+      res.status(403).json({ error: err.message, code: 'QUOTA_EXCEEDED' });
+      return null;
+    }
+    if (err instanceof JobConflictError) {
+      res.status(409).json({ error: err.message, code: 'JOB_ALREADY_RUNNING', jobId: err.jobId });
+      return null;
+    }
+    throw err;
+  }
+}
+
+// Re-renders one language after line edits, charging only for the lines whose fingerprint changed since its last render.
+dubRouter.post('/:id/languages/:code/retake', refuseWhenDraining, dubLimit, async (req, res) => {
+  const workspaceId = req.workspaceId!;
+  const projectId = req.params.id;
+  const languageCode = req.params.code;
+  const stored = await getStoredProject(workspaceId, projectId);
+  if (!stored) {
+    res.status(404).json({ error: 'Project not found' });
+    return;
+  }
+  if (!projectLanguages(stored).includes(languageCode)) {
+    res.status(404).json({ error: `Project is not being dubbed into ${languageCode}` });
+    return;
+  }
+  if (!stored.videoStoragePath || !(stored.videoDuration > 0)) {
+    res.status(400).json({ error: 'This video has no known length. Upload it again before dubbing.', code: 'VIDEO_DURATION_UNKNOWN' });
+    return;
+  }
+  const plan = retakePlan(stored, languageCode);
+  if (!plan) {
+    res.status(400).json({ error: `${getLanguageName(languageCode)} has no line-level render to update yet. Re-dub it instead.`, code: 'RETAKE_UNAVAILABLE' });
+    return;
+  }
+  if (plan.changedLineIds.length === 0) {
+    res.status(400).json({ error: `Nothing changed in ${getLanguageName(languageCode)} since its last render.`, code: 'NOTHING_TO_RETAKE' });
+    return;
+  }
+
+  const started = await startJobOrRefuse(res, {
+    workspaceId,
+    projectId,
+    userId: req.uid!,
+    languages: [languageCode],
+    minutes: plan.minutes,
+    idempotencyKey: req.get('Idempotency-Key') || undefined,
+  });
+  if (!started) return;
+  res.status(202).json({ status: 'processing', jobId: started.job.id, changedLines: plan.changedLineIds.length, minutes: plan.minutes });
+  if (started.replayed) return;
   enqueueDubJob(started.job);
 });
 
@@ -368,6 +420,8 @@ async function renderLanguage(params: {
   voiceCatalog: (typeof VOICES)[number][];
   loadCloneReference: (voiceId: string) => Promise<{ audioPath: string; transcript?: string }>;
   ttsProvider: ProviderSettings['ttsProvider'];
+  expressiveVoices: boolean;
+  glossary: GlossaryEntry[];
   onProgress: (fraction: number, message: string) => Promise<void>;
 }): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[] }> {
   const { workspaceId, projectId, stored, languageCode, segments, videoLocalPath, background, costMeter } = params;
@@ -391,9 +445,14 @@ async function renderLanguage(params: {
       })
     : {};
 
+  // Lines are reviewed against the same rules as on save, plus how their audio fit the slot.
+  const review = { languageCode, sourceLanguageCode: stored.sourceLanguage, glossary: params.glossary };
+  const protectedTerms = params.glossary.map((entry) => requiredRendering(entry, languageCode)).filter((term): term is string => Boolean(term));
+
   const timedAudio: { startTime: number; endTime: number; audio: Buffer }[] = [];
   for (let i = 0; i < finalSegments.length; i++) {
     const seg = finalSegments[i];
+    let renderFlags: QaFlag[] = [];
     // A segment with no text (e.g. a silent lead-in the STT step correctly
     // transcribed as empty) has nothing to synthesize — every provider rejects an
     // empty string outright. Leave that span silent in the stitched track instead.
@@ -402,9 +461,15 @@ async function renderLanguage(params: {
       // as by language, and both are only known here.
       const lineVoice = resolveVoice(params.voiceSelection, languageCode, seg.speaker, params.voiceCatalog);
       const cloneReference = isClonedVoiceId(lineVoice.id) ? await params.loadCloneReference(lineVoice.id) : undefined;
+      // The project's overall emotion plus how the original line was delivered.
+      const style = buildStylePrompt(stored.voiceEmotion, seg.delivery);
       const synthesize = async (speechText: string) => {
-        const result = await routeSynthesizeSpeech(speechText, lineVoice, languageCode, params.ttsProvider, cloneReference);
-        recordTts(costMeter, result.provider, speechText.length, result.fromCache);
+        const result = await routeSynthesizeSpeech(applySpokenForms(speechText, params.glossary), lineVoice, languageCode, params.ttsProvider, {
+          cloneReference,
+          style,
+          expressive: params.expressiveVoices,
+        });
+        recordTts(costMeter, result.engine === 'gemini' ? 'gemini-tts' : result.provider, speechText.length, result.fromCache);
         return result.audio;
       };
 
@@ -414,12 +479,13 @@ async function renderLanguage(params: {
       const nextSpoken = finalSegments.slice(i + 1).find((s) => s.translatedText.trim().length > 0);
       const nextStart = nextSpoken ? nextSpoken.startTime : stored.videoDuration;
       const available = Math.max(seg.endTime - seg.startTime, nextStart - seg.startTime - SEGMENT_GUARD_SECONDS);
-      const spokenSeconds = effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
+      let spokenSeconds = effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
+      let wasCondensed = false;
 
       // Too long to fit even at the fastest natural pace: rewrite it shorter rather than gabble or overlap. Hand-edited lines are left as the user wrote them.
       if (!seg.isEdited && spokenSeconds > available * MAX_COMPRESSION) {
         try {
-          const condensed = await vertexCondenseLine(seg.translatedText, languageCode, languageName, available * 1.1, spokenSeconds);
+          const condensed = await vertexCondenseLine(seg.translatedText, languageCode, languageName, available * 1.1, spokenSeconds, protectedTerms);
           if (condensed) {
             const condensedSpeech = isHinglish
               ? (await vertexHinglishToSpeechScript([{ id: seg.id, text: condensed }]))[seg.id] || condensed
@@ -429,14 +495,19 @@ async function renderLanguage(params: {
               console.log(`[dub] ${languageCode} ${seg.id}: condensed to fit ${available.toFixed(1)}s slot (was ${spokenSeconds.toFixed(1)}s)`);
               audio = retake;
               seg.translatedText = condensed;
+              wasCondensed = true;
+              spokenSeconds = effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
             }
           }
         } catch (err) {
           console.error(`[dub] condensing ${seg.id} failed, keeping the full line`, err);
         }
       }
+      renderFlags = renderQaFlags({ condensed: wasCondensed, spokenSeconds, availableSeconds: available, maxCompression: MAX_COMPRESSION });
       timedAudio.push({ startTime: seg.startTime, endTime: seg.endTime, audio });
     }
+    // Every line, spoken or silent, records what was rendered, so a later retake can tell exactly which lines changed.
+    finalSegments[i] = withFlags({ ...seg, renderKey: currentLineKey(stored, languageCode, seg) }, [...textQaFlags(seg, review), ...renderFlags]);
     await params.onProgress(
       segments.length ? ((i + 1) / segments.length) * 0.7 : 0.7,
       `${languageName}: generating neural voice audio (${i + 1}/${segments.length})...`
@@ -528,6 +599,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     selectedVoiceId: stored.selectedVoiceId,
   };
   const settings = await getSettings(uid);
+  const glossary = await getGlossary(workspaceId);
 
   // Decided (and charged for) when the job was created.
   const languages = job.languages;
@@ -584,6 +656,9 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           voiceCatalog,
           loadCloneReference,
           ttsProvider: settings.ttsProvider,
+          // The choice of whoever started the dub.
+          expressiveVoices: settings.preferences.expressiveVoices,
+          glossary,
           onProgress,
         });
         languageOutputs[languageCode] = {

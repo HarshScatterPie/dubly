@@ -88,25 +88,25 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
     {
       title: 'Tech Keynote Launch',
       lang: 'en',
-      voice: 'alex',
+      voice: 'google-en-fenrir',
       text: 'Today marks a giant leap forward. Dubly enables every creator and enterprise to localize high-definition video across twenty-eight languages in seconds.',
     },
     {
       title: 'Hindi Storytelling & Podcast',
       lang: 'hi',
-      voice: 'riya',
+      voice: 'google-hi-aoede',
       text: 'नमस्ते दोस्तों! आज हम बात करेंगे कि कैसे आर्टिफिशियल इंटेलिजेंस हमारे वीडियो और पॉडकास्ट को दुनिया के हर कोने तक पहुँचा रहा है।',
     },
     {
       title: 'Tamil Tech Review',
       lang: 'ta',
-      voice: 'rohan',
+      voice: 'google-ta-orus',
       text: 'வணக்கம் நண்பர்களே! இந்த வீடியோவில் நாம் புத்தம் புதிய AI வீடியோ மொழிபெயர்ப்பு தொழில்நுட்பத்தைப் பற்றி விரிவாகப் பார்க்கப் போகிறோம்.',
     },
     {
       title: 'Spanish Brand Story',
       lang: 'es',
-      voice: 'mateo',
+      voice: 'google-en-fenrir',
       text: 'Bienvenidos a una experiencia transformadora. Nuestro compromiso es derribar las barreras del idioma para conectar a millones de personas.',
     },
   ];

@@ -133,7 +133,7 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   app.use('/api/profile', requireAuth, profileRouter);
   app.use('/api/settings', requireAuth, settingsRouter);
   app.use('/api/usage', requireAuth, requireWorkspace, usageRouter);
-  app.use('/api/tts', requireAuth, ttsRouter);
+  app.use('/api/tts', requireAuth, requireWorkspace, ttsRouter);
   app.use('/api/voices', requireAuth, voicesRouter);
   // Invitations addressed to the caller are resolved by their email, before (and regardless of) which workspace they are in.
   app.use('/api/invites', requireAuth, invitesRouter);

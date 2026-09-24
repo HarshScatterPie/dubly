@@ -5,6 +5,9 @@ import { randomUUID } from 'node:crypto';
 import { VOICES, LANGUAGES } from '../../src/data/mockData';
 import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
 import { routeSynthesizeSpeech } from '../lib/modelRouter';
+import { buildStylePrompt } from '../lib/speechStyle';
+import { applySpokenForms } from '../lib/glossary';
+import { getGlossary } from '../lib/glossaryStore';
 import { applyPitchSpeed } from '../lib/ffmpeg';
 import { getWavDurationSeconds } from '../lib/audioUtils';
 import { getSettings } from '../lib/projectRepo';
@@ -21,7 +24,7 @@ export const ttsRouter = Router();
  * timed, muxed into video) goes through POST /api/projects/:id/dub instead.
  */
 ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), validateBody(schemas.tts), async (req, res) => {
-  const { text, voiceId, languageCode, speed, pitch } = req.body || {};
+  const { text, voiceId, languageCode, speed, pitch, emotion, delivery } = req.body || {};
   if (!text || typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: 'text is required' });
     return;
@@ -39,14 +42,20 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
 
   const jobDir = path.join(tmpDir, 'tts', randomUUID());
   try {
-    const settings = await getSettings(req.uid!);
+    const [settings, glossary] = await Promise.all([getSettings(req.uid!), getGlossary(req.workspaceId!)]);
     const loadReference = createReferenceLoader(req.uid!, jobDir);
     const { audio, provider } = await routeSynthesizeSpeech(
-      text,
+      // The workspace's pronunciations apply here as in a dub, so a preview is how the render will sound.
+      applySpokenForms(text, glossary),
       voice,
       targetLanguageCode,
       settings.ttsProvider,
-      isClonedVoiceId(voice.id) ? await loadReference(voice.id) : undefined
+      {
+        cloneReference: isClonedVoiceId(voice.id) ? await loadReference(voice.id) : undefined,
+        // Same direction a dub gives the line, so a preview sounds like the render.
+        style: buildStylePrompt(emotion, delivery),
+        expressive: settings.preferences.expressiveVoices,
+      }
     );
     const shaped = await applyPitchSpeed(audio, pitch ?? 1, speed ?? 1, jobDir);
     const durationSeconds = getWavDurationSeconds(shaped);

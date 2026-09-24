@@ -9,6 +9,9 @@ import { probeMedia, splitAudioIntoChunks, extractAudioClip } from './ffmpeg';
 import { logGeminiCallCost } from './costMeter';
 import { getScriptInstruction, isInExpectedScript, mapDetectedLanguageToAppCode } from './languageMeta';
 import { log } from './log';
+import { cleanDelivery } from './speechStyle';
+import { glossaryInstruction, glossaryMisses, relevantEntries, withoutKeptTerms } from './glossary';
+import type { GlossaryEntry } from '../../src/types';
 
 export interface RawSttWord {
   text: string;
@@ -24,6 +27,8 @@ export interface RawSttSegment {
   words?: RawSttWord[];
   /** Set when the provider could label speakers as part of transcription, avoiding a separate diarization pass. */
   speaker?: string;
+  // How the line is said (e.g. "excited and fast"), heard in the same pass; steers the dubbed voice.
+  delivery?: string;
 }
 
 export interface RawSttResult {
@@ -117,10 +122,11 @@ async function requestTranslations(
   targetLanguageName: string,
   style: string,
   adaptExpressions: boolean,
-  scriptInstruction: string
+  scriptInstruction: string,
+  glossaryText: string
 ): Promise<Record<string, string>> {
   const ai = getClient();
-  const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions, scriptInstruction);
+  const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText);
 
   const response = await withRetry('translation', () =>
     ai.models.generateContent({
@@ -144,20 +150,30 @@ export async function vertexTranslateSegments(
   targetLanguageCode: string,
   targetLanguageName: string,
   style: string,
-  adaptExpressions: boolean
+  adaptExpressions: boolean,
+  glossary: GlossaryEntry[] = []
 ): Promise<Record<string, string>> {
   const scriptInstruction = getScriptInstruction(targetLanguageCode);
-  const result = await requestTranslations(segments, targetLanguageName, style, adaptExpressions, scriptInstruction);
+  // Only the terms these lines actually use, so a large glossary does not bloat every prompt.
+  const terms = relevantEntries(glossary, segments.map((s) => s.text));
+  const glossaryText = glossaryInstruction(terms, targetLanguageCode);
+  const result = await requestTranslations(segments, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText);
 
-  // One targeted re-ask for lines that went missing or came back in the wrong script (e.g. romanized Hindi).
-  const bad = segments.filter((s) => !result[s.id]?.trim() || !isInExpectedScript(result[s.id], targetLanguageCode));
+  // Lower is better: a wrong script outweighs any number of missed glossary terms.
+  const problems = (source: string, text: string | undefined) =>
+    !text?.trim()
+      ? Infinity
+      : (isInExpectedScript(withoutKeptTerms(text, terms), targetLanguageCode) ? 0 : 100) + glossaryMisses(source, text, terms, targetLanguageCode).length;
+
+  // One targeted re-ask for lines that went missing, came back in the wrong script (e.g. romanized Hindi) or broke the glossary.
+  const bad = segments.filter((s) => problems(s.text, result[s.id]) > 0);
   if (bad.length > 0) {
-    console.warn(`[vertexClient] ${bad.length}/${segments.length} ${targetLanguageName} lines missing or in the wrong script, retrying them`);
+    console.warn(`[vertexClient] ${bad.length}/${segments.length} ${targetLanguageName} lines missing, in the wrong script or off-glossary, retrying them`);
     try {
-      const retried = await requestTranslations(bad, targetLanguageName, style, adaptExpressions, scriptInstruction);
+      const retried = await requestTranslations(bad, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText);
       for (const s of bad) {
         const candidate = retried[s.id]?.trim();
-        if (candidate && (isInExpectedScript(candidate, targetLanguageCode) || !result[s.id]?.trim())) result[s.id] = candidate;
+        if (candidate && problems(s.text, candidate) < problems(s.text, result[s.id])) result[s.id] = candidate;
       }
     } catch (err) {
       console.error('[vertexClient] translation retry failed, keeping first pass', err);
@@ -192,14 +208,18 @@ export async function vertexCondenseLine(
   targetLanguageCode: string,
   targetLanguageName: string,
   targetSeconds: number,
-  currentSeconds: number
+  currentSeconds: number,
+  // Glossary renderings present in the line; a shortened line that drops one is rejected.
+  protectedTerms: string[] = []
 ): Promise<string | null> {
   const ai = getClient();
   const keepRatio = Math.max(0.4, Math.min(0.95, targetSeconds / currentSeconds));
   const scriptInstruction = getScriptInstruction(targetLanguageCode);
+  const mustKeep = protectedTerms.filter((term) => text.toLocaleLowerCase().includes(term.toLocaleLowerCase()));
   const prompt = `This ${targetLanguageName} dubbing line takes ${currentSeconds.toFixed(1)}s to speak but must fit in ${targetSeconds.toFixed(1)}s.
 Rewrite it to about ${Math.round(keepRatio * 100)}% of its current length while keeping the core meaning and tone. Drop filler and redundancy; do not add anything new.
-${scriptInstruction}
+${scriptInstruction}${mustKeep.length ? `
+Keep these terms exactly as written: ${mustKeep.map((t) => JSON.stringify(t)).join(', ')}.` : ''}
 Return ONLY {"text": "<shortened line>"}.
 
 Line: ${JSON.stringify(text)}`;
@@ -215,6 +235,7 @@ Line: ${JSON.stringify(text)}`;
     const parsed = JSON.parse((response.text || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, ''));
     const shortened = typeof parsed?.text === 'string' ? parsed.text.trim() : '';
     if (!shortened || shortened.length >= text.length || !isInExpectedScript(shortened, targetLanguageCode)) return null;
+    if (mustKeep.some((term) => !shortened.toLocaleLowerCase().includes(term.toLocaleLowerCase()))) return null;
     return shortened;
   } catch {
     return null;
@@ -260,8 +281,9 @@ async function vertexTranscribeSingle(
 ${languageLine}
 SCRIPT RULE (critical): write the transcript in the NATIVE writing system of the spoken language — Telugu in Telugu script (తెలుగు), Hindi in Devanagari (हिन्दी), Tamil in Tamil script (தமிழ்), Bengali in Bengali script, Kannada in Kannada script, Malayalam in Malayalam script, Gujarati in Gujarati script, Punjabi in Gurmukhi, Marathi in Devanagari, Japanese in kanji/kana, and so on. NEVER romanize or transliterate a non-Latin-script language into English letters. English words spoken inside such a language are written in that language's script as pronounced; only brand names and acronyms may stay in Latin letters. Do NOT translate anything — write exactly what was said.
 Also identify how many distinct speakers are talking, using differences in voice (pitch, timbre, tone), and label every segment with who said it ("Speaker 1", "Speaker 2", ...). If only one person speaks throughout, label everything "Speaker 1".
+For every segment also describe its delivery in English, 2 to 6 words: the emotion, energy and pace you hear (e.g. "excited and fast", "calm and warm", "sarcastic", "whispering", "angry, shouting", "sad and slow"). Describe how it is said, not what is said.
 Return ONLY a JSON object of the exact form:
-{"language": "<detected spoken language as its English name, e.g. Telugu, Hindi, English>", "segments": [{"start": <seconds, number>, "end": <seconds, number>, "text": "<verbatim text>", "speaker": "Speaker 1"}]}
+{"language": "<detected spoken language as its English name, e.g. Telugu, Hindi, English>", "segments": [{"start": <seconds, number>, "end": <seconds, number>, "text": "<verbatim text>", "speaker": "Speaker 1", "delivery": "<2-6 words>"}]}
 Transcribe ONLY audible speech. Silence, music, breathing, applause and background noise must produce no segment at all — do not fill them with filler words.
 Never repeat the same short phrase across consecutive segments; if you find yourself about to emit the same text again, emit nothing instead. Segments must advance through the audio: each start must be greater than or equal to the previous segment's end.
 No commentary, no markdown fences. If there is no speech, return {"language": "unknown", "segments": []}.`;
@@ -305,7 +327,7 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
     .replace(/^```\s*/i, '')
     .replace(/```\s*$/i, '');
 
-  let parsed: { language?: string; segments?: Array<{ start: number; end: number; text: string; speaker?: string }> };
+  let parsed: { language?: string; segments?: Array<{ start: number; end: number; text: string; speaker?: string; delivery?: string }> };
   try {
     parsed = JSON.parse(cleaned);
   } catch (err) {
@@ -318,6 +340,7 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
     text: String(s.text || '').trim(),
     confidence: 0.9,
     speaker: typeof s.speaker === 'string' && s.speaker.trim() ? s.speaker.trim() : undefined,
+    delivery: cleanDelivery(s.delivery),
     words: estimateWordTimings(String(s.text || '').trim(), Number(s.start) || 0, Number(s.end) || 0),
   }));
 
@@ -471,6 +494,7 @@ export async function vertexTranscribe(
           text: seg.text,
           confidence: seg.confidence,
           speaker: seg.speaker,
+          delivery: seg.delivery,
           words: seg.words?.map((w) => ({ text: w.text, start: w.start + offset, end: w.end + offset })),
         });
       }

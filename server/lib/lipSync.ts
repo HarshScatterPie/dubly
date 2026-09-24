@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { ffmpegDir } from './mediaTools';
-import { lipsyncDir } from './paths';
+import { lipsyncDir, venvPython } from './paths';
 
 /**
  * Free, self-hosted lip-sync via a CPU-friendly ONNX build of Wav2Lip
@@ -18,7 +18,7 @@ import { lipsyncDir } from './paths';
  * checkpoint-name check in inference_onnxModel.py.
  */
 const REPO_DIR = path.join(lipsyncDir, 'wav2lip_onnx');
-const VENV_PYTHON = path.join(lipsyncDir, 'venv', 'Scripts', 'python.exe');
+const VENV_PYTHON = venvPython;
 const CHECKPOINT_PATH = path.join(REPO_DIR, 'checkpoints', 'wav2lip_256.onnx');
 const INFERENCE_SCRIPT = 'inference_onnxModel.py';
 

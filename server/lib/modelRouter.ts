@@ -1,8 +1,9 @@
-import type { TranscriptSegment, Voice } from '../../src/types';
+import type { GlossaryEntry, TranscriptSegment, Voice } from '../../src/types';
 import { getLanguageBcp47, getLanguageName } from './languageMeta';
 import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult } from './vertexClient';
 import type { TranslatableSegment } from './translatePrompt';
-import { googleSynthesizeSpeech, isGoogleTtsConfigured } from './googleTtsClient';
+import { geminiTtsUsable, googleSynthesizeSpeech, isGoogleTtsConfigured, type TtsEngine } from './googleTtsClient';
+import { env } from './env';
 import { readTtsCache, ttsCacheKey, writeTtsCache } from './ttsCache';
 import { getWavDurationSeconds, trimSilence } from './audioUtils';
 import { canCloneInLanguage, isVoiceCloneAvailable, synthesizeClonedSpeech } from './voiceClone';
@@ -66,6 +67,7 @@ function toTranscriptSegments(raw: RawSttResult['segments']): TranscriptSegment[
     wordsCount: seg.text.split(/\s+/).filter(Boolean).length,
     confidence: seg.confidence,
     words: seg.words,
+    ...(seg.delivery ? { delivery: seg.delivery } : {}),
   }));
 }
 
@@ -87,13 +89,14 @@ export async function routeTranslateSegments(
   targetLanguageCode: string,
   style: string,
   adaptExpressions: boolean,
-  override: TranslateProvider
+  override: TranslateProvider,
+  glossary: GlossaryEntry[] = []
 ): Promise<{ provider: 'vertex'; translations: Record<string, string> }> {
   if (!isVertexConfigured()) {
     throw new Error('No translation provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
   }
   const targetLanguageName = getLanguageName(targetLanguageCode);
-  const translations = await vertexTranslateSegments(segments, targetLanguageCode, targetLanguageName, style, adaptExpressions);
+  const translations = await vertexTranslateSegments(segments, targetLanguageCode, targetLanguageName, style, adaptExpressions, glossary);
   return { provider: 'vertex', translations };
 }
 
@@ -141,12 +144,19 @@ export async function routeSynthesizeSpeech(
   voice: Voice,
   targetLanguageCode: string,
   override: TtsProvider,
-  /**
-   * The user's own recording, required only when `voice` is one of their cloned voices.
-   * Passed in rather than looked up here so this module stays free of storage concerns.
-   */
-  cloneReference?: { audioPath: string; transcript?: string }
-): Promise<{ provider: 'vertex' | 'clone'; audio: Buffer; fromCache: boolean }> {
+  opts: {
+    /**
+     * The user's own recording, required only when `voice` is one of their cloned voices.
+     * Passed in rather than looked up here so this module stays free of storage concerns.
+     */
+    cloneReference?: { audioPath: string; transcript?: string };
+    // Emotion and delivery direction for Gemini-TTS (see speechStyle.ts); cloned voices and Chirp3-HD ignore it.
+    style?: string;
+    // The user's choice between expressive (Gemini-TTS) and standard (Chirp3-HD) voices.
+    expressive?: boolean;
+  } = {}
+): Promise<{ provider: 'vertex' | 'clone'; engine?: TtsEngine; audio: Buffer; fromCache: boolean }> {
+  const { cloneReference, style = '', expressive = true } = opts;
   const text = normalizeTextForSpeech(rawText) || rawText.trim();
   // A cloned voice is the user's own voice: substituting a stock voice for it would be
   // silently wrong in a way they would only notice after the render. So this path either
@@ -213,20 +223,24 @@ export async function routeSynthesizeSpeech(
   // Identical input yields identical audio, and TTS is billed per character — so never
   // pay for the same synthesis twice (repeated lines, re-runs, or a retry after a
   // partway failure). Keyed on everything that can change the output.
-  const cacheKey = ttsCacheKey([override, voice.id, targetLanguageCode, text]);
-  const cached = await readTtsCache(cacheKey);
-  if (cached) {
-    return { provider: 'vertex', audio: trimSilence(cached), fromCache: true };
+  // Each engine has its own entry: a Gemini take is reused whenever one exists, and a Chirp3-HD one only while Gemini is off.
+  const bcp47 = getLanguageBcp47(targetLanguageCode);
+  const chirpKey = ttsCacheKey([override, voice.id, targetLanguageCode, text]);
+  const geminiKey = expressive && env.ttsEngine === 'gemini' ? ttsCacheKey([override, 'gemini', env.geminiTtsModel, voice.id, targetLanguageCode, style, text]) : null;
+  const cachedGemini = geminiKey ? await readTtsCache(geminiKey) : null;
+  if (cachedGemini) return { provider: 'vertex', engine: 'gemini', audio: trimSilence(cachedGemini), fromCache: true };
+  if (!geminiKey || !geminiTtsUsable(bcp47)) {
+    const cachedChirp = await readTtsCache(chirpKey);
+    if (cachedChirp) return { provider: 'vertex', engine: 'chirp', audio: trimSilence(cachedChirp), fromCache: true };
   }
 
   for (let retry = 0; ; retry++) {
     try {
-      // Google Cloud TTS rather than Gemini's preview TTS model — same GCP project and
-      // credits, but production quotas instead of a per-minute cap that a multi-segment
-      // dub exhausts, plus real per-language voices instead of one language-agnostic timbre.
-      const audio = trimSilence(await googleSynthesizeSpeech(text, getLanguageBcp47(targetLanguageCode), voice.providerVoice.vertex, voice.gender));
-      await writeTtsCache(cacheKey, audio);
-      return { provider: 'vertex', audio, fromCache: false };
+      // Gemini-TTS through the GA Cloud TTS API (not the per-minute-capped preview model), with Chirp3-HD as its fallback.
+      const result = await googleSynthesizeSpeech(text, bcp47, voice.providerVoice.vertex, voice.gender, style, expressive);
+      const audio = trimSilence(result.audio);
+      await writeTtsCache(result.engine === 'gemini' && geminiKey ? geminiKey : chirpKey, audio);
+      return { provider: 'vertex', engine: result.engine, audio, fromCache: false };
     } catch (err) {
       // A dub synthesizes one clip per segment back-to-back, which is exactly the shape
       // that trips per-minute quotas, and there's no second provider to fall through to

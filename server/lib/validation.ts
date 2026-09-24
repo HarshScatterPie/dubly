@@ -1,10 +1,12 @@
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
+import { MAX_DELIVERY_LENGTH } from './speechStyle';
 
 // Runtime shapes for every write endpoint; limits are generous next to real UI use (a 60-minute video is ~750 segments).
 const MAX_SEGMENTS = 5000;
 const MAX_TEXT = 5000;
 const MAX_MAP_ENTRIES = 50;
+const MAX_GLOSSARY_ENTRIES = 300;
 
 const id = z.string().min(1).max(200);
 const languageCode = z.string().min(2).max(32).regex(/^[A-Za-z]{2,10}([-_][A-Za-z0-9]{1,8})*$/, 'Invalid language code');
@@ -23,6 +25,20 @@ export const voiceEmotion = z.enum(['neutral', 'friendly', 'energetic', 'profess
 const dubbingStep = z.enum(['upload', 'understand', 'localize', 'voice', 'export']);
 const provider = z.enum(['auto', 'vertex']);
 const role = z.enum(['admin', 'editor']);
+// Delivery direction for the voice; the server flattens it further (speechStyle.cleanDelivery).
+const delivery = z.string().max(MAX_DELIVERY_LENGTH);
+
+const glossaryEntry = z.object({
+  id: z.string().trim().min(1).max(64),
+  term: z.string().trim().min(1).max(100),
+  mode: z.enum(['keep', 'translate']),
+  translations: z
+    .record(languageCode, z.string().trim().max(200))
+    .refine((obj) => Object.keys(obj).length <= MAX_MAP_ENTRIES, `At most ${MAX_MAP_ENTRIES} entries`)
+    .optional(),
+  spokenAs: z.string().trim().max(100).optional(),
+  note: z.string().trim().max(300).optional(),
+});
 
 // Segments keep any extra fields the editor attaches (passthrough); the known ones are type-checked and bounded.
 const transcriptSegment = z
@@ -35,6 +51,7 @@ const transcriptSegment = z
     wordsCount: z.number().int().min(0).max(10_000).nullable().optional(),
     confidence: z.number().finite().nullable().optional(),
     words: z.array(z.object({ text: z.string().max(200), start: seconds, end: seconds }).passthrough()).max(2000).optional(),
+    delivery: delivery.optional(),
   })
   .passthrough();
 
@@ -48,6 +65,7 @@ const localizedSegment = z
     sourceText: z.string().max(MAX_TEXT),
     translatedText: z.string().max(MAX_TEXT),
     isEdited: z.boolean().nullable().optional(),
+    delivery: delivery.optional(),
   })
   .passthrough();
 
@@ -102,8 +120,35 @@ export const schemas = {
     languageCode: languageCode.optional(),
     speed: multiplier.optional(),
     pitch: multiplier.optional(),
+    emotion: voiceEmotion.optional(),
+    delivery: delivery.optional(),
   }),
-  settings: z.object({ sttProvider: provider.optional(), translateProvider: provider.optional(), ttsProvider: provider.optional() }),
+  // Terms are unique regardless of case, or two entries could demand different renderings of one word.
+  glossary: z.object({
+    entries: z
+      .array(glossaryEntry)
+      .max(MAX_GLOSSARY_ENTRIES)
+      .refine((entries) => new Set(entries.map((e) => e.term.toLocaleLowerCase())).size === entries.length, 'Each term may appear only once'),
+  }),
+  settings: z.object({
+    sttProvider: provider.optional(),
+    translateProvider: provider.optional(),
+    ttsProvider: provider.optional(),
+    preferences: z
+      .object({
+        defaultTargetLanguages: z.array(languageCode).max(10).optional(),
+        defaultVoiceId: voiceId.optional(),
+        translationStyle: translationStyle.optional(),
+        adaptExpressions: z.boolean().optional(),
+        voiceEmotion: voiceEmotion.optional(),
+        voiceSpeed: z.number().finite().min(0.75).max(1.25).optional(),
+        expressiveVoices: z.boolean().optional(),
+        separateBackground: z.boolean().optional(),
+        autoLipSync: z.boolean().optional(),
+        burnCaptions: z.boolean().optional(),
+      })
+      .optional(),
+  }),
   renameWorkspace: z.object({ name: z.string().trim().min(1).max(80) }),
   invite: z.object({ email: z.string().trim().min(3).max(254), role }),
   changeRole: z.object({ role }),

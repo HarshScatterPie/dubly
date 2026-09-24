@@ -18,6 +18,7 @@ import {
   type WorkspaceRole,
 } from '../lib/workspaces';
 import { schemas, validateBody } from '../lib/validation';
+import { getGlossary, saveGlossary } from '../lib/glossaryStore';
 
 export const workspaceRouter = Router();
 
@@ -98,6 +99,16 @@ workspaceRouter.delete('/members/:uid', requireAdmin, async (req, res) => {
   } catch (err) {
     sendError(res, err);
   }
+});
+
+// The glossary steers every member's translations, so everyone can read it and admins maintain it.
+workspaceRouter.get('/glossary', async (req, res) => {
+  res.json({ entries: await getGlossary(req.workspaceId!), canEdit: req.workspaceRole === 'admin' });
+});
+
+workspaceRouter.put('/glossary', requireAdmin, validateBody(schemas.glossary), async (req, res) => {
+  const entries = await saveGlossary(req.workspaceId!, req.body.entries, req.uid!);
+  res.json({ entries, canEdit: true });
 });
 
 // Mounted behind requireAuth only: the invite is matched to the caller's signed-in email, whatever workspace they are in now.

@@ -1,0 +1,10 @@
+# Installed by deploy/vm/install.sh.
+[Unit]
+Description=Check GitHub for a new Dubly release every 2 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target

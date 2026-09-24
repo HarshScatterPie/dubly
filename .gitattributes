@@ -1,0 +1,4 @@
+# Scripts and unit files run on Linux; keep Unix line endings whatever the checkout platform.
+*.sh text eol=lf
+deploy/vm/* text eol=lf
+Dockerfile text eol=lf

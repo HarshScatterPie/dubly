@@ -3,6 +3,7 @@ import { BookA, Check, Loader2, Pencil, Plus, Save, Trash2, X } from 'lucide-rea
 import type { GlossaryEntry } from '../types';
 import { LANGUAGES } from '../data/mockData';
 import { workspaceService } from '../services/workspaceService';
+import { randomId } from '../lib/randomId';
 
 interface GlossaryViewProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
@@ -13,7 +14,7 @@ const inputClass =
 
 const languageName = (code: string) => LANGUAGES.find((l) => l.code === code)?.name || code;
 
-const emptyEntry = (): GlossaryEntry => ({ id: crypto.randomUUID(), term: '', mode: 'keep' });
+const emptyEntry = (): GlossaryEntry => ({ id: randomId(), term: '', mode: 'keep' });
 
 // One entry's form, used both to add a term and to edit one in place.
 const EntryEditor: React.FC<{ initial: GlossaryEntry; onSave: (entry: GlossaryEntry) => void; onCancel?: () => void; saveLabel: string }> = ({

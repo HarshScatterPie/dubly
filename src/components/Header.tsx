@@ -12,6 +12,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { NavigationTab } from '../types';
+import scatterPieLogo from '../assets/scatterpie-logo.png';
 
 interface HeaderProps {
   activeTab: NavigationTab;
@@ -77,6 +78,9 @@ export const Header: React.FC<HeaderProps> = ({
         >
           <Menu className="w-5 h-5" />
         </button>
+
+        {/* The sidebar carries the brand on desktop; below md it is a closed drawer */}
+        <img src={scatterPieLogo} alt="ScatterPie" className="md:hidden h-5 w-auto shrink-0 select-none" draggable={false} />
 
         <div className="hidden sm:block min-w-0">
           <h1 className="text-base sm:text-lg font-semibold text-foreground tracking-tight truncate font-display">

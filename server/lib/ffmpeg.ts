@@ -15,7 +15,6 @@ const TIMEOUT = {
   render: minutes('FFMPEG_RENDER_TIMEOUT_MINUTES', 120),
 };
 const PROBE_TIMEOUT_MS = 60_000;
-// Generated silence (lavfi) is selected with a raw -f option: newer ffmpeg lists lavfi under -devices, which fluent-ffmpeg's format check does not read.
 
 function fromFile(input: string, timeoutSeconds = TIMEOUT.render) {
   return ffmpeg({ timeout: timeoutSeconds }).input(input).inputOptions(SAFE_INPUT_OPTIONS);
@@ -23,6 +22,36 @@ function fromFile(input: string, timeoutSeconds = TIMEOUT.render) {
 
 function addFile(command: ReturnType<typeof ffmpeg>, input: string) {
   return command.input(input).inputOptions(SAFE_INPUT_OPTIONS);
+}
+
+// A second of 16-bit mono silence as a WAV file.
+function silentWav(sampleRate: number): Buffer {
+  const data = sampleRate * 2;
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0, 'latin1');
+  header.writeUInt32LE(36 + data, 4);
+  header.write('WAVEfmt ', 8, 'latin1');
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write('data', 36, 'latin1');
+  header.writeUInt32LE(data, 40);
+  return Buffer.concat([header, Buffer.alloc(data)]);
+}
+
+/**
+ * The base track when there is no background audio: one second of silence, looped for as long as the output runs. A plain
+ * file rather than ffmpeg's generated `anullsrc`, because fluent-ffmpeg refuses the lavfi input on newer ffmpeg builds
+ * (they list lavfi under -devices, which its format check does not read).
+ */
+async function silenceInput(workDir: string, sampleRate: number) {
+  const silencePath = path.join(workDir, 'silence.wav');
+  await writeFile(silencePath, silentWav(sampleRate));
+  return ffmpeg({ timeout: TIMEOUT.render }).input(silencePath).inputOptions(['-stream_loop', '-1', ...SAFE_INPUT_OPTIONS]);
 }
 
 export interface MediaProbe {
@@ -196,10 +225,8 @@ export async function stitchDubbedAudio(params: {
   const outputPath = path.join(workDir, 'dubbed_audio.wav');
 
   if (segments.length === 0) {
+    const cmd = background ? fromFile(background.path) : await silenceInput(workDir, sampleRate);
     return new Promise((resolve, reject) => {
-      const cmd = background
-        ? fromFile(background.path)
-        : ffmpeg({ timeout: TIMEOUT.render }).input(`anullsrc=r=${sampleRate}:cl=mono`).inputOptions(['-f', 'lavfi']);
       cmd
         .duration(Math.max(1, totalDurationSeconds))
         .audioCodec('pcm_s16le')
@@ -289,13 +316,10 @@ export async function stitchDubbedAudio(params: {
     `[${mixLabels.join('][')}]amix=inputs=${mixLabels.length}:duration=first:dropout_transition=0,volume=${mixLabels.length},alimiter=limit=0.97:level=disabled[mixed]`
   );
 
+  const command = (background ? fromFile(background.path) : await silenceInput(workDir, sampleRate)).duration(
+    Math.max(1, totalDurationSeconds)
+  );
   return new Promise((resolve, reject) => {
-    const command = background
-      ? fromFile(background.path).duration(Math.max(1, totalDurationSeconds))
-      : ffmpeg({ timeout: TIMEOUT.render })
-          .input(`anullsrc=r=${sampleRate}:cl=mono`)
-          .inputOptions(['-f', 'lavfi'])
-          .duration(Math.max(1, totalDurationSeconds));
 
     for (const segPath of segmentPaths) {
       addFile(command, segPath);

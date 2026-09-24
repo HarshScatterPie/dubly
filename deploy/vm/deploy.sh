@@ -55,8 +55,22 @@ healthy() {
   return 1
 }
 
+# Installs the release's systemd units (placeholders filled in) when they differ from what is installed.
+sync_units() {
+  local changed=0 unit
+  for unit in dubly.service dubly-autodeploy.service dubly-autodeploy.timer; do
+    [ -f "$1/deploy/vm/$unit" ] || continue
+    if ! sed -e "s#__USER__#$(whoami)#g" -e "s#__HOME__#$BASE#g" "$1/deploy/vm/$unit" | cmp -s - "/etc/systemd/system/$unit"; then
+      sed -e "s#__USER__#$(whoami)#g" -e "s#__HOME__#$BASE#g" "$1/deploy/vm/$unit" | sudo tee "/etc/systemd/system/$unit" >/dev/null
+      changed=1
+    fi
+  done
+  if [ "$changed" = 1 ]; then sudo systemctl daemon-reload; fi
+}
+
 log "switching to $FULL"
 switch_to "$REL"
+sync_units "$REL"
 # The service drains running dubs (up to SHUTDOWN_GRACE_MS) before it stops; queued dubs resume in the new release.
 sudo systemctl restart dubly
 if healthy; then
@@ -65,6 +79,7 @@ else
   log "health check failed for $FULL; rolling back to $PREV"
   if [ -n "$PREV" ] && [ -d "$PREV" ]; then
     switch_to "$PREV"
+    sync_units "$PREV"
     sudo systemctl restart dubly
   fi
   exit 1

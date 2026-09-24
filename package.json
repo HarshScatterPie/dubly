@@ -13,7 +13,7 @@
     "lint": "tsc --noEmit",
     "test": "firebase emulators:exec --config firebase.test.json --only firestore,auth,storage --project demo-dubly \"vitest run\"",
     "typecheck": "tsc --noEmit",
-    "start": "tsx server/index.ts"
+    "start": "node --import tsx server/index.ts"
   },
   "dependencies": {
     "@ffprobe-installer/ffprobe": "^2.1.2",

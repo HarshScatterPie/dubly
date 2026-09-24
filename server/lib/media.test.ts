@@ -178,6 +178,15 @@ describe('every media step works on the bundled ffmpeg', () => {
     const silentOnly = await stitchDubbedAudio({ segments: [], totalDurationSeconds: 2, pitch: 1, speed: 1, workDir: path.join(dir, 'stitch-empty') });
     expect((await probeMedia(silentOnly)).durationSeconds).toBeCloseTo(2, 0);
 
+    const noBed = await stitchDubbedAudio({
+      segments: [{ startTime: 0.5, endTime: 1.5, audio: tts }],
+      totalDurationSeconds: 3,
+      pitch: 1.05,
+      speed: 1.1,
+      workDir: path.join(dir, 'stitch-no-bed'),
+    });
+    expect((await probeMedia(noBed)).durationSeconds).toBeCloseTo(3, 0);
+
     await muxVideoWithAudio(f('video.mp4'), stitched, f('dubbed.mp4'));
     const dubbed = await probeMedia(f('dubbed.mp4'));
     expect(dubbed.hasVideo && dubbed.hasAudio).toBe(true);

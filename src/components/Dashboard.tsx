@@ -29,7 +29,8 @@ interface DashboardProps {
   onNavigate: (tab: NavigationTab) => void;
   onOpenProject: (project: DubbingProject) => void;
   onStartWithSample: (sampleId: string) => void;
-  onDeleteProject: (projectId: string) => void;
+  /** Only passed for admins; editors cannot delete projects. */
+  onDeleteProject?: (projectId: string) => void;
 }
 
 export const Dashboard: React.FC<DashboardProps> = ({
@@ -347,17 +348,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       >
                         <Share2 className="w-3.5 h-3.5" />
                       </button>
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setPendingDeleteId(project.id);
-                        }}
-                        className="p-1.5 text-[#94A3B8] hover:text-rose-600 rounded hover:bg-[#F8FAFC] transition-colors"
-                        title="Delete"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {onDeleteProject && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setPendingDeleteId(project.id);
+                          }}
+                          className="p-1.5 text-[#94A3B8] hover:text-rose-600 rounded hover:bg-[#F8FAFC] transition-colors"
+                          title="Delete"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -374,7 +377,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         confirmLabel="Delete Project"
         onCancel={() => setPendingDeleteId(null)}
         onConfirm={() => {
-          if (pendingDeleteId) onDeleteProject(pendingDeleteId);
+          if (pendingDeleteId) onDeleteProject?.(pendingDeleteId);
           setPendingDeleteId(null);
         }}
       />

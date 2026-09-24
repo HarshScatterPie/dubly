@@ -1,6 +1,6 @@
 import textToSpeech from '@google-cloud/text-to-speech';
 import type { protos } from '@google-cloud/text-to-speech';
-import { gcpServiceAccountPath, hasCredentialFile } from './credentials';
+import { gcpServiceAccountPath, hasGoogleCredentials, useAdc } from './credentials';
 
 /**
  * Google Cloud Text-to-Speech (the GA service), used in place of Gemini's
@@ -24,15 +24,15 @@ let voicesPromise: Promise<IVoice[]> | null = null;
 const resolvedVoiceCache = new Map<string, string>();
 
 export function isGoogleTtsConfigured(): boolean {
-  return hasCredentialFile('gcp-service-account.json');
+  return hasGoogleCredentials();
 }
 
 function getClient() {
   if (!client) {
     if (!isGoogleTtsConfigured()) {
-      throw new Error('Google Cloud TTS is not configured (missing gcp-service-account.json)');
+      throw new Error('Google Cloud TTS is not configured (no gcp-service-account.json and CREDENTIALS_MODE is not adc)');
     }
-    client = new textToSpeech.TextToSpeechClient({ keyFilename: gcpServiceAccountPath });
+    client = new textToSpeech.TextToSpeechClient(useAdc ? {} : { keyFilename: gcpServiceAccountPath });
   }
   return client;
 }

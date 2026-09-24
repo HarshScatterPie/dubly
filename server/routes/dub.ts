@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router } from '../lib/router';
 import path from 'node:path';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { bucket, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
@@ -6,37 +6,77 @@ import {
   getSettings,
   getStoredProject,
   projectLanguages,
+  QuotaExceededError,
   recordCompletedDub,
   segmentsForLanguage,
   updateStoredProject,
   type StoredLanguageOutput,
   type StoredProject,
 } from '../lib/projectRepo';
+import {
+  assertStillActive,
+  getJob,
+  JobCancelledError,
+  jobDirFor,
+  JobConflictError,
+  JobSupersededError,
+  markJobStarted,
+  markRunningHere,
+  recordJobUsage,
+  settleJob,
+  startDubJob,
+  startHeartbeat,
+  writeProjectForJob,
+  type DubJob,
+} from '../lib/jobs';
+import { refuseWhenDraining, trackBackgroundWork } from '../lib/lifecycle';
+import { enqueueDub, queueStats } from '../lib/dubQueue';
+import { rateLimit } from '../lib/rateLimit';
+import { rateRules } from '../lib/limits';
+import { acquireHeavySlot } from '../lib/heavyWork';
+import { HttpError } from '../lib/httpError';
+import { invalidateStorageUsage } from '../lib/storageUsage';
+import { log, withLogContext } from '../lib/log';
+import { randomUUID } from 'node:crypto';
 import { routeSynthesizeSpeech, type ProviderSettings } from '../lib/modelRouter';
-import { burnSubtitles, muxVideoWithAudio, stitchDubbedAudio } from '../lib/ffmpeg';
+import { burnSubtitles, effectiveClipSeconds, MAX_COMPRESSION, muxVideoWithAudio, SEGMENT_GUARD_SECONDS, stitchDubbedAudio } from '../lib/ffmpeg';
+import { getWavDurationSeconds } from '../lib/audioUtils';
+import { vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
 import { buildKaraokeAss } from '../lib/captions';
 import { isLipSyncAvailable, runLipSync } from '../lib/lipSync';
-import { createCostMeter, recordTts, summarizeCost } from '../lib/costMeter';
+import { costEstimate, createCostMeter, recordTts, summarizeCost } from '../lib/costMeter';
 import { isSeparationAvailable, separateBackground } from '../lib/audioSeparation';
 import { getLanguageName } from '../lib/languageMeta';
+import { tmpDir } from '../lib/paths';
 import { resolveVoice, type VoiceSelection } from '../lib/voiceResolution';
 import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
-import { tmpDir } from '../lib/paths';
 import { VOICES } from '../../src/data/mockData';
 import type { LocalizedSegment } from '../../src/types';
+import { schemas, validateBody } from '../lib/validation';
 
 export const dubRouter = Router();
 
-dubRouter.post('/:id/dub', async (req, res) => {
+const dubLimit = rateLimit('dub', [
+  ['user', rateRules.dubPerUser],
+  ['workspace', rateRules.dubPerWorkspace],
+]);
+
+dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.dub), async (req, res) => {
   const uid = req.uid!;
+  const workspaceId = req.workspaceId!;
   const projectId = req.params.id;
-  const stored = await getStoredProject(uid, projectId);
-  if (!stored || stored.ownerUid !== uid) {
+  const stored = await getStoredProject(workspaceId, projectId);
+  if (!stored) {
     res.status(404).json({ error: 'Project not found' });
     return;
   }
   if (!stored.videoStoragePath) {
     res.status(400).json({ error: 'Upload a video before dubbing' });
+    return;
+  }
+  // Minutes are charged by duration, so a video whose length is unknown cannot be dubbed (it would be free).
+  if (!(stored.videoDuration > 0)) {
+    res.status(400).json({ error: 'This video has no known length. Upload it again before dubbing.', code: 'VIDEO_DURATION_UNKNOWN' });
     return;
   }
   // Any one translated language is enough to start: the pipeline renders each language it
@@ -65,10 +105,8 @@ dubRouter.post('/:id/dub', async (req, res) => {
     return;
   }
 
-  await updateStoredProject(uid, projectId, {
-    status: 'processing',
-    progressPercent: 5,
-    currentProcessingMessage: 'Preparing dubbing pipeline...',
+  // Voice choices are saved even if the dub is refused below; the project only becomes "processing" once every check has passed.
+  await updateStoredProject(workspaceId, projectId, {
     selectedVoiceId: finalVoiceId,
     speakerVoiceMap: speakerVoiceMap ?? stored.speakerVoiceMap,
     languageVoiceMap: languageVoiceMap ?? stored.languageVoiceMap,
@@ -95,18 +133,162 @@ dubRouter.post('/:id/dub', async (req, res) => {
     }
   }
 
-  res.status(202).json({ status: 'processing' });
+  // Strict monthly limit: every language rendered is a full video's worth of minutes, charged before any work starts.
+  const languagesToRender = projectLanguages(stored)
+    .filter((code) => !onlyLanguages?.length || onlyLanguages.includes(code))
+    .filter((code) => segmentsForLanguage(stored, code).length > 0);
+  if (languagesToRender.length === 0) {
+    res.status(400).json({ error: 'Translate the video before dubbing' });
+    return;
+  }
+  const minutesPerLanguage = stored.videoDuration / 60;
 
-  // Fire-and-forget: the client polls GET /api/projects/:id for progress instead of
-  // waiting on this request, since a full render can take well over a minute.
-  runDubPipeline(uid, projectId, onlyLanguages?.length ? onlyLanguages : undefined).catch(async (err) => {
-    console.error('[dub] pipeline failed', err);
-    await updateStoredProject(uid, projectId, {
-      status: 'failed',
-      currentProcessingMessage: (err as Error).message || 'Dubbing failed',
-    }).catch(() => undefined);
-  });
+  // Job, project ownership and minute reservation are one transaction: a double click or a second teammate gets a 409, never a second charge.
+  let started: { job: DubJob; replayed: boolean };
+  try {
+    started = await startDubJob({
+      workspaceId,
+      projectId,
+      userId: uid,
+      languages: languagesToRender,
+      minutes: minutesPerLanguage * languagesToRender.length,
+      idempotencyKey: req.get('Idempotency-Key') || undefined,
+    });
+  } catch (err) {
+    if (err instanceof QuotaExceededError) {
+      res.status(403).json({ error: err.message, code: 'QUOTA_EXCEEDED' });
+      return;
+    }
+    if (err instanceof JobConflictError) {
+      res.status(409).json({ error: err.message, code: 'JOB_ALREADY_RUNNING', jobId: err.jobId });
+      return;
+    }
+    throw err;
+  }
+  res.status(202).json({ status: 'processing', jobId: started.job.id });
+
+  // The same request replayed: its job is already running (or finished), so nothing new is started.
+  if (started.replayed) return;
+  // The client polls GET /api/projects/:id for progress; the job starts as soon as the queue admits it.
+  enqueueDubJob(started.job);
 });
+
+export const QUEUED_MESSAGE = 'Waiting in the queue: other dubs in this workspace are rendering. Yours starts automatically.';
+
+/**
+ * Hands a job to the admission queue. From here until it finishes (or is released at shutdown) this process owns it: its
+ * heartbeat is kept fresh, so reconciliation leaves it alone, and shutdown waits for it.
+ */
+export function enqueueDubJob(job: DubJob): void {
+  const stopHeartbeat = startHeartbeat(job.id);
+  const unmark = markRunningHere(job.id);
+  let finished!: () => void;
+  void trackBackgroundWork(new Promise<void>((resolve) => (finished = resolve)));
+  const release = () => {
+    stopHeartbeat();
+    unmark();
+    finished();
+  };
+  const { startedImmediately } = enqueueDub({
+    jobId: job.id,
+    workspaceId: job.workspaceId,
+    start: async () => {
+      try {
+        if (await markJobStarted(job)) await runDubJob(job, pipelineImpl);
+      } finally {
+        release();
+      }
+    },
+    abandon: release,
+  });
+  if (!startedImmediately) {
+    log.info('job_queued', { type: 'dub', jobId: job.id, workspaceId: job.workspaceId, ...queueStats() });
+    void writeProjectForJob(job, { currentProcessingMessage: QUEUED_MESSAGE }).catch(() => undefined);
+  }
+}
+
+// Test seam: lets job tests hold a run open or fail it on cue without real media, providers or ffmpeg.
+let pipelineImpl: (job: DubJob) => Promise<PipelineResult> = (job) => runDubPipeline(job);
+export function setDubPipelineForTests(fn: ((job: DubJob) => Promise<PipelineResult>) | null): void {
+  pipelineImpl = fn ?? ((job) => runDubPipeline(job));
+}
+
+/**
+ * Runs one job's pipeline and settles it: minutes for languages that did not render are refunded, and a crash of the
+ * pipeline itself refunds everything. Settlement is exactly-once, so this can race reconciliation safely.
+ */
+export function runDubJob(job: DubJob, pipeline: (job: DubJob) => Promise<PipelineResult> = runDubPipeline): Promise<void> {
+  // Every log line from this run, down to provider retries, carries the job's ids.
+  return withLogContext({ jobId: job.id, projectId: job.projectId, workspaceId: job.workspaceId, userId: job.userId }, () => runDubJobInContext(job, pipeline));
+}
+
+// What users see when a run fails for a reason that is not theirs to fix; the real cause is in the logs under the job id.
+export const DUB_FAILED_MESSAGE = 'Dubbing failed. Your minutes were not charged; please try again.';
+export const DUB_CANCELLED_MESSAGE = 'Dubbing was cancelled. Languages that had not finished were not charged.';
+
+async function runDubJobInContext(job: DubJob, pipeline: (job: DubJob) => Promise<PipelineResult>): Promise<void> {
+  const minutesPerLanguage = job.languages.length ? job.minutesReserved / job.languages.length : 0;
+  const started = Date.now();
+  log.info('job_started', { type: 'dub', languages: job.languages, attempt: job.attemptCount, queuedMs: started - new Date(job.createdAt).getTime() });
+  try {
+    const result = await pipeline(job);
+    const failed = job.languages.filter((code) => !result.completed.includes(code));
+    log.info('job_finished', {
+      type: 'dub',
+      status: failed.length ? 'partially_completed' : 'completed',
+      durationMs: Date.now() - started,
+      completedLanguages: result.completed,
+      failedLanguages: failed,
+    });
+    const settled = await settleJob(job.id, {
+      status: failed.length ? 'partially_completed' : 'completed',
+      refundMinutes: minutesPerLanguage * failed.length,
+      completedLanguages: result.completed,
+      failedLanguages: failed,
+      projectPatch: result.projectPatch,
+    });
+    // Lifetime counters only for the run that actually settled, so a replay cannot count a dub twice.
+    invalidateStorageUsage(job.workspaceId);
+    if (settled) {
+      for (const languageCode of result.completed) {
+        await recordCompletedDub(job.workspaceId, { wordsAdded: result.wordsCount, targetLanguageCode: languageCode, fileSizeMb: result.fileSizeMb });
+      }
+    }
+  } catch (err) {
+    if (err instanceof JobSupersededError) {
+      log.warn('job_superseded', { type: 'dub', durationMs: Date.now() - started }, `[dub] job ${job.id} lost ownership of ${job.projectId}; stopping without writing`);
+      return;
+    }
+    if (err instanceof JobCancelledError) {
+      // Languages that finished before the cancel are kept (and billed); the rest are refunded.
+      const done = (await getJob(job.id))?.completedLanguages ?? [];
+      const errorCode = err.reason === 'timeout' ? 'TIMEOUT' : 'CANCELLED';
+      log.warn('job_cancelled', { type: 'dub', errorCode, completedLanguages: done, durationMs: Date.now() - started });
+      await settleJob(job.id, {
+        status: 'cancelled',
+        refundMinutes: minutesPerLanguage * (job.languages.length - done.length),
+        errorCode,
+        errorMessage: err.message,
+        userMessage: DUB_CANCELLED_MESSAGE,
+        completedLanguages: done,
+        projectPatch: { status: 'failed', currentProcessingMessage: DUB_CANCELLED_MESSAGE },
+      }).catch((settleErr) => log.error('job_settle_failed', settleErr));
+      return;
+    }
+    const errorCode = err instanceof HttpError ? err.code : 'DUB_FAILED';
+    log.error('job_failed', err, { type: 'dub', errorCode, durationMs: Date.now() - started });
+    // The full reason stays on the job record (server-side only); the project, which users see, gets a safe message.
+    const userMessage = err instanceof HttpError ? err.message : DUB_FAILED_MESSAGE;
+    await settleJob(job.id, {
+      status: 'failed',
+      refundMinutes: job.minutesReserved,
+      errorCode,
+      errorMessage: (err as Error).message || 'Dubbing failed',
+      userMessage,
+      projectPatch: { status: 'failed', currentProcessingMessage: userMessage },
+    }).catch((settleErr) => log.error('job_settle_failed', settleErr));
+  }
+}
 
 /**
  * Chooses what the dubbed voice should sit on top of.
@@ -119,17 +301,16 @@ dubRouter.post('/:id/dub', async (req, res) => {
 async function prepareBackgroundBed(
   videoLocalPath: string,
   jobDir: string,
-  uid: string,
-  projectId: string,
+  job: DubJob,
   useSeparation: boolean
 ): Promise<{ path: string; isVocalsRemoved: boolean }> {
   if (useSeparation && isSeparationAvailable()) {
-    await updateStoredProject(uid, projectId, {
+    await writeProjectForJob(job, {
       // Still inside the shared-setup slice of the bar: separation runs once for the whole
       // job, before any language starts rendering.
       progressPercent: 10,
       currentProcessingMessage: 'Separating background audio (music, applause) from speech...',
-    });
+    }, { stage: 'separating_audio', progress: 10 });
     const stem = await separateBackground(videoLocalPath, jobDir);
     if (stem) return { path: stem, isVocalsRemoved: true };
     console.warn('[dub] separation unavailable/failed, keeping background via ducking instead');
@@ -179,7 +360,8 @@ function buildDuckRegions(
  * beats running five separate projects.
  */
 async function renderLanguage(params: {
-  uid: string;
+  job: DubJob;
+  workspaceId: string;
   projectId: string;
   stored: StoredProject;
   languageCode: string;
@@ -193,8 +375,8 @@ async function renderLanguage(params: {
   loadCloneReference: (voiceId: string) => Promise<{ audioPath: string; transcript?: string }>;
   ttsProvider: ProviderSettings['ttsProvider'];
   onProgress: (fraction: number, message: string) => Promise<void>;
-}): Promise<{ dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }> {
-  const { uid, projectId, stored, languageCode, segments, videoLocalPath, background, costMeter } = params;
+}): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[] }> {
+  const { workspaceId, projectId, stored, languageCode, segments, videoLocalPath, background, costMeter } = params;
   const languageName = getLanguageName(languageCode);
   // Each language renders in its own directory: the stitcher writes fixed filenames
   // (seg_0.wav, dubbed_audio.wav), so a shared directory would have each language
@@ -202,9 +384,22 @@ async function renderLanguage(params: {
   const langDir = path.join(params.jobDir, languageCode);
   await mkdir(langDir, { recursive: true });
 
+  // Copies, so a line condensed to fit its slot is saved with the text that was actually spoken.
+  const finalSegments = segments.map((s) => ({ ...s }));
+  const isHinglish = languageCode === 'hinglish';
+  // Hinglish is displayed romanized but voiced from Devanagari, which the hi-IN voices pronounce far more reliably.
+  const speechScript: Record<string, string> = isHinglish
+    ? await vertexHinglishToSpeechScript(
+        finalSegments.filter((s) => s.translatedText.trim()).map((s) => ({ id: s.id, text: s.translatedText }))
+      ).catch((err) => {
+        console.error('[dub] Hinglish speech-script conversion failed, voicing romanized text', err);
+        return {};
+      })
+    : {};
+
   const timedAudio: { startTime: number; endTime: number; audio: Buffer }[] = [];
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
+  for (let i = 0; i < finalSegments.length; i++) {
+    const seg = finalSegments[i];
     // A segment with no text (e.g. a silent lead-in the STT step correctly
     // transcribed as empty) has nothing to synthesize — every provider rejects an
     // empty string outright. Leave that span silent in the stitched track instead.
@@ -212,14 +407,40 @@ async function renderLanguage(params: {
       // Resolved per line, not once per render: the voice can differ by speaker as well
       // as by language, and both are only known here.
       const lineVoice = resolveVoice(params.voiceSelection, languageCode, seg.speaker, params.voiceCatalog);
-      const { audio, provider, fromCache } = await routeSynthesizeSpeech(
-        seg.translatedText,
-        lineVoice,
-        languageCode,
-        params.ttsProvider,
-        isClonedVoiceId(lineVoice.id) ? await params.loadCloneReference(lineVoice.id) : undefined
-      );
-      recordTts(costMeter, provider, seg.translatedText.length, fromCache);
+      const cloneReference = isClonedVoiceId(lineVoice.id) ? await params.loadCloneReference(lineVoice.id) : undefined;
+      const synthesize = async (speechText: string) => {
+        const result = await routeSynthesizeSpeech(speechText, lineVoice, languageCode, params.ttsProvider, cloneReference);
+        recordTts(costMeter, result.provider, speechText.length, result.fromCache);
+        return result.audio;
+      };
+
+      let audio = await synthesize(speechScript[seg.id] || seg.translatedText);
+
+      // The room this line has before the next one starts; past it the voices overlap and the dub drifts off the picture.
+      const nextSpoken = finalSegments.slice(i + 1).find((s) => s.translatedText.trim().length > 0);
+      const nextStart = nextSpoken ? nextSpoken.startTime : stored.videoDuration;
+      const available = Math.max(seg.endTime - seg.startTime, nextStart - seg.startTime - SEGMENT_GUARD_SECONDS);
+      const spokenSeconds = effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
+
+      // Too long to fit even at the fastest natural pace: rewrite it shorter rather than gabble or overlap. Hand-edited lines are left as the user wrote them.
+      if (!seg.isEdited && spokenSeconds > available * MAX_COMPRESSION) {
+        try {
+          const condensed = await vertexCondenseLine(seg.translatedText, languageCode, languageName, available * 1.1, spokenSeconds);
+          if (condensed) {
+            const condensedSpeech = isHinglish
+              ? (await vertexHinglishToSpeechScript([{ id: seg.id, text: condensed }]))[seg.id] || condensed
+              : condensed;
+            const retake = await synthesize(condensedSpeech);
+            if (getWavDurationSeconds(retake) < getWavDurationSeconds(audio)) {
+              console.log(`[dub] ${languageCode} ${seg.id}: condensed to fit ${available.toFixed(1)}s slot (was ${spokenSeconds.toFixed(1)}s)`);
+              audio = retake;
+              seg.translatedText = condensed;
+            }
+          }
+        } catch (err) {
+          console.error(`[dub] condensing ${seg.id} failed, keeping the full line`, err);
+        }
+      }
       timedAudio.push({ startTime: seg.startTime, endTime: seg.endTime, audio });
     }
     await params.onProgress(
@@ -267,8 +488,9 @@ async function renderLanguage(params: {
   }
 
   await params.onProgress(0.95, `${languageName}: uploading export...`);
-  const dubbedAudioStoragePath = `users/${uid}/projects/${projectId}/dubbed_audio_${languageCode}.wav`;
-  const finalDubbedVideoStoragePath = `users/${uid}/projects/${projectId}/dubbed_${languageCode}.mp4`;
+  await assertStillActive(params.job);
+  const dubbedAudioStoragePath = `workspaces/${workspaceId}/projects/${projectId}/dubbed_audio_${languageCode}.wav`;
+  const finalDubbedVideoStoragePath = `workspaces/${workspaceId}/projects/${projectId}/dubbed_${languageCode}.mp4`;
   await uploadFileToStorage(dubbedAudioStoragePath, stitchedAudioPath, 'audio/wav');
   await uploadFileToStorage(finalDubbedVideoStoragePath, finalVideoPath, 'video/mp4');
   // A re-dub overwrites these same paths — drop any cached signed URL so the next
@@ -277,15 +499,24 @@ async function renderLanguage(params: {
   invalidateSignedUrlCache(finalDubbedVideoStoragePath);
   // Any captioned variant was burned from the *previous* render of this language, so it is
   // now stale — drop it and let the next captioned download rebuild it.
-  const stalePath = captionedStoragePathFor(uid, projectId, languageCode);
+  const stalePath = captionedStoragePathFor(workspaceId, projectId, languageCode);
   await bucket.file(stalePath).delete({ ignoreNotFound: true });
   invalidateSignedUrlCache(stalePath);
 
-  return { dubbedAudioStoragePath, finalDubbedVideoStoragePath };
+  return { paths: { dubbedAudioStoragePath, finalDubbedVideoStoragePath }, segments: finalSegments };
 }
 
-async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: string[]): Promise<void> {
-  const stored = await getStoredProject(uid, projectId);
+export interface PipelineResult {
+  completed: string[];
+  projectPatch: Partial<StoredProject>;
+  wordsCount: number;
+  fileSizeMb: number;
+}
+
+// Renders the job's languages; the final project fields are returned rather than written, so settlement applies them atomically.
+async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
+  const { workspaceId, projectId, userId: uid } = job;
+  const stored = await getStoredProject(workspaceId, projectId);
   if (!stored) throw new Error('Project disappeared mid-pipeline');
   // The user's cloned voices are part of their catalog, so a project dubbed in the user's
   // own voice resolves here just like one using a built-in voice.
@@ -304,36 +535,24 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
   };
   const settings = await getSettings(uid);
 
-  // A language with no translation behind it has nothing to render — skip it rather than
-  // producing a video of the source text read aloud.
-  const languages = projectLanguages(stored)
-    .filter((code) => !onlyLanguages || onlyLanguages.includes(code))
-    .filter((code) => segmentsForLanguage(stored, code).length > 0);
+  // Decided (and charged for) when the job was created.
+  const languages = job.languages;
   if (languages.length === 0) throw new Error('Translate the video before dubbing');
 
-  const jobDir = path.join(tmpDir, 'jobs', `${projectId}-dub`);
+  const jobDir = jobDirFor(job.id);
   await mkdir(jobDir, { recursive: true });
   const costMeter = createCostMeter();
   // One download per cloned voice for the whole render, not one per line.
   const loadCloneReference = createReferenceLoader(uid, jobDir);
 
   try {
-    await updateStoredProject(uid, projectId, {
-      progressPercent: 8,
-      currentProcessingMessage: 'Preparing source audio...',
-    });
+    await writeProjectForJob(job, { progressPercent: 8, currentProcessingMessage: 'Preparing source audio...' }, { stage: 'preparing_audio', progress: 8 });
     // Needed before stitching: the source audio becomes the bed the dub sits on, so
     // applause/music/ambience survive into the export instead of being replaced by silence.
     const videoLocalPath = path.join(jobDir, 'source.mp4');
     await bucket.file(stored.videoStoragePath!).download({ destination: videoLocalPath });
 
-    const background = await prepareBackgroundBed(
-      videoLocalPath,
-      jobDir,
-      uid,
-      projectId,
-      Boolean(stored.separateBackground)
-    );
+    const background = await prepareBackgroundBed(videoLocalPath, jobDir, job, Boolean(stored.separateBackground));
 
     // Separation, when it runs, is by far the longest step, so the shared setup gets a
     // fixed slice of the bar up front and the languages split what is left evenly.
@@ -347,15 +566,18 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
       const segments = segmentsForLanguage(stored, languageCode);
       const onProgress = async (fraction: number, message: string) => {
         const overall = SETUP_FRACTION + ((i + fraction) / languages.length) * (1 - SETUP_FRACTION);
-        await updateStoredProject(uid, projectId, {
-          progressPercent: Math.min(99, Math.round(overall * 100)),
-          currentProcessingMessage: languages.length > 1 ? `[${i + 1}/${languages.length}] ${message}` : message,
-        });
+        const progressPercent = Math.min(99, Math.round(overall * 100));
+        await writeProjectForJob(
+          job,
+          { progressPercent, currentProcessingMessage: languages.length > 1 ? `[${i + 1}/${languages.length}] ${message}` : message },
+          { stage: `rendering:${languageCode}`, progress: progressPercent }
+        );
       };
 
       try {
-        const paths = await renderLanguage({
-          uid,
+        const { paths, segments: renderedSegments } = await renderLanguage({
+          job,
+          workspaceId,
           projectId,
           stored,
           languageCode,
@@ -373,7 +595,7 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
         languageOutputs[languageCode] = {
           ...languageOutputs[languageCode],
           languageCode,
-          localizedSegments: segments,
+          localizedSegments: renderedSegments,
           status: 'completed',
           progressPercent: 100,
           message: undefined,
@@ -382,9 +604,11 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
         };
         if (languageCode === stored.targetLanguage) primaryPaths = paths;
       } catch (err) {
+        // Losing ownership or being cancelled is not a language failure: the whole run has to stop.
+        if (err instanceof JobSupersededError || err instanceof JobCancelledError) throw err;
         // One language failing (no voice covers it, a provider outage mid-run) must not
         // throw away the languages that already rendered or the ones still queued behind.
-        console.error(`[dub] ${languageCode} failed`, err);
+        log.error('language_failed', err, { languageCode }, `[dub] ${languageCode} failed`);
         failures.push(getLanguageName(languageCode));
         languageOutputs[languageCode] = {
           ...languageOutputs[languageCode],
@@ -392,17 +616,20 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
           localizedSegments: segments,
           status: 'failed',
           progressPercent: 0,
-          message: (err as Error).message || 'Dubbing failed',
+          message: err instanceof HttpError ? err.message : `${getLanguageName(languageCode)} could not be rendered. Try this language again.`,
         };
       }
       // Persisted after every language, so a finished one is downloadable immediately
       // instead of waiting on the ones still rendering.
-      await updateStoredProject(uid, projectId, { languageOutputs });
+      await writeProjectForJob(job, { languageOutputs }, {
+        completedLanguages: languages.filter((code) => languageOutputs[code]?.status === 'completed'),
+        failedLanguages: languages.filter((code) => languageOutputs[code]?.status === 'failed'),
+      });
     }
 
     const completed = languages.filter((code) => languageOutputs[code]?.status === 'completed');
     if (completed.length === 0) {
-      throw new Error(`Dubbing failed for every language (${failures.join(', ')})`);
+      throw new HttpError(500, 'ALL_LANGUAGES_FAILED', `Dubbing failed for every language (${failures.join(', ')}). Your minutes were not charged; please try again.`);
     }
 
     // The top-level render fields track the primary language. Three cases:
@@ -427,33 +654,26 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
           });
 
     const wordsCount = stored.transcriptSegments.reduce((sum, s) => sum + s.wordsCount, 0);
-    await updateStoredProject(uid, projectId, {
+    const projectPatch: Partial<StoredProject> = {
       status: 'completed',
       currentStep: 'export',
       progressPercent: 100,
       targetLanguage: headlineLanguage,
-      localizedSegments: segmentsForLanguage(stored, headlineLanguage),
+      localizedSegments: languageOutputs[headlineLanguage]?.localizedSegments ?? segmentsForLanguage(stored, headlineLanguage),
       languageOutputs,
       ...headlinePaths,
       wordsCount,
       currentProcessingMessage: failures.length
         ? `Finished ${completed.length}/${languages.length} languages — failed: ${failures.join(', ')}`
         : undefined,
-    });
-
+    };
+    // Counted per rendered language by the caller: each is its own full TTS + render pass.
     const fileSizeMb = Number((stored.videoFileSize || '0').replace(/[^0-9.]/g, '')) || 0;
-    // Counted per rendered language: each is its own full TTS + render pass, so a
-    // five-language project really does consume five dubs' worth of minutes and words.
-    for (const languageCode of completed) {
-      await recordCompletedDub(uid, {
-        minutesAdded: stored.videoDuration / 60,
-        wordsAdded: wordsCount,
-        targetLanguageCode: languageCode,
-        fileSizeMb,
-      });
-    }
+    return { completed, projectPatch, wordsCount, fileSizeMb };
   } finally {
-    console.log(`[cost] dub ${projectId}: ${summarizeCost(costMeter)}`);
+    const usage = costEstimate(costMeter);
+    log.info('job_cost', { type: 'dub', ...usage }, `[cost] dub ${projectId}: ${summarizeCost(costMeter)}`);
+    await recordJobUsage(job.id, { ...usage });
     await rm(jobDir, { recursive: true, force: true });
   }
 }
@@ -462,8 +682,8 @@ async function runDubPipeline(uid: string, projectId: string, onlyLanguages?: st
  * Where a language's burned-in-captions render is cached. One per language, because the
  * captions are that language's own translated text over that language's own video.
  */
-function captionedStoragePathFor(uid: string, projectId: string, languageCode: string): string {
-  return `users/${uid}/projects/${projectId}/dubbed_captioned_${languageCode}.mp4`;
+function captionedStoragePathFor(workspaceId: string, projectId: string, languageCode: string): string {
+  return `workspaces/${workspaceId}/projects/${projectId}/dubbed_captioned_${languageCode}.mp4`;
 }
 
 /**
@@ -475,11 +695,11 @@ function captionedStoragePathFor(uid: string, projectId: string, languageCode: s
  * `languageCode` picks which language to download; omitting it returns the project's
  * primary language, which is what a client written before multi-language dubbing expects.
  */
-dubRouter.post('/:id/export-video', async (req, res) => {
-  const uid = req.uid!;
+dubRouter.post('/:id/export-video', rateLimit('export', [['user', rateRules.exportPerUser]]), validateBody(schemas.exportVideo), async (req, res) => {
+  const workspaceId = req.workspaceId!;
   const projectId = req.params.id;
-  const stored = await getStoredProject(uid, projectId);
-  if (!stored || stored.ownerUid !== uid) {
+  const stored = await getStoredProject(workspaceId, projectId);
+  if (!stored) {
     res.status(404).json({ error: 'Project not found' });
     return;
   }
@@ -510,16 +730,19 @@ dubRouter.post('/:id/export-video', async (req, res) => {
     return;
   }
 
-  const captionedStoragePath = captionedStoragePathFor(uid, projectId, languageCode);
+  const captionedStoragePath = captionedStoragePathFor(workspaceId, projectId, languageCode);
   const [alreadyRendered] = await bucket.file(captionedStoragePath).exists();
   if (alreadyRendered) {
     res.json({ url: await getSignedDownloadUrl(captionedStoragePath) });
     return;
   }
 
-  const jobDir = path.join(tmpDir, 'jobs', `${projectId}-captions-${languageCode}`);
-  await mkdir(jobDir, { recursive: true });
+  // Unique per request: two people downloading the same captions at once must not share scratch files.
+  const jobDir = path.join(tmpDir, 'jobs', `${projectId}-captions-${languageCode}-${randomUUID()}`);
+  let releaseSlot: (() => void) | undefined;
   try {
+    releaseSlot = await acquireHeavySlot();
+    await mkdir(jobDir, { recursive: true });
     const sourceLocalPath = path.join(jobDir, 'dubbed.mp4');
     await bucket.file(videoStoragePath).download({ destination: sourceLocalPath });
 
@@ -532,8 +755,13 @@ dubRouter.post('/:id/export-video', async (req, res) => {
     await uploadFileToStorage(captionedStoragePath, captionedLocalPath, 'video/mp4');
     res.json({ url: await getSignedDownloadUrl(captionedStoragePath) });
   } catch (err) {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ error: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ error: (err as Error).message });
   } finally {
+    releaseSlot?.();
     await rm(jobDir, { recursive: true, force: true });
   }
 });

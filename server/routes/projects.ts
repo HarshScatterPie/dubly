@@ -1,7 +1,7 @@
-import { Router } from 'express';
+import { Router } from '../lib/router';
 import multer from 'multer';
 import path from 'node:path';
-import { mkdir, rm, stat } from 'node:fs/promises';
+import { mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { bucket, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
 import {
@@ -17,17 +17,45 @@ import {
   type StoredLanguageOutput,
   type StoredProject,
 } from '../lib/projectRepo';
-import { downloadToFile, extractAudioForStt, extractThumbnail, probeMedia } from '../lib/ffmpeg';
+import { extractAudioForStt, extractThumbnail, probeMedia } from '../lib/ffmpeg';
+import { validateMedia } from '../lib/mediaValidation';
+import { assertSafeDownloadUrl, streamToFile } from '../lib/safeDownload';
+import { refuseWhenDraining } from '../lib/lifecycle';
+import { rateLimit } from '../lib/rateLimit';
+import { limits, rateRules } from '../lib/limits';
+import { acquireHeavySlot } from '../lib/heavyWork';
 import { routeTranscribe, routeTranslateSegments } from '../lib/modelRouter';
 import { alignSegmentsToSpeech, detectSpeechRegions, retimeWords } from '../lib/forcedAlign';
-import { isCtcAlignAvailable, refineTimingsWithCtc } from '../lib/ctcAlign';
+import { isCtcAlignAvailable, refineTimingsWithCtc, warmCtcModel } from '../lib/ctcAlign';
 import { describeTranscriptHealth, sanitizeTranscript } from '../lib/transcriptSanitizer';
-import { createCostMeter, recordStt, summarizeCost } from '../lib/costMeter';
+import { costEstimate, createCostMeter, recordStt, summarizeCost } from '../lib/costMeter';
 import { getLanguageName, mapDetectedLanguageToAppCode, resolveTargetLanguages } from '../lib/languageMeta';
 import { mapWithConcurrency } from '../lib/concurrency';
 import { tmpDir } from '../lib/paths';
-import { VOICES } from '../../src/data/mockData';
+import { HttpError } from '../lib/httpError';
+import { requireAdmin } from '../lib/auth';
+import { SAMPLE_VIDEOS, VOICES } from '../../src/data/mockData';
 import type { LocalizedSegment, TranscriptSegment } from '../../src/types';
+import { log } from '../lib/log';
+import {
+  JobCancelledError,
+  JobConflictError,
+  JobSupersededError,
+  jobDirFor,
+  markRunningHere,
+  recordJobUsage,
+  requestCancel,
+  settleJob,
+  startHeartbeat,
+  startTranscribeJob,
+  writeProjectForJob,
+  type DubJob,
+} from '../lib/jobs';
+import { trackBackgroundWork } from '../lib/lifecycle';
+import { withLogContext } from '../lib/log';
+import { deleteSharesForProject } from './share';
+import { assertStorageAvailable, invalidateStorageUsage } from '../lib/storageUsage';
+import { schemas, validateBody } from '../lib/validation';
 
 /**
  * Auto-assigns a distinct voice per detected speaker so a multi-speaker dub sounds like
@@ -81,6 +109,12 @@ function resolveSpeakers(segments: TranscriptSegment[]): {
 export const projectsRouter = Router();
 
 const uploadDir = path.join(tmpDir, 'uploads');
+// The one size boundary for source video, whether uploaded or fetched as a sample.
+export const MAX_SOURCE_VIDEO_BYTES = 500 * 1024 * 1024;
+const SAMPLE_DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
+// Hosts the built-in samples are served from; the server fetches nothing else.
+const SAMPLE_HOSTS = Array.from(new Set(SAMPLE_VIDEOS.map((s) => new URL(s.videoUrl).hostname.toLowerCase())));
+
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (_req, _file, cb) => {
@@ -93,25 +127,24 @@ const upload = multer({
     },
     filename: (_req, file, cb) => cb(null, `${randomUUID()}${path.extname(file.originalname)}`),
   }),
-  limits: { fileSize: 500 * 1024 * 1024 },
+  limits: { fileSize: MAX_SOURCE_VIDEO_BYTES },
   fileFilter: (_req, file, cb) => {
     if (!/^video\//.test(file.mimetype) && !/\.(mp4|mov|webm)$/i.test(file.originalname)) {
-      cb(new Error('Only video files (mp4/mov/webm) are accepted'));
+      cb(new HttpError(400, 'UNSUPPORTED_FILE', 'Only video files (mp4/mov/webm) are accepted'));
       return;
     }
     cb(null, true);
   },
 });
 
-async function requireProject(uid: string, id: string) {
-  const stored = await getStoredProject(uid, id);
-  if (!stored || stored.ownerUid !== uid) return null;
-  return stored;
+// Scoped by workspace: any member can open any of the workspace's projects.
+async function requireProject(workspaceId: string, id: string) {
+  return getStoredProject(workspaceId, id);
 }
 
-projectsRouter.post('/', async (req, res) => {
+projectsRouter.post('/', validateBody(schemas.createProject), async (req, res) => {
   const { title, sourceLanguage, targetLanguage } = req.body || {};
-  const project = await createProject(req.uid!, {
+  const project = await createProject(req.workspaceId!, req.uid!, {
     title: title || 'Untitled Dub',
     sourceLanguage,
     targetLanguage,
@@ -120,12 +153,12 @@ projectsRouter.post('/', async (req, res) => {
 });
 
 projectsRouter.get('/', async (req, res) => {
-  const projects = await listStoredProjects(req.uid!);
+  const projects = await listStoredProjects(req.workspaceId!);
   res.json(await Promise.all(projects.map(toClientProject)));
 });
 
 projectsRouter.get('/:id', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
   res.json(await toClientProject(stored));
 });
@@ -148,44 +181,57 @@ const PATCHABLE_FIELDS = [
   'currentStep',
 ] as const;
 
-projectsRouter.patch('/:id', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+projectsRouter.patch('/:id', validateBody(schemas.patchProject), async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
   const patch: Record<string, unknown> = {};
   for (const field of PATCHABLE_FIELDS) {
     if (field in (req.body || {})) patch[field] = req.body[field];
   }
-  const updated = await updateStoredProject(req.uid!, req.params.id, patch);
+  const updated = await updateStoredProject(req.workspaceId!, req.params.id, patch);
   res.json(await toClientProject(updated));
 });
 
-projectsRouter.delete('/:id', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+// Deleting is the one project action editors cannot take.
+projectsRouter.delete('/:id', requireAdmin, async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
-  const storagePaths = [
+  // Everything this project wrote lives under its own folder (source, every language's audio/video, captions, thumbnail),
+  // so the whole folder goes. Paths it references elsewhere came from copies of another workspace's project (made by the
+  // old add-member flow) and may still be in use there, so those are kept and logged for manual review, never deleted.
+  const ownPrefix = `workspaces/${req.workspaceId}/projects/${req.params.id}/`;
+  const referenced = [
     stored.videoStoragePath,
     stored.dubbedAudioStoragePath,
     stored.finalDubbedVideoStoragePath,
     stored.videoThumbnailStoragePath,
-    // Every extra language's render lives at its own path, so deleting a project has to
-    // sweep those too or they linger in the bucket with nothing pointing at them.
-    ...Object.values(stored.languageOutputs || {}).flatMap((out) => [
-      out.dubbedAudioStoragePath,
-      out.finalDubbedVideoStoragePath,
-    ]),
+    ...Object.values(stored.languageOutputs || {}).flatMap((out) => [out.dubbedAudioStoragePath, out.finalDubbedVideoStoragePath]),
   ].filter((p): p is string => Boolean(p));
-  await Promise.all(storagePaths.map((p) => bucket.file(p).delete({ ignoreNotFound: true })));
-  storagePaths.forEach(invalidateSignedUrlCache);
-  await deleteStoredProject(req.uid!, req.params.id);
+  const foreign = referenced.filter((p) => !p.startsWith(ownPrefix));
+  if (foreign.length) log.warn('retained_shared_objects', { projectId: req.params.id, paths: foreign });
+
+  await bucket.deleteFiles({ prefix: ownPrefix, force: true });
+  referenced.forEach(invalidateSignedUrlCache);
+  await deleteSharesForProject(req.params.id);
+  await deleteStoredProject(req.workspaceId!, req.params.id);
+  invalidateStorageUsage(req.workspaceId!);
   res.status(204).send();
 });
 
-async function ingestSourceVideo(uid: string, projectId: string, localVideoPath: string, fileName: string, fileSizeBytes: number) {
-  const probe = await probeMedia(localVideoPath);
-  const storagePath = `users/${uid}/projects/${projectId}/source${path.extname(fileName) || '.mp4'}`;
-  await uploadFileToStorage(storagePath, localVideoPath, 'video/mp4');
+async function ingestSourceVideo(workspaceId: string, projectId: string, localVideoPath: string, fileName: string, fileSizeBytes: number) {
+  // Judged by content, not by the uploaded name or MIME type; see server/lib/mediaValidation.ts.
+  const probe = await validateMedia(localVideoPath, 'video');
+  if (probe.durationSeconds > limits.maxVideoSeconds) {
+    throw new HttpError(
+      400,
+      'VIDEO_TOO_LONG',
+      `Videos can be up to ${Math.round(limits.maxVideoSeconds / 60)} minutes long; this one is ${Math.ceil(probe.durationSeconds / 60)} minutes.`
+    );
+  }
+  const storagePath = `workspaces/${workspaceId}/projects/${projectId}/source${probe.ext}`;
+  await uploadFileToStorage(storagePath, localVideoPath, probe.contentType);
 
   const resolution = probe.width && probe.height ? `${probe.width} × ${probe.height} (${probe.height >= 1080 ? 'Full HD' : probe.height >= 720 ? 'HD' : 'SD'})` : 'Unknown';
   const sizeMb = fileSizeBytes / (1024 * 1024);
@@ -195,7 +241,7 @@ async function ingestSourceVideo(uid: string, projectId: string, localVideoPath:
     try {
       const thumbLocalPath = path.join(path.dirname(localVideoPath), `${randomUUID()}.jpg`);
       await extractThumbnail(localVideoPath, thumbLocalPath, probe.durationSeconds * 0.1, probe.durationSeconds);
-      const thumbStoragePath = `users/${uid}/projects/${projectId}/thumbnail.jpg`;
+      const thumbStoragePath = `workspaces/${workspaceId}/projects/${projectId}/thumbnail.jpg`;
       await uploadFileToStorage(thumbStoragePath, thumbLocalPath, 'image/jpeg');
       videoThumbnailStoragePath = thumbStoragePath;
       await rm(thumbLocalPath, { force: true });
@@ -204,7 +250,8 @@ async function ingestSourceVideo(uid: string, projectId: string, localVideoPath:
     }
   }
 
-  return updateStoredProject(uid, projectId, {
+  invalidateStorageUsage(workspaceId);
+  return updateStoredProject(workspaceId, projectId, {
     videoStoragePath: storagePath,
     videoThumbnailStoragePath,
     videoFileName: fileName,
@@ -215,61 +262,194 @@ async function ingestSourceVideo(uid: string, projectId: string, localVideoPath:
   });
 }
 
-projectsRouter.post('/:id/upload', upload.single('file'), async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['user', rateRules.uploadPerUser]]), upload.single('file'), async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
   if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
 
   try {
-    const updated = await ingestSourceVideo(req.uid!, req.params.id, req.file.path, req.file.originalname, req.file.size);
+    await assertStorageAvailable(req.workspaceId!, req.file.size);
+    const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, req.file.path, req.file.originalname, req.file.size);
     res.json(await toClientProject(updated));
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
   } finally {
     await rm(req.file.path, { force: true });
   }
 });
 
-projectsRouter.post('/:id/import-sample', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+/**
+ * Loads one of the built-in sample videos. The client names a sample by id and the URL comes from the server's own list, so
+ * the server can never be pointed at an arbitrary (internal) address. Older clients that still send the sample's URL are
+ * accepted only when it is exactly one of those URLs.
+ */
+projectsRouter.post('/:id/import-sample', refuseWhenDraining, rateLimit('import-sample', [['user', rateRules.importSamplePerUser]]), validateBody(schemas.importSample), async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
-  const { sourceUrl, fileName } = req.body || {};
-  if (!sourceUrl) return res.status(400).json({ error: 'sourceUrl is required' });
+  const { sampleId, sourceUrl } = req.body || {};
+  const sample = SAMPLE_VIDEOS.find((s) => (typeof sampleId === 'string' && s.id === sampleId) || (typeof sourceUrl === 'string' && s.videoUrl === sourceUrl));
+  if (!sample) return res.status(400).json({ error: 'Unknown sample video', code: 'UNKNOWN_SAMPLE' });
 
   const localPath = path.join(uploadDir, `${randomUUID()}.mp4`);
   try {
-    await downloadToFile(sourceUrl, localPath);
-    const { size } = await stat(localPath);
-    const updated = await ingestSourceVideo(req.uid!, req.params.id, localPath, fileName || 'sample.mp4', size);
+    const url = await assertSafeDownloadUrl(sample.videoUrl, SAMPLE_HOSTS);
+    const { bytes } = await streamToFile(url, localPath, { maxBytes: MAX_SOURCE_VIDEO_BYTES, timeoutMs: SAMPLE_DOWNLOAD_TIMEOUT_MS });
+    await assertStorageAvailable(req.workspaceId!, bytes);
+    const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, localPath, `${sample.title}.mp4`, bytes);
     res.json(await toClientProject(updated));
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
   } finally {
     await rm(localPath, { force: true });
   }
 });
 
-projectsRouter.post('/:id/transcribe', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+// How long the optional word-timing pass may hold up an analysis before VAD timings are used instead.
+const CTC_BASE_BUDGET_MS = 25_000;
+const CTC_BUDGET_MS_PER_AUDIO_SECOND = 150;
+const CTC_MAX_BUDGET_MS = 75_000;
+
+const transcribeLimit = rateLimit('transcribe', [
+  ['user', rateRules.transcribePerUser],
+  ['workspace', rateRules.transcribePerWorkspace],
+]);
+
+// A transcription may run this long before it is stopped (TRANSCRIBE_TIMEOUT_MINUTES); a 60-minute video normally needs far less.
+const TRANSCRIBE_TIMEOUT_MS = (Number(process.env.TRANSCRIBE_TIMEOUT_MINUTES) || 45) * 60 * 1000;
+export const ANALYSIS_FAILED_MESSAGE = 'Analysis failed. Please try again.';
+
+export interface TranscriptionOutcome {
+  projectPatch: Partial<StoredProject>;
+  result: { detectedLanguage: string; removedSegments: number; sanitizeNote: string };
+}
+
+/**
+ * Analyzes a project's video as a job. Callers opt in to the asynchronous form with `Prefer: respond-async` and get 202 plus
+ * a job id to poll (GET /api/projects/:id/jobs/:jobId); without it the request waits and answers as it always did, so an
+ * older client keeps working. Either way the run owns the project, heartbeats, can be cancelled and survives a restart cleanly.
+ */
+projectsRouter.post('/:id/transcribe', refuseWhenDraining, transcribeLimit, async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
   if (!stored.videoStoragePath) return res.status(400).json({ error: 'Upload a video before analyzing' });
 
-  const jobDir = path.join(tmpDir, 'jobs', req.params.id);
+  let job: DubJob;
+  try {
+    job = await startTranscribeJob({ workspaceId: req.workspaceId!, projectId: req.params.id, userId: req.uid! });
+  } catch (err) {
+    if (err instanceof JobConflictError) return res.status(409).json({ error: err.message, code: 'JOB_ALREADY_RUNNING', jobId: err.jobId });
+    throw err;
+  }
+  const run = trackBackgroundWork(runTranscribeJob(job, stored));
+
+  if (/respond-async/i.test(req.get('Prefer') || '')) {
+    res.setHeader('Preference-Applied', 'respond-async');
+    return res.status(202).json({ jobId: job.id, status: 'running' });
+  }
+
+  const finished = await run;
+  if (finished.status !== 'completed') {
+    const status = finished.errorCode === 'CANCELLED' || finished.errorCode === 'TIMEOUT' ? 409 : finished.httpStatus;
+    return res.status(status).json({ error: finished.userMessage || ANALYSIS_FAILED_MESSAGE, code: finished.errorCode || 'ANALYSIS_FAILED' });
+  }
+  const updated = (await getStoredProject(req.workspaceId!, req.params.id))!;
+  res.json({ ...(await toClientProject(updated)), ...finished.result });
+});
+
+/**
+ * Runs one transcription job to its settlement. Resolves (never rejects) with the outcome, which the synchronous form of the
+ * endpoint turns into its response.
+ */
+function runTranscribeJob(
+  job: DubJob,
+  stored: StoredProject
+): Promise<{ status: string; errorCode?: string; userMessage?: string; httpStatus: number; result?: TranscriptionOutcome['result'] }> {
+  return withLogContext({ jobId: job.id, projectId: job.projectId, workspaceId: job.workspaceId, userId: job.userId }, async () => {
+    const stopHeartbeat = startHeartbeat(job.id);
+    const unmark = markRunningHere(job.id);
+    const timeout = setTimeout(() => void requestCancel(job.id, 'timeout'), TRANSCRIBE_TIMEOUT_MS);
+    timeout.unref();
+    const started = Date.now();
+    log.info('job_started', { type: 'transcribe' });
+    try {
+      const outcome = await transcriptionImpl(job, stored);
+      await settleJob(job.id, { status: 'completed', refundMinutes: 0, projectPatch: outcome.projectPatch, result: outcome.result });
+      log.info('job_finished', { type: 'transcribe', status: 'completed', durationMs: Date.now() - started });
+      return { status: 'completed', httpStatus: 200, result: outcome.result };
+    } catch (err) {
+      if (err instanceof JobSupersededError) {
+        log.warn('job_superseded', { type: 'transcribe', durationMs: Date.now() - started });
+        return { status: 'failed', errorCode: 'SUPERSEDED', userMessage: ANALYSIS_FAILED_MESSAGE, httpStatus: 409 };
+      }
+      const cancelled = err instanceof JobCancelledError;
+      const errorCode = cancelled ? (err.reason === 'timeout' ? 'TIMEOUT' : 'CANCELLED') : err instanceof HttpError ? err.code : 'ANALYSIS_FAILED';
+      const userMessage = cancelled
+        ? err.reason === 'timeout'
+          ? 'Analysis took too long and was stopped. Please try again.'
+          : 'Analysis was cancelled.'
+        : err instanceof HttpError
+          ? err.message
+          : ANALYSIS_FAILED_MESSAGE;
+      if (cancelled) log.warn('job_cancelled', { type: 'transcribe', errorCode, durationMs: Date.now() - started });
+      else log.error('job_failed', err, { type: 'transcribe', errorCode, durationMs: Date.now() - started });
+      await settleJob(job.id, {
+        status: cancelled ? 'cancelled' : 'failed',
+        refundMinutes: 0,
+        errorCode,
+        errorMessage: (err as Error).message,
+        userMessage,
+        projectPatch: { progressPercent: 0, currentProcessingMessage: '' },
+      }).catch((settleErr) => log.error('job_settle_failed', settleErr));
+      return { status: cancelled ? 'cancelled' : 'failed', errorCode, userMessage, httpStatus: err instanceof HttpError ? err.status : 500 };
+    } finally {
+      clearTimeout(timeout);
+      stopHeartbeat();
+      unmark();
+    }
+  });
+}
+
+// Test seam: lets job tests run, fail or hold a transcription open without media or Vertex.
+let transcriptionImpl: (job: DubJob, stored: StoredProject) => Promise<TranscriptionOutcome> = (job, stored) => runTranscriptionPipeline(job, stored);
+export function setTranscriptionPipelineForTests(fn: ((job: DubJob, stored: StoredProject) => Promise<TranscriptionOutcome>) | null): void {
+  transcriptionImpl = fn ?? ((job, stored) => runTranscriptionPipeline(job, stored));
+}
+
+// The analysis itself: download, extract audio, speech-to-text, clean-up, timing alignment, speakers.
+async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Promise<TranscriptionOutcome> {
+  const jobDir = jobDirFor(job.id);
   await mkdir(jobDir, { recursive: true });
   const videoLocalPath = path.join(jobDir, 'source.mp4');
   const audioLocalPath = path.join(jobDir, 'audio.wav');
+  // Stage reports the client polls for. A failed write is not worth failing the analysis for, but losing the project or
+  // being cancelled is: those stop the run here.
+  const report = async (progressPercent: number, currentProcessingMessage: string) => {
+    try {
+      await writeProjectForJob(job, { progressPercent, currentProcessingMessage }, { stage: currentProcessingMessage, progress: progressPercent });
+    } catch (err) {
+      if (err instanceof JobCancelledError || err instanceof JobSupersededError) throw err;
+    }
+  };
 
+  let releaseSlot: (() => void) | undefined;
   try {
-    await bucket.file(stored.videoStoragePath).download({ destination: videoLocalPath });
+    releaseSlot = await acquireHeavySlot(() => report(2, 'Waiting for a free processing slot'));
+    await report(3, 'Fetching your video');
+    // Checked by the route before the job was created.
+    await bucket.file(stored.videoStoragePath!).download({ destination: videoLocalPath });
+    await report(8, 'Extracting the audio track');
     await extractAudioForStt(videoLocalPath, audioLocalPath);
 
-    const settings = await getSettings(req.uid!);
+    const settings = await getSettings(job.userId);
+    await report(12, 'Listening to the speech');
     const { language, segments: rawSegments, provider: sttProviderUsed } = await routeTranscribe(
       audioLocalPath,
       stored.targetLanguage,
-      settings.sttProvider
+      settings.sttProvider,
+      (done, total, language) => {
+        // The first chunk reveals the language, so the word-timing model loads while the remaining chunks are still transcribing.
+        if (done === 1) warmCtcModel(mapDetectedLanguageToAppCode(language));
+        return report(12 + Math.round((done / total) * 63), total > 1 ? `Listening to the speech — part ${done} of ${total} done` : 'Speech transcribed');
+      }
     );
+    await report(78, 'Cleaning up the transcript');
     const detectedSourceLanguage = mapDetectedLanguageToAppCode(language);
 
     // Every STT model loops on non-speech audio, emitting one filler word over and over
@@ -278,11 +458,13 @@ projectsRouter.post('/:id/transcribe', async (req, res) => {
     // line in the dub, and would drag the alignment of every real line out of place.
     const { segments: cleanSegments, removed: hallucinated, note: sanitizeNote } =
       sanitizeTranscript(rawSegments);
-    console.log(`[transcribe] ${req.params.id}: ${describeTranscriptHealth(rawSegments, cleanSegments)}`);
+    console.log(`[transcribe] ${job.projectId}: ${describeTranscriptHealth(rawSegments, cleanSegments)}`);
 
+    const audioSeconds = (await probeMedia(audioLocalPath)).durationSeconds;
     const costMeter = createCostMeter();
-    recordStt(costMeter, sttProviderUsed, (await probeMedia(audioLocalPath)).durationSeconds);
-    console.log(`[cost] transcribe ${req.params.id}: ${summarizeCost(costMeter)}`);
+    recordStt(costMeter, sttProviderUsed, audioSeconds);
+    log.info('job_cost', { type: 'transcribe', ...costEstimate(costMeter) }, `[cost] transcribe ${job.projectId}: ${summarizeCost(costMeter)}`);
+    await recordJobUsage(job.id, { ...costEstimate(costMeter) });
 
     // Gemini gives accurate text but unreliable timing (it estimates and drifts
     // progressively across a long clip). Timing is therefore rebuilt from the audio in
@@ -292,11 +474,13 @@ projectsRouter.post('/:id/transcribe', async (req, res) => {
     // transcript is partitioned onto those regions. This decides *which* stretch of audio
     // each line belongs to, and never places a line in silence.
     let timedSegments = cleanSegments;
+    await report(84, 'Syncing every line to the exact moment it is spoken');
     try {
       const probe = await probeMedia(audioLocalPath);
       const regions = await detectSpeechRegions(audioLocalPath, probe.durationSeconds);
       if (regions.length > 0) {
-        timedSegments = alignSegmentsToSpeech(rawSegments, regions).map(retimeWords);
+        // Aligns the sanitized lines; aligning rawSegments put the removed filler loops back and dragged every real line off its speech.
+        timedSegments = alignSegmentsToSpeech(cleanSegments, regions).map(retimeWords);
       }
     } catch (err) {
       console.error('[projects] speech alignment failed, keeping provider timings', err);
@@ -307,38 +491,44 @@ projectsRouter.post('/:id/transcribe', async (req, res) => {
     // word-level timing. Best-effort — a failure here leaves pass 1's timings standing,
     // which is what every project got before this existed.
     if (isCtcAlignAvailable(detectedSourceLanguage)) {
+      await report(90, 'Measuring word-by-word timing');
       try {
-        timedSegments = await refineTimingsWithCtc(audioLocalPath, detectedSourceLanguage, timedSegments);
+        // Word timing is a refinement: past its budget the VAD timings stand, rather than holding the user on this screen.
+        const budgetMs = Math.min(CTC_MAX_BUDGET_MS, CTC_BASE_BUDGET_MS + audioSeconds * CTC_BUDGET_MS_PER_AUDIO_SECOND);
+        const refined = await Promise.race([
+          refineTimingsWithCtc(audioLocalPath, detectedSourceLanguage, timedSegments),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), budgetMs)),
+        ]);
+        if (refined) timedSegments = refined;
+        else console.warn(`[projects] word timing exceeded its ${Math.round(budgetMs / 1000)}s budget, keeping VAD timings`);
       } catch (err) {
         console.error('[projects] forced alignment failed, keeping VAD timings', err);
       }
     }
 
+    await report(97, 'Identifying speakers');
     const { segments, speakersCount, speakerVoiceMap } = resolveSpeakers(timedSegments);
 
     const wordsCount = segments.reduce((sum, s) => sum + s.wordsCount, 0);
-    const updated = await updateStoredProject(req.uid!, req.params.id, {
-      transcriptSegments: segments,
-      sourceLanguage: detectedSourceLanguage,
-      wordsCount,
-      speakersCount,
-      speakerVoiceMap,
-      currentStep: 'understand',
-    });
-    res.json({
-      ...(await toClientProject(updated)),
-      detectedLanguage: getLanguageName(detectedSourceLanguage),
-      // Surfaced so the UI can say what happened rather than silently showing fewer lines
-      // than the model returned.
-      removedSegments: hallucinated,
-      sanitizeNote,
-    });
-  } catch (err) {
-    res.status(500).json({ error: (err as Error).message });
+    return {
+      projectPatch: {
+        transcriptSegments: segments,
+        sourceLanguage: detectedSourceLanguage,
+        wordsCount,
+        speakersCount,
+        speakerVoiceMap,
+        currentStep: 'understand',
+        progressPercent: 0,
+        currentProcessingMessage: '',
+      },
+      // Surfaced so the UI can say what happened rather than silently showing fewer lines than the model returned.
+      result: { detectedLanguage: getLanguageName(detectedSourceLanguage), removedSegments: hallucinated, sanitizeNote },
+    };
   } finally {
+    releaseSlot?.();
     await rm(jobDir, { recursive: true, force: true });
   }
-});
+}
 
 /**
  * Languages translated at once. The calls are independent, so running them together keeps
@@ -347,8 +537,13 @@ projectsRouter.post('/:id/transcribe', async (req, res) => {
  */
 const TRANSLATE_CONCURRENCY = 3;
 
-projectsRouter.post('/:id/translate', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+const translateLimit = rateLimit('translate', [
+  ['user', rateRules.translatePerUser],
+  ['workspace', rateRules.translatePerWorkspace],
+]);
+
+projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.translate), async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
   const { style, adaptExpressions } = req.body || {};
@@ -421,17 +616,32 @@ projectsRouter.post('/:id/translate', async (req, res) => {
       };
     }
 
-    const updated = await updateStoredProject(req.uid!, req.params.id, {
-      targetLanguage: primary.languageCode,
-      targetLanguages: targets,
+    // Adding languages to a finished project must never forget the ones already dubbed, or their renders drop out of the project.
+    const finishedLanguages = projectLanguages(stored).filter(
+      (code) =>
+        !targets.includes(code) &&
+        (stored.languageOutputs?.[code]?.status === 'completed' ||
+          // Projects from before multi-language dubbing only record the primary render at the top level.
+          (code === stored.targetLanguage && Boolean(stored.finalDubbedVideoStoragePath)))
+    );
+    // A primary language that already has a finished dub stays primary, so the project's headline video doesn't change under the user.
+    const keepPrimary = finishedLanguages.includes(stored.targetLanguage);
+    const primaryCode = keepPrimary ? stored.targetLanguage : primary.languageCode;
+
+    const updated = await updateStoredProject(req.workspaceId!, req.params.id, {
+      targetLanguage: primaryCode,
+      targetLanguages: keepPrimary
+        ? [stored.targetLanguage, ...finishedLanguages.filter((c) => c !== stored.targetLanguage), ...targets]
+        : [...targets, ...finishedLanguages],
       languageOutputs,
       translationStyle: finalStyle,
       adaptExpressions: finalAdapt,
-      localizedSegments: primary.segments,
+      localizedSegments: keepPrimary ? segmentsForLanguage(stored, primaryCode) : primary.segments,
       currentStep: 'localize',
     });
     res.json(await toClientProject(updated));
   } catch (err) {
+    log.error('translate_failed', err, { projectId: req.params.id });
     res.status(500).json({ error: (err as Error).message });
   }
 });
@@ -443,8 +653,8 @@ projectsRouter.post('/:id/translate', async (req, res) => {
  * level while the rest live inside `languageOutputs` — and `languageOutputs` also holds
  * storage paths, which a client must not be able to overwrite by patching the whole map.
  */
-projectsRouter.patch('/:id/languages/:code/segments', async (req, res) => {
-  const stored = await requireProject(req.uid!, req.params.id);
+projectsRouter.patch('/:id/languages/:code/segments', validateBody(schemas.patchLanguageSegments), async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
   const languageCode = req.params.code;
@@ -468,6 +678,6 @@ projectsRouter.patch('/:id/languages/:code/segments', async (req, res) => {
   };
   if (languageCode === stored.targetLanguage) patch.localizedSegments = segments;
 
-  const updated = await updateStoredProject(req.uid!, req.params.id, patch);
+  const updated = await updateStoredProject(req.workspaceId!, req.params.id, patch);
   res.json(await toClientProject(updated));
 });

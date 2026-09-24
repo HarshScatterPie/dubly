@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router } from '../lib/router';
 import { getUserProfile } from '../lib/projectRepo';
 
 export const profileRouter = Router();

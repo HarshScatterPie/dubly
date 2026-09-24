@@ -1,0 +1,10 @@
+rules_version = '2';
+
+// Used only by the local emulators in tests (firebase.test.json); the Admin SDK bypasses it. Never deploy this file.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

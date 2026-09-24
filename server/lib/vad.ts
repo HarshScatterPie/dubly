@@ -1,6 +1,5 @@
 import * as ort from 'onnxruntime-node';
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { ffmpeg } from './mediaTools';
 import { existsSync } from 'node:fs';
 import { readFile, mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -18,9 +17,6 @@ import { serverRoot, tmpDir } from './paths';
  * trained specifically to detect human speech, so applause, music and room noise are
  * correctly excluded.
  */
-// Set explicitly rather than relying on lib/ffmpeg.ts having been imported first — this
-// module is usable on its own and shouldn't depend on import order for a working binary.
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
 
 const MODEL_PATH = path.join(serverRoot, 'models', 'silero_vad.onnx');
 const SAMPLE_RATE = 16000;
@@ -65,7 +61,9 @@ async function decodeToPcm(audioPath: string): Promise<Float32Array> {
   const rawPath = path.join(tmpDir, `vad_${randomUUID()}.raw`);
   try {
     await new Promise<void>((resolve, reject) => {
-      ffmpeg(audioPath)
+      ffmpeg({ timeout: 10 * 60 })
+        .input(audioPath)
+        .inputOptions(['-protocol_whitelist', 'file'])
         .audioCodec('pcm_s16le')
         .audioFrequency(SAMPLE_RATE)
         .audioChannels(1)

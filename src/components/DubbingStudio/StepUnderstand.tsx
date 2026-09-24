@@ -5,12 +5,11 @@
 
 import React, { useState } from 'react';
 import {
-  AudioLines,
   Play,
   Pause,
   CheckCircle2,
-  CircleDot,
   Circle,
+  Loader2,
   Plus,
   Trash2,
   ArrowRight,
@@ -21,11 +20,19 @@ import {
 } from 'lucide-react';
 import { TranscriptSegment } from '../../types';
 import { VideoPlayer } from '../VideoPlayer';
-import { WaveformVisualizer } from '../WaveformVisualizer';
+import { BrandMark } from '../BrandLoader';
+import { useSmoothProgress } from '../../lib/useSmoothProgress';
+import { StickyActionBar } from './StickyActionBar';
 
 interface StepUnderstandProps {
   isAnalyzing: boolean;
-  analysisStage: number; // 0 to 5
+  /** Real server progress, 0–100. */
+  analysisProgress: number;
+  /** The server's description of what it is doing right now. */
+  analysisMessage: string;
+  analysisElapsedSeconds: number;
+  fileName?: string;
+  durationFormatted?: string;
   videoPreviewUrl: string;
   transcriptSegments: TranscriptSegment[];
   wordsCount: number;
@@ -39,7 +46,11 @@ interface StepUnderstandProps {
 
 export const StepUnderstand: React.FC<StepUnderstandProps> = ({
   isAnalyzing,
-  analysisStage,
+  analysisProgress,
+  analysisMessage,
+  analysisElapsedSeconds,
+  fileName,
+  durationFormatted,
   videoPreviewUrl,
   transcriptSegments,
   wordsCount,
@@ -55,14 +66,19 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
   const [activePlaySegmentId, setActivePlaySegmentId] = useState<string | null>(null);
   const [videoSeekTime, setVideoSeekTime] = useState<number | undefined>(undefined);
 
+  const shownProgress = useSmoothProgress(analysisProgress, isAnalyzing);
+
+  // Each stage is ticked only once the server's reported progress has actually passed it.
   const stages = [
-    { label: 'Video uploaded', status: analysisStage >= 1 ? 'done' : 'active' },
-    { label: 'Audio extracted', status: analysisStage >= 2 ? 'done' : analysisStage === 1 ? 'active' : 'pending' },
-    { label: 'Transcribing speech', status: analysisStage >= 3 ? 'done' : analysisStage === 2 ? 'active' : 'pending' },
-    { label: 'Understanding context', status: analysisStage >= 4 ? 'done' : analysisStage === 3 ? 'active' : 'pending' },
-    { label: 'Preparing translation', status: analysisStage >= 5 ? 'done' : analysisStage === 4 ? 'active' : 'pending' },
-    { label: 'Ready for dubbing', status: analysisStage >= 5 ? 'done' : 'pending' },
-  ];
+    { label: 'Preparing the audio', from: 0, to: 12 },
+    { label: 'Transcribing the speech', from: 12, to: 78 },
+    { label: 'Cleaning up & syncing timing', from: 78, to: 97 },
+    { label: 'Identifying speakers', from: 97, to: 100 },
+  ].map((stage) => ({
+    ...stage,
+    status: analysisProgress >= stage.to ? 'done' : analysisProgress >= stage.from ? 'active' : 'pending',
+  }));
+  const elapsedLabel = `${Math.floor(analysisElapsedSeconds / 60)}:${String(analysisElapsedSeconds % 60).padStart(2, '0')}`;
 
   const handleStartEdit = (segment: TranscriptSegment) => {
     setEditingId(segment.id);
@@ -93,65 +109,76 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // If analyzing, show animated AI pipeline screen
   if (isAnalyzing) {
     return (
-      <div className="max-w-lg mx-auto my-2 p-5 rounded-3xl glass-panel text-center space-y-3 animate-fade-in shadow-[0_0_35px_rgba(0,0,0,0.15)]">
-        <div className="w-11 h-11 rounded-2xl bg-[#F05637]/20 text-[#D94B2E] border border-[#F05637]/30 flex items-center justify-center mx-auto shadow-[0_0_20px_rgba(240,86,55,0.3)]">
-          <AudioLines className="w-5 h-5 animate-pulse-subtle" />
-        </div>
+      <div className="glass-panel rounded-3xl overflow-hidden animate-fade-in">
+        <div className="grid grid-cols-1 lg:grid-cols-5">
+          {/* The user's own video, so it is obvious what is being worked on. */}
+          <div className="lg:col-span-3 relative bg-[#0F172A] min-h-[240px]">
+            {videoPreviewUrl && (
+              <video src={videoPreviewUrl} autoPlay muted loop playsInline className="absolute inset-0 w-full h-full object-contain opacity-70" />
+            )}
+            <div aria-hidden className="absolute inset-0 overflow-hidden pointer-events-none">
+              <div className="animate-scan absolute left-0 right-0 h-1/5 bg-gradient-to-b from-transparent via-coral-400/25 to-transparent" />
+            </div>
+            <div className="absolute inset-x-0 bottom-0 p-4 bg-gradient-to-t from-black/70 to-transparent flex items-center justify-between gap-3 text-white">
+              <span className="text-xs font-semibold truncate">{fileName || 'Your video'}</span>
+              {durationFormatted && <span className="text-[11px] font-mono text-white/80 shrink-0">{durationFormatted}</span>}
+            </div>
+          </div>
 
-        <div>
-          <h3 className="text-base font-bold text-[#0F172A] tracking-tight">
-            Transcribing & Diarizing Audio
-          </h3>
-          <p className="text-[11px] text-[#64748B] mt-0.5">
-            Running Whisper AI speech-to-text with acoustic speaker segmentation
-          </p>
-        </div>
+          <div className="lg:col-span-2 p-6 sm:p-8 flex flex-col gap-6">
+            <div className="flex items-center gap-4">
+              <BrandMark size={52} />
+              <div className="min-w-0">
+                <h3 className="text-lg font-bold text-[#0F172A] tracking-tight">Understanding your video</h3>
+                <p key={analysisMessage} className="text-xs text-[#64748B] mt-0.5 animate-fade-in truncate">
+                  {analysisMessage || 'Starting up'}…
+                </p>
+              </div>
+            </div>
 
-        {/* Dynamic Waveform Visualizer */}
-        <div className="p-2 bg-[#F8FAFC] rounded-xl border border-[#E2E8F0]">
-          <WaveformVisualizer
-            isPlaying={true}
-            height={32}
-            barWidth={3}
-            barGap={3}
-            progressColor="#D94B2E"
-            color="#CBD5E1"
-          />
-        </div>
+            <div className="space-y-2">
+              <div className="h-2 rounded-full bg-[#E2E8F0] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-gradient-to-r from-coral-400 to-coral-500 transition-[width] duration-150 ease-linear"
+                  style={{ width: `${Math.max(3, shownProgress)}%` }}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[11px] font-mono text-[#64748B]">
+                <span>{shownProgress}%</span>
+                <span>{elapsedLabel} elapsed</span>
+              </div>
+            </div>
 
-        {/* 6 Step Progress List */}
-        <div className="space-y-1.5 text-left pt-1">
-          {stages.map((stage, idx) => {
-            return (
-              <div
-                key={idx}
-                className={`flex items-center justify-between px-3 py-1.5 rounded-lg border transition-all duration-300 ${
-                  stage.status === 'done'
-                    ? 'bg-emerald-50/20 border-emerald-200/40 text-emerald-600'
-                    : stage.status === 'active'
-                    ? 'bg-[#F05637]/15 border-[#F05637]/50 text-[#D94B2E] shadow-[0_0_15px_rgba(240,86,55,0.2)]'
-                    : 'bg-[#F8FAFC]/50 border-[#E2E8F0] text-[#94A3B8]'
-                }`}
-              >
-                <div className="flex items-center gap-2.5 text-[11px] font-medium">
+            <ol className="space-y-2">
+              {stages.map((stage) => (
+                <li
+                  key={stage.label}
+                  className={`flex items-center gap-3 px-3 py-2.5 rounded-xl border text-xs font-medium transition-colors duration-300 ${
+                    stage.status === 'done'
+                      ? 'border-emerald-200/70 bg-emerald-50/50 text-emerald-700'
+                      : stage.status === 'active'
+                      ? 'border-coral-500/40 bg-coral-500/[0.06] text-coral-600'
+                      : 'border-[#E2E8F0] text-[#94A3B8]'
+                  }`}
+                >
                   {stage.status === 'done' ? (
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
                   ) : stage.status === 'active' ? (
-                    <CircleDot className="w-3.5 h-3.5 text-[#D94B2E] animate-spin" />
+                    <Loader2 className="w-4 h-4 shrink-0 animate-spin" />
                   ) : (
-                    <Circle className="w-3.5 h-3.5 text-[#94A3B8]" />
+                    <Circle className="w-4 h-4 shrink-0" />
                   )}
                   <span>{stage.label}</span>
-                </div>
-                <span className="text-[10px] font-mono">
-                  {stage.status === 'done' ? '✓' : stage.status === 'active' ? '●' : '○'}
-                </span>
-              </div>
-            );
-          })}
+                </li>
+              ))}
+            </ol>
+
+            <p className="text-[11px] text-[#94A3B8] leading-relaxed mt-auto">
+              Long videos are transcribed in ~30-second parts, so this scales with length. You can keep this tab open and come back.
+            </p>
+          </div>
         </div>
       </div>
     );
@@ -176,21 +203,12 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
             Confidence 99.2%
           </span>
         </div>
-
-        <button
-          type="button"
-          onClick={onContinue}
-          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all"
-        >
-          <span>Continue to Localization</span>
-          <ArrowRight className="w-3.5 h-3.5" />
-        </button>
       </div>
 
       {/* Main Grid: Video on Left, Transcript Editor on Right */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Video Player */}
-        <div className="lg:col-span-5 space-y-3">
+        {/* The player stays pinned while the page scrolls through the transcript, instead of the list having its own scroller. */}
+        <div className="lg:col-span-5 space-y-3 lg:sticky lg:top-4">
           <div className="text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
             Synchronized Player
           </div>
@@ -224,7 +242,7 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
             </button>
           </div>
 
-          <div className="space-y-3 max-h-[560px] overflow-y-auto custom-scrollbar pr-1">
+          <div className="space-y-3">
             {transcriptSegments.map((segment) => {
               const isEditing = editingId === segment.id;
               const isPlayingThis = activePlaySegmentId === segment.id;
@@ -325,6 +343,19 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
           </div>
         </div>
       </div>
+
+      <StickyActionBar
+        summary={<span>Transcript looks right? Fix any line by clicking it, then pick your languages.</span>}
+      >
+        <button
+          type="button"
+          onClick={onContinue}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-sm font-semibold shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all"
+        >
+          <span>Choose languages</span>
+          <ArrowRight className="w-4 h-4" />
+        </button>
+      </StickyActionBar>
     </div>
   );
 };

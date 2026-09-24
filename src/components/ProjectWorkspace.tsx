@@ -30,6 +30,7 @@ import { projectService } from '../services/projectService';
 import { VideoPlayer } from './VideoPlayer';
 import { textToSpeechService } from '../services/textToSpeechService';
 import { renderService } from '../services/renderService';
+import { DownloadMenu } from './DownloadMenu';
 
 interface ProjectWorkspaceProps {
   project: DubbingProject;
@@ -82,6 +83,26 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const projectLanguages = project.targetLanguages?.length
     ? project.targetLanguages
     : [project.targetLanguage];
+
+  // Every language's finished render, for the download menus (the primary language's lives at the top level).
+  const downloadableLanguages = projectLanguages.map((code) => {
+    const output = project.languageOutputs?.[code];
+    const lang = LANGUAGES.find((l) => l.code === code);
+    const videoUrl = code === project.targetLanguage ? project.finalDubbedVideoUrl : output?.finalDubbedVideoUrl;
+    return {
+      code,
+      name: lang?.name || code,
+      nativeName: lang?.nativeName,
+      ready: Boolean(videoUrl),
+      statusLabel: output?.status === 'failed' ? output.message || 'Dubbing failed' : 'Not dubbed yet',
+      videoUrl,
+    };
+  });
+  const downloadLanguageVideo = async (code: string) => {
+    const entry = downloadableLanguages.find((l) => l.code === code);
+    if (!entry?.videoUrl) throw new Error('This language has not been dubbed yet.');
+    await renderService.downloadMedia(`${project.title.replace(/\s+/g, '_')}_${entry.name}.mp4`, entry.videoUrl);
+  };
 
   /** The voice currently assigned to a language, before any unsaved pick. */
   const savedVoiceForLanguage = (code: string) =>
@@ -248,21 +269,13 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 
         {/* Quick Export Actions */}
         <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await renderService.downloadMedia(`${project.title}.mp4`, project.finalDubbedVideoUrl || project.videoUrl);
-                onShowToast('Download Started', 'Master MP4 video download queued.', 'success');
-              } catch (err) {
-                onShowToast('Download Failed', (err as Error).message, 'error');
-              }
-            }}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-md shadow-[0_0_15px_rgba(240,86,55,0.3)] transition-all"
-          >
-            <Download className="w-3.5 h-3.5" />
-            <span>Export Master</span>
-          </button>
+          <DownloadMenu
+            size="compact"
+            label="Download"
+            languages={downloadableLanguages}
+            onDownload={downloadLanguageVideo}
+            onShowToast={onShowToast}
+          />
         </div>
       </div>
 
@@ -740,26 +753,19 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 
       {activeTab === 'export' && (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="p-6 rounded-3xl glass-panel space-y-4">
+          <div className="relative z-20 p-6 rounded-3xl glass-panel space-y-4">
             <h4 className="text-sm font-bold text-[#0F172A]">Video Master</h4>
             <p className="text-xs text-[#64748B]">
               Download 1080p MP4 with multiplexed audio and soft subtitles.
             </p>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await renderService.downloadMedia(`${project.title}.mp4`, project.finalDubbedVideoUrl || project.videoUrl);
-                  onShowToast('Video Exported', 'Downloaded MP4 master.', 'success');
-                } catch (err) {
-                  onShowToast('Download Failed', (err as Error).message, 'error');
-                }
-              }}
-              disabled={!project.finalDubbedVideoUrl}
-              className="w-full py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-md shadow-[0_0_15px_rgba(240,86,55,0.3)] transition-all disabled:opacity-50"
-            >
-              Download MP4 (Dubbed Master)
-            </button>
+            <DownloadMenu
+              align="left"
+              label="Download MP4"
+              sublabel="Dubbed master"
+              languages={downloadableLanguages}
+              onDownload={downloadLanguageVideo}
+              onShowToast={onShowToast}
+            />
           </div>
 
           <div className="p-6 rounded-3xl glass-panel space-y-4">

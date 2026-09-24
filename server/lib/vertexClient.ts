@@ -3,10 +3,12 @@ import { readFile, rm, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { env } from './env';
-import { gcpServiceAccountPath, hasCredentialFile } from './credentials';
+import { gcpServiceAccountPath, hasGoogleCredentials, useAdc } from './credentials';
 import { buildTranslationPrompt, parseTranslationResponse, type TranslatableSegment } from './translatePrompt';
 import { probeMedia, splitAudioIntoChunks, extractAudioClip } from './ffmpeg';
 import { logGeminiCallCost } from './costMeter';
+import { getScriptInstruction, isInExpectedScript, mapDetectedLanguageToAppCode } from './languageMeta';
+import { log } from './log';
 
 export interface RawSttWord {
   text: string;
@@ -33,19 +35,19 @@ export interface RawSttResult {
 let client: GoogleGenAI | null = null;
 
 export function isVertexConfigured(): boolean {
-  return Boolean(env.vertexProjectId) && hasCredentialFile('gcp-service-account.json');
+  return Boolean(env.vertexProjectId) && hasGoogleCredentials();
 }
 
 function getClient(): GoogleGenAI {
   if (!client) {
     if (!isVertexConfigured()) {
-      throw new Error('Vertex AI is not configured (missing VERTEX_PROJECT_ID or gcp-service-account.json)');
+      throw new Error('Vertex AI is not configured (set VERTEX_PROJECT_ID, and provide gcp-service-account.json or CREDENTIALS_MODE=adc)');
     }
     client = new GoogleGenAI({
       vertexai: true,
       project: env.vertexProjectId,
       location: env.vertexGeminiLocation,
-      googleAuthOptions: { keyFile: gcpServiceAccountPath },
+      googleAuthOptions: useAdc ? {} : { keyFile: gcpServiceAccountPath },
     });
   }
   return client;
@@ -69,13 +71,19 @@ function isTransientError(err: unknown): boolean {
 const RETRY_BACKOFF_MS = [1000, 3000, 8000];
 
 async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  const started = Date.now();
   for (let attempt = 0; ; attempt++) {
     try {
-      return await fn();
+      const result = await fn();
+      log.info('provider_call', { provider: 'vertex', operation: label, attempts: attempt + 1, durationMs: Date.now() - started });
+      return result;
     } catch (err) {
-      if (attempt >= RETRY_BACKOFF_MS.length || !isTransientError(err)) throw err;
+      if (attempt >= RETRY_BACKOFF_MS.length || !isTransientError(err)) {
+        log.error('provider_error', err, { provider: 'vertex', operation: label, attempts: attempt + 1, durationMs: Date.now() - started });
+        throw err;
+      }
       const waitMs = RETRY_BACKOFF_MS[attempt];
-      console.warn(`[vertexClient] ${label} failed (attempt ${attempt + 1}/${RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms`, err);
+      log.warn('provider_retry', { provider: 'vertex', operation: label, attempt: attempt + 1, waitMs }, `[vertexClient] ${label} failed (attempt ${attempt + 1}/${RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms: ${(err as Error)?.message}`);
       await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
@@ -104,23 +112,22 @@ function estimateWordTimings(text: string, start: number, end: number): RawSttWo
   });
 }
 
-export async function vertexTranslateSegments(
+async function requestTranslations(
   segments: TranslatableSegment[],
   targetLanguageName: string,
   style: string,
-  adaptExpressions: boolean
+  adaptExpressions: boolean,
+  scriptInstruction: string
 ): Promise<Record<string, string>> {
   const ai = getClient();
-  const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions);
+  const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions, scriptInstruction);
 
   const response = await withRetry('translation', () =>
     ai.models.generateContent({
       model: env.geminiTranslateModel,
       contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.4,
-      },
+      // Low temperature keeps the translation faithful; creativity here is where invented content comes from.
+      config: { responseMimeType: 'application/json', temperature: 0.2 },
     })
   );
   logGeminiCallCost('translate', env.geminiTranslateModel, response.usageMetadata);
@@ -130,6 +137,88 @@ export async function vertexTranslateSegments(
     throw new Error('Vertex AI (Gemini) returned an empty translation response');
   }
   return parseTranslationResponse(text);
+}
+
+export async function vertexTranslateSegments(
+  segments: TranslatableSegment[],
+  targetLanguageCode: string,
+  targetLanguageName: string,
+  style: string,
+  adaptExpressions: boolean
+): Promise<Record<string, string>> {
+  const scriptInstruction = getScriptInstruction(targetLanguageCode);
+  const result = await requestTranslations(segments, targetLanguageName, style, adaptExpressions, scriptInstruction);
+
+  // One targeted re-ask for lines that went missing or came back in the wrong script (e.g. romanized Hindi).
+  const bad = segments.filter((s) => !result[s.id]?.trim() || !isInExpectedScript(result[s.id], targetLanguageCode));
+  if (bad.length > 0) {
+    console.warn(`[vertexClient] ${bad.length}/${segments.length} ${targetLanguageName} lines missing or in the wrong script, retrying them`);
+    try {
+      const retried = await requestTranslations(bad, targetLanguageName, style, adaptExpressions, scriptInstruction);
+      for (const s of bad) {
+        const candidate = retried[s.id]?.trim();
+        if (candidate && (isInExpectedScript(candidate, targetLanguageCode) || !result[s.id]?.trim())) result[s.id] = candidate;
+      }
+    } catch (err) {
+      console.error('[vertexClient] translation retry failed, keeping first pass', err);
+    }
+  }
+  return result;
+}
+
+// Rewrites romanized Hinglish into Devanagari (English words kept in Latin) purely for the TTS voice, which pronounces Devanagari far more reliably.
+export async function vertexHinglishToSpeechScript(lines: { id: string; text: string }[]): Promise<Record<string, string>> {
+  if (lines.length === 0) return {};
+  const ai = getClient();
+  const prompt = `Convert each romanized Hinglish line below into the form a Hindi text-to-speech voice reads best: write the Hindi words in Devanagari, keep genuine English words in Latin letters, and keep punctuation. Do not translate, add, drop or reorder any words — only change the script.
+Return ONLY {"translations": [{"id": "<same id>", "translatedText": "<converted line>"}]}.
+
+Lines:
+${JSON.stringify(lines)}`;
+  const response = await withRetry('hinglish-speech-script', () =>
+    ai.models.generateContent({
+      model: env.geminiTranslateModel,
+      contents: prompt,
+      config: { responseMimeType: 'application/json', temperature: 0 },
+    })
+  );
+  logGeminiCallCost('hinglish-speech-script', env.geminiTranslateModel, response.usageMetadata);
+  return response.text ? parseTranslationResponse(response.text) : {};
+}
+
+// Shortens one dubbed line so it can be spoken inside its on-screen slot without being rushed.
+export async function vertexCondenseLine(
+  text: string,
+  targetLanguageCode: string,
+  targetLanguageName: string,
+  targetSeconds: number,
+  currentSeconds: number
+): Promise<string | null> {
+  const ai = getClient();
+  const keepRatio = Math.max(0.4, Math.min(0.95, targetSeconds / currentSeconds));
+  const scriptInstruction = getScriptInstruction(targetLanguageCode);
+  const prompt = `This ${targetLanguageName} dubbing line takes ${currentSeconds.toFixed(1)}s to speak but must fit in ${targetSeconds.toFixed(1)}s.
+Rewrite it to about ${Math.round(keepRatio * 100)}% of its current length while keeping the core meaning and tone. Drop filler and redundancy; do not add anything new.
+${scriptInstruction}
+Return ONLY {"text": "<shortened line>"}.
+
+Line: ${JSON.stringify(text)}`;
+  const response = await withRetry('condense', () =>
+    ai.models.generateContent({
+      model: env.geminiTranslateModel,
+      contents: prompt,
+      config: { responseMimeType: 'application/json', temperature: 0.2 },
+    })
+  );
+  logGeminiCallCost('condense', env.geminiTranslateModel, response.usageMetadata);
+  try {
+    const parsed = JSON.parse((response.text || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, ''));
+    const shortened = typeof parsed?.text === 'string' ? parsed.text.trim() : '';
+    if (!shortened || shortened.length >= text.length || !isInExpectedScript(shortened, targetLanguageCode)) return null;
+    return shortened;
+  } catch {
+    return null;
+  }
 }
 
 export interface SpeakerReference {
@@ -149,18 +238,30 @@ export interface SpeakerReference {
  * chunk boundaries instead of each chunk numbering its speakers from scratch — see
  * vertexTranscribe below, which is what actually builds and threads this list through.
  */
-async function vertexTranscribeSingle(filePath: string, speakerReferences: SpeakerReference[] = []): Promise<RawSttResult> {
+async function vertexTranscribeSingle(
+  filePath: string,
+  speakerReferences: SpeakerReference[] = [],
+  knownLanguage?: string,
+  allowScriptRetry = true
+): Promise<RawSttResult> {
   const ai = getClient();
   const audioBuffer = await readFile(filePath);
+
+  // Earlier chunks already identified the language; pinning it stops a chunk flipping script mid-video.
+  const languageLine = knownLanguage
+    ? `The recording is in ${knownLanguage}. Transcribe it in ${knownLanguage}.`
+    : 'First identify the spoken language.';
 
   // Speaker labelling is folded into this same request on purpose. It used to be a second
   // pass that re-uploaded the identical audio to Gemini, which doubled the (audio-token
   // priced) cost of every transcription for information the model can just as easily
   // return the first time.
   const basePrompt = `Transcribe the spoken audio verbatim, breaking it into natural phrase/sentence segments with their timestamps.
+${languageLine}
+SCRIPT RULE (critical): write the transcript in the NATIVE writing system of the spoken language — Telugu in Telugu script (తెలుగు), Hindi in Devanagari (हिन्दी), Tamil in Tamil script (தமிழ்), Bengali in Bengali script, Kannada in Kannada script, Malayalam in Malayalam script, Gujarati in Gujarati script, Punjabi in Gurmukhi, Marathi in Devanagari, Japanese in kanji/kana, and so on. NEVER romanize or transliterate a non-Latin-script language into English letters. English words spoken inside such a language are written in that language's script as pronounced; only brand names and acronyms may stay in Latin letters. Do NOT translate anything — write exactly what was said.
 Also identify how many distinct speakers are talking, using differences in voice (pitch, timbre, tone), and label every segment with who said it ("Speaker 1", "Speaker 2", ...). If only one person speaks throughout, label everything "Speaker 1".
 Return ONLY a JSON object of the exact form:
-{"language": "<detected spoken language, e.g. Hindi, English>", "segments": [{"start": <seconds, number>, "end": <seconds, number>, "text": "<verbatim text>", "speaker": "Speaker 1"}]}
+{"language": "<detected spoken language as its English name, e.g. Telugu, Hindi, English>", "segments": [{"start": <seconds, number>, "end": <seconds, number>, "text": "<verbatim text>", "speaker": "Speaker 1"}]}
 Transcribe ONLY audible speech. Silence, music, breathing, applause and background noise must produce no segment at all — do not fill them with filler words.
 Never repeat the same short phrase across consecutive segments; if you find yourself about to emit the same text again, emit nothing instead. Segments must advance through the audio: each start must be greater than or equal to the previous segment's end.
 No commentary, no markdown fences. If there is no speech, return {"language": "unknown", "segments": []}.`;
@@ -187,7 +288,8 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
     ai.models.generateContent({
       model: env.geminiSttModel,
       contents: [{ role: 'user', parts }],
-      config: { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 8192 },
+      // Temperature 0: transcription has one right answer, and any sampling freedom is where filler loops come from.
+      config: { responseMimeType: 'application/json', temperature: 0, maxOutputTokens: 8192 },
     })
   );
   logGeminiCallCost('transcribe', env.geminiSttModel, response.usageMetadata);
@@ -219,11 +321,16 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
     words: estimateWordTimings(String(s.text || '').trim(), Number(s.start) || 0, Number(s.end) || 0),
   }));
 
-  return {
-    text: segments.map((s) => s.text).join(' '),
-    language: parsed.language || 'unknown',
-    segments,
-  };
+  const language = parsed.language || 'unknown';
+  const joined = segments.map((s) => s.text).join(' ');
+  const languageCode = mapDetectedLanguageToAppCode(language);
+  if (allowScriptRetry && joined && !isInExpectedScript(joined, languageCode)) {
+    console.warn(`[vertexClient] transcript came back romanized for ${language}, retrying in native script`);
+    const retry = await vertexTranscribeSingle(filePath, speakerReferences, language, false);
+    if (isInExpectedScript(retry.text, languageCode)) return retry;
+  }
+
+  return { text: joined, language, segments };
 }
 
 // Gemini's inline-audio transcription silently truncates to only the first several
@@ -279,10 +386,19 @@ async function captureSpeakerReferences(
   }
 }
 
-export async function vertexTranscribe(filePath: string): Promise<RawSttResult> {
+// Chunks sent to Gemini at once after the first; enough to cut wall time ~3x without tripping per-minute quotas.
+const STT_PARALLEL_CHUNKS = 3;
+
+export async function vertexTranscribe(
+  filePath: string,
+  // Called as each chunk finishes (with the language detected so far), so the UI shows real progress and callers can start dependent work early.
+  onChunkDone?: (done: number, total: number, language: string) => void | Promise<void>
+): Promise<RawSttResult> {
   const probe = await probeMedia(filePath);
   if (probe.durationSeconds <= VERTEX_MAX_CHUNK_SECONDS) {
-    return vertexTranscribeSingle(filePath);
+    const single = await vertexTranscribeSingle(filePath);
+    await onChunkDone?.(1, 1, single.language);
+    return single;
   }
 
   const chunkDir = path.join(path.dirname(filePath), `vertex_chunks_${Date.now()}`);
@@ -290,8 +406,13 @@ export async function vertexTranscribe(filePath: string): Promise<RawSttResult> 
   try {
     const chunkPaths = await splitAudioIntoChunks(filePath, VERTEX_MAX_CHUNK_SECONDS, chunkDir);
     await mkdir(refDir, { recursive: true });
-    const allSegments: RawSttSegment[] = [];
-    const allText: string[] = [];
+
+    // Chunks are not exactly VERTEX_MAX_CHUNK_SECONDS long (ffmpeg splits on packet
+    // boundaries), so each chunk's offset is the sum of the real durations before it,
+    // not a fixed stride that would drift further out of sync the longer the video runs.
+    const durations = await Promise.all(chunkPaths.map(async (p) => (await probeMedia(p)).durationSeconds));
+    const offsets = durations.map((_, i) => durations.slice(0, i).reduce((a, b) => a + b, 0));
+
     let detectedLanguage = 'unknown';
 
     // Carries a short voice sample per speaker forward from whichever chunk first
@@ -300,47 +421,65 @@ export async function vertexTranscribe(filePath: string): Promise<RawSttResult> 
     // this, "Speaker 1" in every chunk is only meaningful *within* that chunk, which
     // silently scrambles voice assignment on any multi-speaker video long enough to chunk.
     const knownSpeakers = new Map<string, string>();
+    const results: (RawSttResult | null)[] = chunkPaths.map(() => null);
+    let completed = 0;
 
-    let anySucceeded = false;
-    // Chunks are not exactly VERTEX_MAX_CHUNK_SECONDS long (ffmpeg splits on packet
-    // boundaries), so accumulate each chunk's real duration instead of assuming a fixed
-    // stride, which would otherwise drift further out of sync the longer the video runs.
-    let offset = 0;
-    for (let i = 0; i < chunkPaths.length; i++) {
-      try {
-        const references = Array.from(knownSpeakers, ([label, audioBase64]) => ({ label, audioBase64 }));
-        const result = await vertexTranscribeSingle(chunkPaths[i], references);
-        anySucceeded = true;
-        if (result.language && result.language !== 'unknown') detectedLanguage = result.language;
-        if (result.text) allText.push(result.text);
-        for (const seg of result.segments) {
-          allSegments.push({
-            start: seg.start + offset,
-            end: seg.end + offset,
-            text: seg.text,
-            confidence: seg.confidence,
-            speaker: seg.speaker,
-            words: seg.words?.map((w) => ({ text: w.text, start: w.start + offset, end: w.end + offset })),
-          });
-        }
-        await captureSpeakerReferences(chunkPaths[i], result.segments, knownSpeakers, refDir);
-      } catch (err) {
-        // One bad chunk (e.g. a malformed JSON response) shouldn't sink the whole
-        // transcript — skip it and keep the segments we did get.
-        console.error(`[vertexClient] chunk ${i} transcription failed, skipping`, err);
+    // The first chunk runs alone (it fixes the language and the first speakers' voices); the rest run in waves, each seeing every voice captured before it.
+    for (let waveStart = 0; waveStart < chunkPaths.length; ) {
+      const waveSize = waveStart === 0 ? 1 : STT_PARALLEL_CHUNKS;
+      const wave = chunkPaths.map((_, i) => i).slice(waveStart, waveStart + waveSize);
+      const references = Array.from(knownSpeakers, ([label, audioBase64]) => ({ label, audioBase64 }));
+      const knownLanguage = detectedLanguage !== 'unknown' ? detectedLanguage : undefined;
+
+      await Promise.all(
+        wave.map(async (i) => {
+          try {
+            results[i] = await vertexTranscribeSingle(chunkPaths[i], references, knownLanguage);
+          } catch (err) {
+            // One bad chunk (e.g. a malformed JSON response) shouldn't sink the whole
+            // transcript — skip it and keep the segments we did get.
+            console.error(`[vertexClient] chunk ${i} transcription failed, skipping`, err);
+          }
+        })
+      );
+
+      // Language and voice samples are folded in chunk order, so the outcome never depends on which request happened to finish first.
+      for (const i of wave) {
+        const result = results[i];
+        if (result?.language && result.language !== 'unknown' && detectedLanguage === 'unknown') detectedLanguage = result.language;
+        if (result) await captureSpeakerReferences(chunkPaths[i], result.segments, knownSpeakers, refDir);
+        completed++;
+        await onChunkDone?.(completed, chunkPaths.length, detectedLanguage);
       }
-      offset += (await probeMedia(chunkPaths[i])).durationSeconds;
+      waveStart += waveSize;
     }
 
-    if (!anySucceeded) {
+    if (results.every((r) => r === null)) {
       throw new Error('Vertex AI (Gemini) failed to transcribe any audio chunk');
     }
+
+    const allSegments: RawSttSegment[] = [];
+    const allText: string[] = [];
+    results.forEach((result, i) => {
+      if (!result) return;
+      const offset = offsets[i];
+      if (result.text) allText.push(result.text);
+      for (const seg of result.segments) {
+        allSegments.push({
+          start: seg.start + offset,
+          end: seg.end + offset,
+          text: seg.text,
+          confidence: seg.confidence,
+          speaker: seg.speaker,
+          words: seg.words?.map((w) => ({ text: w.text, start: w.start + offset, end: w.end + offset })),
+        });
+      }
+    });
     return { text: allText.join(' '), language: detectedLanguage, segments: allSegments };
   } finally {
     await rm(chunkDir, { recursive: true, force: true }).catch(() => undefined);
   }
 }
-
 
 // Gemini's `gemini-2.5-flash-preview-tts` synthesis previously lived here. It was replaced
 // by Google Cloud TTS (see googleTtsClient.ts): the preview model capped requests per

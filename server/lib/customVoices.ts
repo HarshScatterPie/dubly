@@ -18,6 +18,37 @@ export function isClonedVoiceId(voiceId: string): boolean {
   return voiceId.startsWith(CLONED_VOICE_PREFIX);
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * True only for `users/{uid}/voices/{uuid}/sample.wav` belonging to this exact uid. Checked segment by segment rather than by
+ * prefix, so traversal (`..`), encoded separators, doubled slashes or another user's or workspace's files can never match.
+ * The server signs URLs for and downloads whatever path a voice document names, so this is the only thing standing between a
+ * tampered voice document and another tenant's media.
+ */
+export function isOwnVoiceSamplePath(uid: string, storagePath: unknown): boolean {
+  if (typeof storagePath !== 'string' || storagePath.length > 200 || !uid) return false;
+  const parts = storagePath.split('/');
+  return (
+    parts.length === 5 &&
+    parts[0] === 'users' &&
+    parts[1] === uid &&
+    parts[2] === 'voices' &&
+    UUID_RE.test(parts[3]) &&
+    parts[4] === 'sample.wav'
+  );
+}
+
+// A stored voice is only usable if it is really this user's and points into this user's own sample folder.
+function isTrustworthy(uid: string, voice: StoredCustomVoice | undefined): voice is StoredCustomVoice {
+  if (!voice || voice.ownerUid !== uid || typeof voice.id !== 'string' || !isClonedVoiceId(voice.id)) return false;
+  if (!isOwnVoiceSamplePath(uid, voice.sampleStoragePath)) {
+    console.warn(`[customVoices] ignoring voice ${voice.id} of ${uid}: sample path is outside the user's voice folder`);
+    return false;
+  }
+  return true;
+}
+
 function voicesCol(uid: string) {
   return db.collection('users').doc(uid).collection('voices');
 }
@@ -54,18 +85,28 @@ export async function createCustomVoice(
 
 export async function listCustomVoices(uid: string): Promise<StoredCustomVoice[]> {
   const snap = await voicesCol(uid).orderBy('createdAt', 'desc').get();
-  return snap.docs.map((d) => d.data() as StoredCustomVoice);
+  return snap.docs.map((d) => d.data() as StoredCustomVoice).filter((v) => isTrustworthy(uid, v));
 }
 
 export async function getCustomVoice(uid: string, voiceId: string): Promise<StoredCustomVoice | null> {
   const snap = await voicesCol(uid).doc(voiceId).get();
-  if (!snap.exists) return null;
-  const voice = snap.data() as StoredCustomVoice;
-  return voice.ownerUid === uid ? voice : null;
+  const voice = snap.exists ? (snap.data() as StoredCustomVoice) : undefined;
+  return isTrustworthy(uid, voice) ? voice : null;
 }
 
-export async function deleteCustomVoice(uid: string, voiceId: string): Promise<void> {
-  await voicesCol(uid).doc(voiceId).delete();
+// Deletes the voice document, and its sample only when the sample path is genuinely the user's own.
+export async function deleteCustomVoice(uid: string, voiceId: string): Promise<boolean> {
+  const ref = voicesCol(uid).doc(voiceId);
+  const snap = await ref.get();
+  if (!snap.exists) return false;
+  const samplePath = snap.get('sampleStoragePath');
+  if (isOwnVoiceSamplePath(uid, samplePath)) {
+    const { bucket, invalidateSignedUrlCache } = await import('./firebaseAdmin');
+    await bucket.file(samplePath as string).delete({ ignoreNotFound: true });
+    invalidateSignedUrlCache(samplePath as string);
+  }
+  await ref.delete();
+  return true;
 }
 
 export async function toClientCustomVoice(stored: StoredCustomVoice): Promise<CustomVoice> {

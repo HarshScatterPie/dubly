@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { ffmpegDir } from './mediaTools';
 import { lipsyncDir } from './paths';
 
 /**
@@ -46,7 +46,7 @@ export function separateBackground(mediaPath: string, workDir: string, timeoutMs
       {
         cwd: workDir,
         // Demucs shells out to ffmpeg for decoding.
-        env: { ...process.env, PATH: `${path.dirname(ffmpegInstaller.path)}${path.delimiter}${process.env.PATH || ''}` },
+        env: { ...process.env, PATH: `${ffmpegDir}${path.delimiter}${process.env.PATH || ''}` },
       }
     );
 

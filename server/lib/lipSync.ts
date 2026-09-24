@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { ffmpegDir } from './mediaTools';
 import { lipsyncDir } from './paths';
 
 /**
@@ -69,7 +69,7 @@ export async function runLipSync(videoPath: string, outputPath: string): Promise
         // The inference script shells out to a bare `ffmpeg` internally — prepend our
         // bundled ffmpeg binary's directory so the child process can find it without
         // requiring a system-wide ffmpeg install.
-        env: { ...process.env, PATH: `${path.dirname(ffmpegInstaller.path)}${path.delimiter}${process.env.PATH || ''}` },
+        env: { ...process.env, PATH: `${ffmpegDir}${path.delimiter}${process.env.PATH || ''}` },
       }
     );
 

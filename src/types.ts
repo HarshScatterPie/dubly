@@ -10,6 +10,7 @@ export type NavigationTab =
   | 'my-voices'
   | 'history'
   | 'workspace'
+  | 'team'
   | 'usage'
   | 'settings';
 
@@ -217,8 +218,11 @@ export interface ToastMessage {
 }
 
 export interface UserUsageStats {
+  /** Minutes dubbed this calendar month; resets on the 1st. */
   minutesDubbed: number;
   minutesLimit: number;
+  /** When this month's minutes refresh (ISO); set by the server. */
+  resetsAt?: string;
   totalProjects: number;
   storageUsedMb: number;
   storageLimitMb: number;

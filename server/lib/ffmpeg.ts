@@ -1,53 +1,76 @@
-import ffmpeg from 'fluent-ffmpeg';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
-import ffprobeInstaller from '@ffprobe-installer/ffprobe';
-import { createWriteStream } from 'node:fs';
+import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { Readable } from 'node:stream';
-import { pipeline } from 'node:stream/promises';
 import { getWavDurationSeconds } from './audioUtils';
+import { ffmpeg, ffprobePath } from './mediaTools';
 
-ffmpeg.setFfmpegPath(ffmpegInstaller.path);
-ffmpeg.setFfprobePath(ffprobeInstaller.path);
+// Inputs may only be read from local files: a crafted file (e.g. a playlist) cannot make ffmpeg fetch URLs or other protocols.
+const SAFE_INPUT_OPTIONS = ['-protocol_whitelist', 'file,pipe'];
+
+// Hard ceilings per operation (seconds); a malformed file that makes ffmpeg hang is killed instead of holding a slot forever.
+const minutes = (name: string, fallback: number) => (Number(process.env[name]) || fallback) * 60;
+const TIMEOUT = {
+  quick: minutes('FFMPEG_QUICK_TIMEOUT_MINUTES', 5),
+  render: minutes('FFMPEG_RENDER_TIMEOUT_MINUTES', 120),
+};
+const PROBE_TIMEOUT_MS = 60_000;
+
+function fromFile(input: string, timeoutSeconds = TIMEOUT.render) {
+  return ffmpeg({ timeout: timeoutSeconds }).input(input).inputOptions(SAFE_INPUT_OPTIONS);
+}
+
+function addFile(command: ReturnType<typeof ffmpeg>, input: string) {
+  return command.input(input).inputOptions(SAFE_INPUT_OPTIONS);
+}
 
 export interface MediaProbe {
   durationSeconds: number;
   width?: number;
   height?: number;
   hasAudio: boolean;
+  hasVideo: boolean;
+  // ffprobe's container name list, e.g. "mov,mp4,m4a,3gp,3g2,mj2" or "matroska,webm".
+  formatName: string;
 }
 
+// ffprobe run directly (not through fluent-ffmpeg) so it gets the same protocol restriction and a timeout.
 export function probeMedia(filePath: string): Promise<MediaProbe> {
   return new Promise((resolve, reject) => {
-    ffmpeg.ffprobe(filePath, (err, data) => {
-      if (err) return reject(err);
-      const videoStream = data.streams.find((s) => s.codec_type === 'video');
-      const audioStream = data.streams.find((s) => s.codec_type === 'audio');
-      resolve({
-        durationSeconds: Number(data.format.duration) || 0,
-        width: videoStream?.width,
-        height: videoStream?.height,
-        hasAudio: Boolean(audioStream),
-      });
-    });
+    execFile(
+      ffprobePath,
+      ['-v', 'error', '-protocol_whitelist', 'file', '-print_format', 'json', '-show_format', '-show_streams', filePath],
+      { timeout: PROBE_TIMEOUT_MS, maxBuffer: 8 * 1024 * 1024, windowsHide: true },
+      (err, stdout) => {
+        if (err) return reject(new Error(`ffprobe could not read the file: ${err.message.split('\n')[0]}`));
+        try {
+          const data = JSON.parse(stdout) as {
+            format?: { duration?: string; format_name?: string };
+            streams?: { codec_type?: string; width?: number; height?: number }[];
+          };
+          const streams = data.streams || [];
+          const videoStream = streams.find((s) => s.codec_type === 'video');
+          const audioStream = streams.find((s) => s.codec_type === 'audio');
+          resolve({
+            durationSeconds: Number(data.format?.duration) || 0,
+            width: videoStream?.width,
+            height: videoStream?.height,
+            hasAudio: Boolean(audioStream),
+            hasVideo: Boolean(videoStream),
+            formatName: data.format?.format_name || '',
+          });
+        } catch {
+          reject(new Error('ffprobe returned unreadable output'));
+        }
+      }
+    );
   });
-}
-
-export async function downloadToFile(url: string, destPath: string): Promise<void> {
-  await mkdir(path.dirname(destPath), { recursive: true });
-  const res = await fetch(url);
-  if (!res.ok || !res.body) {
-    throw new Error(`Failed to download ${url}: ${res.status}`);
-  }
-  await pipeline(Readable.fromWeb(res.body as never), createWriteStream(destPath));
 }
 
 /** Extracts a 16kHz mono WAV track from a source video, ideal for STT accuracy. */
 export function extractAudioForStt(inputPath: string, outputWavPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    fromFile(inputPath, TIMEOUT.render)
       .noVideo()
       .audioCodec('pcm_s16le')
       .audioChannels(1)
@@ -83,7 +106,7 @@ export async function applyPitchSpeed(
   const filter = buildPitchSpeedFilter(pitch, speed, 24000);
 
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(inPath)
+    fromFile(inPath, TIMEOUT.quick)
       .audioFilters(filter)
       .audioCodec('pcm_s16le')
       .on('error', reject)
@@ -110,9 +133,16 @@ export interface TimedAudioSegment {
  * lines gabble and others drag, so the fit is now deliberately partial — start times stay
  * exact, and the delivery keeps its natural pace.
  */
-const MAX_COMPRESSION = 1.35;
+export const MAX_COMPRESSION = 1.35;
 /** Leave a little air before the next line rather than butting straight up against it. */
-const SEGMENT_GUARD_SECONDS = 0.08;
+export const SEGMENT_GUARD_SECONDS = 0.08;
+
+// How long a clip will actually play in the dub once the user's pitch/speed are applied (same clamps as the stitcher).
+export function effectiveClipSeconds(rawSeconds: number, pitch: number, speed: number): number {
+  const pitchFactor = Math.min(1.3, Math.max(0.7, pitch || 1));
+  const speedFactor = Math.min(1.5, Math.max(0.6, speed || 1));
+  return rawSeconds / pitchFactor / speedFactor;
+}
 
 /** Decomposes an arbitrary tempo factor into a chain of atempo filters, each kept within ffmpeg's valid single-filter range of [0.5, 2.0]. */
 function buildAtempoChain(factor: number): string {
@@ -160,14 +190,15 @@ export async function stitchDubbedAudio(params: {
 }): Promise<string> {
   const { segments, totalDurationSeconds, pitch, speed, workDir, background } = params;
   await mkdir(workDir, { recursive: true });
-  const sampleRate = 24000;
+  // 48kHz so the background bed keeps its fidelity; TTS clips are upsampled into it.
+  const sampleRate = 48000;
   const outputPath = path.join(workDir, 'dubbed_audio.wav');
 
   if (segments.length === 0) {
     return new Promise((resolve, reject) => {
       const cmd = background
-        ? ffmpeg(background.path)
-        : ffmpeg().input(`anullsrc=r=${sampleRate}:cl=mono`).inputFormat('lavfi');
+        ? fromFile(background.path)
+        : ffmpeg({ timeout: TIMEOUT.render }).input(`anullsrc=r=${sampleRate}:cl=mono`).inputFormat('lavfi');
       cmd
         .duration(Math.max(1, totalDurationSeconds))
         .audioCodec('pcm_s16le')
@@ -250,7 +281,7 @@ export async function stitchDubbedAudio(params: {
   // the 4x input count) from start to end — inaudible under the first line, clipping by
   // the last, and stepping up at every segment boundary in between. Padding each input to
   // run the whole length keeps the count constant, so the compensation stays exact.
-  // (This ffmpeg build predates amix's `normalize` option, which would be the direct fix.)
+  // (Kept rather than amix's `normalize=0`, so the mix behaves the same on older OS-packaged ffmpeg builds too.)
   // The limiter then catches the peaks where a line and a loud bed genuinely coincide,
   // instead of letting them wrap around as clipping.
   filterParts.push(
@@ -259,14 +290,14 @@ export async function stitchDubbedAudio(params: {
 
   return new Promise((resolve, reject) => {
     const command = background
-      ? ffmpeg(background.path).duration(Math.max(1, totalDurationSeconds))
-      : ffmpeg()
+      ? fromFile(background.path).duration(Math.max(1, totalDurationSeconds))
+      : ffmpeg({ timeout: TIMEOUT.render })
           .input(`anullsrc=r=${sampleRate}:cl=mono`)
           .inputFormat('lavfi')
           .duration(Math.max(1, totalDurationSeconds));
 
     for (const segPath of segmentPaths) {
-      command.input(segPath);
+      addFile(command, segPath);
     }
 
     command
@@ -281,8 +312,7 @@ export async function stitchDubbedAudio(params: {
 /** Replaces the source video's audio stream with the dubbed track; the video stream is copied untouched (no re-encode, no lip-sync). */
 export function muxVideoWithAudio(videoPath: string, audioPath: string, outputPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
-      .input(audioPath)
+    addFile(fromFile(videoPath), audioPath)
       .outputOptions(['-map 0:v:0', '-map 1:a:0', '-c:v copy', '-c:a aac', '-b:a 192k', '-shortest'])
       .on('error', reject)
       .on('end', () => resolve())
@@ -300,7 +330,7 @@ export async function splitAudioIntoChunks(
   const pattern = path.join(workDir, 'chunk_%03d.wav');
 
   await new Promise<void>((resolve, reject) => {
-    ffmpeg(inputWavPath)
+    fromFile(inputWavPath)
       .outputOptions(['-f segment', `-segment_time ${chunkSeconds}`, '-c copy', '-reset_timestamps 1'])
       .on('error', reject)
       .on('end', () => resolve())
@@ -320,7 +350,7 @@ export function extractAudioClip(
   outputWavPath: string
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(inputPath)
+    fromFile(inputPath, TIMEOUT.quick)
       .setStartTime(Math.max(0, startSeconds))
       .duration(Math.max(0.1, durationSeconds))
       .noVideo()
@@ -344,7 +374,7 @@ export function extractThumbnail(
   // lead-in frame — but never past the clip's own length for short samples.
   const timestamp = Math.max(0, Math.min(atSeconds, Math.max(0, durationSeconds - 0.1)));
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
+    fromFile(videoPath, TIMEOUT.quick)
       .on('error', reject)
       .on('end', () => resolve())
       .screenshots({
@@ -364,7 +394,7 @@ function escapeFilterPath(p: string): string {
 /** Burns an ASS subtitle file into the video (video re-encode, audio stream copied untouched) — used for the optional "download with captions" export. */
 export function burnSubtitles(videoPath: string, assPath: string, outputPath: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
+    fromFile(videoPath)
       .videoFilters(`subtitles='${escapeFilterPath(assPath)}'`)
       .outputOptions(['-c:a copy'])
       .on('error', reject)
@@ -375,7 +405,7 @@ export function burnSubtitles(videoPath: string, assPath: string, outputPath: st
 
 export function extractAudioOnly(videoPath: string, outputMp3Path: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    ffmpeg(videoPath)
+    fromFile(videoPath)
       .noVideo()
       .audioCodec('libmp3lame')
       .audioBitrate('192k')

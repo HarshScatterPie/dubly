@@ -203,3 +203,26 @@
 .safe-pb {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+/* ScatterPie mark loader: wedges fly in from the centre one by one, the complete logo holds, then it clears */
+.brand-mark-animated .brand-spoke {
+  transform-box: view-box;
+  transform-origin: 50px 50px;
+  animation: brandSpoke 3s cubic-bezier(0.22, 1, 0.36, 1) infinite both;
+}
+@keyframes brandSpoke {
+  0% { opacity: 0; transform: scale(0.35) rotate(-24deg); }
+  13% { opacity: 1; transform: scale(1) rotate(0deg); }
+  70% { opacity: 1; transform: scale(1) rotate(0deg); }
+  84%, 100% { opacity: 0; transform: scale(1.08) rotate(6deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-mark-animated .brand-spoke { animation: none; opacity: 1; }
+}
+
+/* Slow scan line over the video while it is being transcribed */
+@keyframes scanDown {
+  0% { top: -20%; }
+  100% { top: 100%; }
+}
+.animate-scan { animation: scanDown 2.8s linear infinite; }

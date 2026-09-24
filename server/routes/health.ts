@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router } from '../lib/router';
 import { getProviderStatus } from '../lib/modelRouter';
 import { isLipSyncAvailable } from '../lib/lipSync';
 import { isSeparationAvailable } from '../lib/audioSeparation';

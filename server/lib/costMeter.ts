@@ -98,6 +98,28 @@ function sttCostInr(provider: string, seconds: number): number {
   return 0;
 }
 
+export interface CostEstimate {
+  ttsChars: number;
+  ttsCharsFromCache: number;
+  sttSeconds: number;
+  estimatedInr: number;
+}
+
+// The same numbers as summarizeCost, as data, for storing on a job record.
+export function costEstimate(meter: CostMeter): CostEstimate {
+  const tts = Object.entries(meter.ttsCharsByProvider);
+  const stt = Object.entries(meter.sttSecondsByProvider);
+  const estimatedInr =
+    tts.reduce((sum, [provider, chars]) => sum + ttsCostInr(provider, chars), 0) +
+    stt.reduce((sum, [provider, seconds]) => sum + sttCostInr(provider, seconds), 0);
+  return {
+    ttsChars: tts.reduce((sum, [, chars]) => sum + chars, 0),
+    ttsCharsFromCache: meter.ttsCharsServedFromCache,
+    sttSeconds: Math.round(stt.reduce((sum, [, seconds]) => sum + seconds, 0)),
+    estimatedInr: Math.round(estimatedInr * 100) / 100,
+  };
+}
+
 export function summarizeCost(meter: CostMeter): string {
   let total = 0;
   const parts: string[] = [];

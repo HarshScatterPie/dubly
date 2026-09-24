@@ -21,6 +21,7 @@ import { settingsService } from './services/settingsService';
 import { StudioMiniPlayer } from './components/StudioMiniPlayer';
 import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type StudioStatus } from './lib/studioSession';
 import { projectProgress } from './lib/projectProgress';
+import { randomId } from './lib/randomId';
 
 takeInviteTokenFromUrl();
 
@@ -57,7 +58,7 @@ interface StudioSession {
 }
 
 const newStudioSession = (spec: Partial<Omit<StudioSession, 'key'>> = {}): StudioSession => ({
-  key: crypto.randomUUID(),
+  key: randomId(),
   sampleId: null,
   redubProject: null,
   resumeProject: null,

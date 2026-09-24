@@ -5,6 +5,7 @@
 
 import { DubbingProject, LocalizedSegment, TranscriptSegment, TranslationStyle, VoiceEmotion } from '../types';
 import { apiDelete, apiGet, apiPatch, apiPost, apiUpload } from '../lib/apiClient';
+import { randomId } from '../lib/randomId';
 
 export class ProjectService {
   public createDraft(title: string, sourceLanguage = 'en', targetLanguage = 'hi'): Promise<DubbingProject> {
@@ -161,12 +162,12 @@ export class ProjectService {
     }
   ): Promise<{ status: string; jobId?: string }> {
     // One key per start: if this request is retried the server hands back the same job instead of starting (and charging) a second one.
-    return apiPost<{ status: string; jobId?: string }>(`/api/projects/${projectId}/dub`, opts, { 'Idempotency-Key': crypto.randomUUID() });
+    return apiPost<{ status: string; jobId?: string }>(`/api/projects/${projectId}/dub`, opts, { 'Idempotency-Key': randomId() });
   }
 
   /** Re-renders one language with its edited lines, charged only for the lines that changed since its last render. */
   public retakeLines(projectId: string, languageCode: string): Promise<{ status: string; jobId: string; changedLines: number; minutes: number }> {
-    return apiPost(`/api/projects/${projectId}/languages/${languageCode}/retake`, undefined, { 'Idempotency-Key': crypto.randomUUID() });
+    return apiPost(`/api/projects/${projectId}/languages/${languageCode}/retake`, undefined, { 'Idempotency-Key': randomId() });
   }
 }
 

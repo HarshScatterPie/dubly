@@ -1,13 +1,4 @@
-/**
- * Rollback helper for the project storage split (docs/DATABASE.md). Copies each split project's transcript and language
- * segments back into its metadata document, so code from before the split can read it again. The subdocuments are left in
- * place (harmless to old code, and needed if the rollback is itself rolled back).
- *
- *   npx tsx server/scripts/unsplit_projects.ts            dry run: reports what would change
- *   npx tsx server/scripts/unsplit_projects.ts --apply    writes
- *
- * Projects that would exceed Firestore's 1 MiB document limit when rejoined cannot be unsplit; they are listed and skipped.
- */
+// Rollback for the storage split: rejoins split projects into single docs (dry run by default, --apply to write; too-large ones are skipped).
 import '../lib/env';
 import { db } from '../lib/firebaseAdmin';
 import { loadProject } from '../lib/projectStorage';

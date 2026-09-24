@@ -6,10 +6,7 @@ import { tmpDir } from './paths';
 const SCRATCH_SUBDIRS = ['jobs', 'uploads', 'tts', 'voice-uploads', 'voice-jobs', 'clone'];
 export const DEFAULT_TMP_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
-/**
- * Deletes scratch entries under server/tmp older than `maxAgeMs`, skipping `keep` (paths still in use). Loose files at the
- * top of tmp (VAD scratch, ad-hoc test output) are swept too. Returns what was removed.
- */
+// Deletes server/tmp scratch entries (and loose top-level files) older than maxAgeMs, except paths in keep; returns what was removed.
 export async function sweepTmp(options: { root?: string; maxAgeMs?: number; keep?: ReadonlySet<string>; now?: number } = {}): Promise<string[]> {
   const root = options.root ?? tmpDir;
   const maxAgeMs = options.maxAgeMs ?? DEFAULT_TMP_MAX_AGE_MS;

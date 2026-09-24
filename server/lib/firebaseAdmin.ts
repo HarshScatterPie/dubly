@@ -48,8 +48,7 @@ export { app as firebaseAdminApp };
 const SIGNED_URL_CACHE_MS = 1000 * 60 * 55; // under an hour, matched to the Cache-Control max-age below
 const signedUrlCache = new Map<string, { url: string; cachedAt: number }>();
 
-// Media links are short-lived so that someone removed from a workspace, or a leaked link, loses access within hours rather
-// than days. A URL is reused for at most SIGNED_URL_CACHE_MS, so every URL handed out is still valid for 2+ hours.
+// Media URLs live 3 h (each reused for at most 55 min), so removed members and leaked links lose access within hours.
 export const SIGNED_URL_TTL_MS = 1000 * 60 * 60 * 3;
 
 export async function getSignedDownloadUrl(storagePath: string, expiresInMs = SIGNED_URL_TTL_MS): Promise<string> {

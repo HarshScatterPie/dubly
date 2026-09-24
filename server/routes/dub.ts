@@ -175,10 +175,7 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
 
 export const QUEUED_MESSAGE = 'Waiting in the queue: other dubs in this workspace are rendering. Yours starts automatically.';
 
-/**
- * Hands a job to the admission queue. From here until it finishes (or is released at shutdown) this process owns it: its
- * heartbeat is kept fresh, so reconciliation leaves it alone, and shutdown waits for it.
- */
+// Queues a job; this process then owns it (fresh heartbeat, awaited on shutdown) until it finishes or is released.
 export function enqueueDubJob(job: DubJob): void {
   const stopHeartbeat = startHeartbeat(job.id);
   const unmark = markRunningHere(job.id);
@@ -213,10 +210,7 @@ export function setDubPipelineForTests(fn: ((job: DubJob) => Promise<PipelineRes
   pipelineImpl = fn ?? ((job) => runDubPipeline(job));
 }
 
-/**
- * Runs one job's pipeline and settles it: minutes for languages that did not render are refunded, and a crash of the
- * pipeline itself refunds everything. Settlement is exactly-once, so this can race reconciliation safely.
- */
+// Runs a job's pipeline and settles it exactly once: failed languages are refunded, and a pipeline crash refunds everything.
 export function runDubJob(job: DubJob, pipeline: (job: DubJob) => Promise<PipelineResult> = runDubPipeline): Promise<void> {
   // Every log line from this run, down to provider retries, carries the job's ids.
   return withLogContext({ jobId: job.id, projectId: job.projectId, workspaceId: job.workspaceId, userId: job.userId }, () => runDubJobInContext(job, pipeline));

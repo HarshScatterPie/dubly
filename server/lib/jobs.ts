@@ -7,11 +7,7 @@ import { prepareRefund, prepareReservation, projectRef, type StoredProject } fro
 import { tmpDir } from './paths';
 import { applyPlan, planProjectWrite } from './projectStorage';
 
-/**
- * A job: the persistent record of one long-running operation on a project, a dub or a transcription. The project document
- * keeps its old status/progress fields for the frontend; the job adds ownership (`project.activeJobId`, so one operation
- * runs per project at a time), a heartbeat, cancellation, and for dubs the exactly-once settlement of reserved minutes.
- */
+// A job is the persisted record of one dub or transcription: project ownership, heartbeat, cancellation and exactly-once minute settlement.
 export type JobStatus = 'queued' | 'running' | 'completed' | 'partially_completed' | 'failed' | 'cancelled';
 export type JobType = 'dub' | 'transcribe';
 
@@ -112,10 +108,7 @@ export interface StartDubJobInput {
   idempotencyKey?: string;
 }
 
-/**
- * Creates the job, takes ownership of the project and reserves the minutes in one transaction, so a double click or two
- * teammates can never start two runs or be charged twice. A repeated Idempotency-Key returns the job it created before.
- */
+// Creates the job, takes the project and reserves minutes in one transaction; a repeated Idempotency-Key returns the earlier job.
 export async function startDubJob(input: StartDubJobInput): Promise<{ job: DubJob; replayed: boolean }> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -206,10 +199,7 @@ async function startDubJobOnce(input: StartDubJobInput): Promise<{ job: DubJob; 
   });
 }
 
-/**
- * Starts a transcription: takes the project (one operation per project at a time) and records the job, in one transaction.
- * Nothing is charged; a stale holder of the project is settled as interrupted first, as for dubs.
- */
+// Starts a transcription: takes the project and records the job in one transaction, settling a stale holder first; nothing is charged.
 export async function startTranscribeJob(input: { workspaceId: string; projectId: string; userId: string }): Promise<DubJob> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -306,10 +296,7 @@ export function toClientJob(job: DubJob) {
   };
 }
 
-/**
- * Marks an admitted job as running. False when the job was settled or lost the project while it waited, in which case it
- * must not run at all.
- */
+// Marks an admitted job running; false if it was settled, cancelled or lost the project while waiting, so it must not run.
 export async function markJobStarted(job: Pick<DubJob, 'id' | 'workspaceId' | 'projectId'>): Promise<boolean> {
   const pRef = projectRef(job.workspaceId, job.projectId);
   const jobRef = jobsCol().doc(job.id);
@@ -325,10 +312,7 @@ export async function markJobStarted(job: Pick<DubJob, 'id' | 'workspaceId' | 'p
   });
 }
 
-/**
- * A write to the project on behalf of a job, applied only while that job still owns the project; the job's own progress
- * and heartbeat are updated in the same transaction. Throws JobSupersededError once ownership is gone.
- */
+// Writes to the project for a job only while it owns the project, updating its progress and heartbeat in the same transaction.
 export async function writeProjectForJob(
   job: Pick<DubJob, 'id' | 'workspaceId' | 'projectId'>,
   patch: Partial<StoredProject>,
@@ -367,10 +351,7 @@ export interface JobOutcome {
   projectPatch?: Partial<StoredProject>;
 }
 
-/**
- * Records a job's outcome, gives back its unused minutes and releases the project, all in one transaction and only once:
- * a second call (a retry, or reconciliation racing the pipeline's own finish) finds the job settled and does nothing.
- */
+// Records a job's outcome, refunds unused minutes and releases the project in one transaction, exactly once.
 export async function settleJob(jobId: string, outcome: JobOutcome): Promise<boolean> {
   const jobRef = jobsCol().doc(jobId);
   return db.runTransaction(async (tx) => {
@@ -429,11 +410,7 @@ export async function settleInterruptedJob(jobId: string): Promise<boolean> {
   return settled;
 }
 
-/**
- * Finds unsettled jobs whose heartbeat has stopped (their process crashed, was killed or restarted). A job that had started
- * rendering is settled as interrupted; one that was still waiting in the queue never did any work, so when `requeue` is given
- * it is claimed and handed back to be queued again instead. `exclude` lists jobs this process holds, which are alive.
- */
+// Settles jobs whose heartbeat stopped as interrupted, or re-queues ones that never started when requeue is given; exclude lists live local jobs.
 export async function reconcileStaleJobs(
   exclude: ReadonlySet<string> = new Set(),
   now = Date.now(),

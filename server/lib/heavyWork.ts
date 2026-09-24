@@ -6,10 +6,7 @@ import { log } from './log';
 // Transcriptions and caption renders share these slots, so a burst of them cannot starve the dubs rendering on the same machine.
 export const heavyWork = new Semaphore(limits.maxHeavyRequests);
 
-/**
- * Runs `fn` once a heavy-work slot is free. `onWait` is called only if the caller has to queue (to tell the user why nothing is
- * happening yet); past `limits.heavyWaitMs` the request is answered with 503 instead of waiting forever.
- */
+// Runs fn once a heavy-work slot is free; onWait fires only if it has to queue, and past heavyWaitMs the request gets a 503.
 export async function withHeavySlot<T>(fn: () => Promise<T>, onWait?: () => unknown): Promise<T> {
   const release = await acquireHeavySlot(onWait);
   try {

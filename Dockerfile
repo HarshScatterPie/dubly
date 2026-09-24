@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
-# Production image: the API process also serves the built frontend (see server/app.ts). One container = the whole app.
-# Pin NODE_IMAGE to a digest in your deploy pipeline for fully reproducible builds; the tag below fixes Node 24 on Debian 13.
+# Production image (API + built frontend in one container); pin NODE_IMAGE by digest for byte-for-byte rebuilds.
 ARG NODE_IMAGE=node:24-trixie-slim
 
 FROM ${NODE_IMAGE} AS build

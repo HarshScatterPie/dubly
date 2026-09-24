@@ -172,10 +172,7 @@ async function displayNameFor(uid: string): Promise<string> {
   return (typeof profileName === 'string' && profileName) || user.displayName || user.email?.split('@')[0] || 'Member';
 }
 
-/**
- * Invites an email into the workspace. Nothing about the invited person is looked up, created or moved: the response is the
- * same whether or not the email has a login, and a repeat invite for the same email replaces the earlier link.
- */
+// Invites an email without looking anyone up, creating or moving anything; the response never reveals whether the email has a login.
 export async function createInvite(
   workspaceId: string,
   actorUid: string,
@@ -271,10 +268,7 @@ export async function previewInvite(
   };
 }
 
-/**
- * Joins the caller to the invite's workspace. The caller's own workspace and its projects are left exactly where they are;
- * only which workspace they work in changes, and removal from the team later returns them to it. Accepting twice is a no-op.
- */
+// Joins the caller to the invite's workspace, leaving their own workspace and projects in place to return to; accepting twice is a no-op.
 export async function acceptInvite(token: string, uid: string, callerEmail: string | undefined): Promise<Membership> {
   const ref = invitesCol().doc(hashToken(String(token)));
   const name = await displayNameFor(uid);

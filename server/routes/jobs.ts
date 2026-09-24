@@ -17,10 +17,7 @@ jobsRouter.get('/:id/jobs/:jobId', async (req, res) => {
   res.json(toClientJob(job));
 });
 
-/**
- * Cancels a job. One still waiting in the dub queue is settled on the spot with a full refund; a running one stops at its
- * next progress step and is settled by its own runner. Cancelling a finished job is a no-op that reports its final state.
- */
+// Cancels a job: a queued dub is settled at once with a full refund, a running job stops at its next step, a finished one is reported as is.
 jobsRouter.post('/:id/jobs/:jobId/cancel', async (req, res) => {
   const job = await jobOf(req.workspaceId!, req.params.id, req.params.jobId);
   if (!job) return res.status(404).json({ error: 'Job not found' });

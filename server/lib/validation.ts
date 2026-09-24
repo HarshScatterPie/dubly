@@ -1,11 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { z } from 'zod';
 
-/**
- * Runtime shapes for every write endpoint. The frontend's TypeScript types say nothing about what actually arrives, so bodies
- * are checked here: types, enums, numeric ranges, string lengths and collection sizes. Limits are generous next to what the
- * UI sends (a 60-minute video is ~750 segments) and exist to stop junk and oversized payloads, not ordinary use.
- */
+// Runtime shapes for every write endpoint; limits are generous next to real UI use (a 60-minute video is ~750 segments).
 const MAX_SEGMENTS = 5000;
 const MAX_TEXT = 5000;
 const MAX_MAP_ENTRIES = 50;
@@ -120,10 +116,7 @@ export const schemas = {
   }),
 };
 
-/**
- * Validates req.body against a schema, replacing it with the parsed value (unknown top-level fields dropped). Failures are
- * a 400 naming the offending fields, without echoing the submitted values back.
- */
+// Replaces req.body with its parsed value (unknown top-level fields dropped) or answers 400 naming the bad fields, never echoing values.
 export function validateBody(schema: z.ZodTypeAny) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req.body ?? {});

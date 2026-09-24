@@ -34,11 +34,7 @@ function hindiLine(rand: () => number, words: number): string {
   ).join(' ');
 }
 
-/**
- * A project as the pipeline stores it after dubbing: 150 spoken words a minute in ~12-word lines with per-word timings, and
- * every target language translated into an Indic script (3 bytes a character, the heaviest case Dubly serves). The primary
- * language's segments are stored twice, at the top level and in languageOutputs, exactly as projects.ts/dub.ts do.
- */
+// A dubbed project as stored: 150 words/min in 12-word lines with word timings, Indic translations, primary language stored twice.
 export function realisticProject(minutes: number, languageCount: number): Record<string, unknown> {
   const rand = rng(minutes * 100 + languageCount);
   const totalWords = minutes * 150;

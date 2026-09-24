@@ -20,12 +20,7 @@ export function isClonedVoiceId(voiceId: string): boolean {
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-/**
- * True only for `users/{uid}/voices/{uuid}/sample.wav` belonging to this exact uid. Checked segment by segment rather than by
- * prefix, so traversal (`..`), encoded separators, doubled slashes or another user's or workspace's files can never match.
- * The server signs URLs for and downloads whatever path a voice document names, so this is the only thing standing between a
- * tampered voice document and another tenant's media.
- */
+// True only for users/{uid}/voices/{uuid}/sample.wav of this exact uid, checked per segment so traversal or other tenants' files never match.
 export function isOwnVoiceSamplePath(uid: string, storagePath: unknown): boolean {
   if (typeof storagePath !== 'string' || storagePath.length > 200 || !uid) return false;
   const parts = storagePath.split('/');

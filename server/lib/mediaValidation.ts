@@ -57,10 +57,7 @@ const unsupported = (kind: MediaKind) =>
     kind === 'video' ? 'Only MP4, MOV and WebM videos are supported.' : 'Upload an audio recording (wav, mp3, m4a, ogg, flac or webm).'
   );
 
-/**
- * Decides from the file's content (never its name, extension or the browser's MIME type) whether an upload is a supported
- * video or audio file with real playable length, and returns the probe plus the storage extension/content type to use.
- */
+// Judges an upload by its content (never its name, extension or MIME type) and returns the probe plus the storage extension and content type.
 export async function validateMedia(filePath: string, kind: MediaKind): Promise<MediaProbe & { ext: string; contentType: string }> {
   const container = sniffContainer(await readHead(filePath));
   if (!container || !ALLOWED[kind].includes(container)) throw unsupported(kind);

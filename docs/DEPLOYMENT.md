@@ -1,6 +1,42 @@
 # Deployment
 
-One container runs everything: the API, the built frontend, jobs, and scheduled maintenance. Run **exactly one instance** (see ARCHITECTURE.md → Scaling).
+One process runs everything: the API, the built frontend, jobs, and scheduled maintenance. Run **exactly one instance** (see ARCHITECTURE.md → Scaling).
+
+## Current production: GCE VM `dubly-app` with auto-deploy from `main`
+
+| | |
+|---|---|
+| Machine | `dubly-app`, asia-south1-b, project `scatter-studio-live-2026`, 2 vCPU / 2 GB, Ubuntu 22.04 |
+| Traffic | nginx :80 → `127.0.0.1:8787` (`client_max_body_size 500M`, `proxy_read_timeout 600s`). **No HTTPS yet** (see below) |
+| Process | `dubly.service` (systemd, user `harsh.vardhan`), Node 24 from `/opt/node-24`, `KillMode=mixed`, `TimeoutStopSec=40` |
+| Code | `~/dubly` → symlink to `~/dubly-releases/<commit>` (the three newest are kept) |
+| Secrets and shared files | `~/dubly-shared/`: `server.env`, `web.env` (VITE client config), `credentials/`, `cache/`, `runtime.env` (capacity limits and `TRUST_PROXY`) |
+| Deploys | `dubly-autodeploy.timer` runs every 2 min: if `main` has a new commit **and that commit's CI run passed**, `deploy/vm/deploy.sh` builds it in a new release folder, switches, restarts, checks `/api/healthz`, and switches back if unhealthy |
+
+**How a change reaches production:** push to `main` → CI runs (≈5 min) → within 2 minutes of CI passing, the VM deploys it. A commit whose CI fails is never deployed.
+
+**Setup (already done once; re-runnable):** on the VM run `bash ~/dubly/deploy/vm/install.sh`. It installs checksum-verified Node 24, adopts the old hand-copied install as a `legacy-…` release, moves secrets into `~/dubly-shared`, and installs and enables the units.
+
+**Operating it:**
+```bash
+gcloud compute ssh dubly-app --zone asia-south1-b
+journalctl -u dubly -f                          # app logs (JSON)
+journalctl -u dubly-autodeploy -n 50            # what the deployer did
+cat ~/dubly/REVISION                            # live commit
+bash ~/dubly/deploy/vm/deploy.sh <sha>          # deploy a specific commit by hand
+ln -sfn ~/dubly-releases/<older-sha> ~/dubly && sudo systemctl restart dubly   # instant rollback
+sudo systemctl stop dubly-autodeploy.timer      # pause auto-deploy (e.g. while rolled back)
+rm ~/.dubly-autodeploy/skip-<sha>               # let the deployer retry a commit it gave up on
+```
+A rollback to a release from **before** the project-storage split also needs the unsplit script (see Rollback below).
+
+**Still to do on this VM:**
+- **HTTPS.** nginx serves plain HTTP on the IP address, so sign-in tokens cross the network unencrypted. This needs a domain name; then `certbot --nginx` (Let's Encrypt), and HSTS is sent automatically once `TRUST_PROXY` sees HTTPS.
+- **Keyless credentials.** The VM's service account runs with limited access scopes, so `CREDENTIALS_MODE=adc` won't work until the VM is stopped and given the `cloud-platform` scope (plus the IAM roles in SECURITY.md). Until then, it uses the key files in `~/dubly-shared/credentials`.
+
+## Container deployment (alternative)
+
+The same app ships as a Docker image, for hosts that run containers.
 
 ## Build
 

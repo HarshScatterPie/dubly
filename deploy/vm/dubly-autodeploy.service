@@ -1,0 +1,10 @@
+# Installed by deploy/vm/install.sh. One check-and-deploy pass; see autodeploy.sh.
+[Unit]
+Description=Deploy Dubly main from GitHub once CI has passed
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=__USER__
+ExecStart=/bin/bash __HOME__/dubly/deploy/vm/autodeploy.sh

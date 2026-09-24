@@ -15,6 +15,7 @@ const TIMEOUT = {
   render: minutes('FFMPEG_RENDER_TIMEOUT_MINUTES', 120),
 };
 const PROBE_TIMEOUT_MS = 60_000;
+// Generated silence (lavfi) is selected with a raw -f option: newer ffmpeg lists lavfi under -devices, which fluent-ffmpeg's format check does not read.
 
 function fromFile(input: string, timeoutSeconds = TIMEOUT.render) {
   return ffmpeg({ timeout: timeoutSeconds }).input(input).inputOptions(SAFE_INPUT_OPTIONS);
@@ -198,7 +199,7 @@ export async function stitchDubbedAudio(params: {
     return new Promise((resolve, reject) => {
       const cmd = background
         ? fromFile(background.path)
-        : ffmpeg({ timeout: TIMEOUT.render }).input(`anullsrc=r=${sampleRate}:cl=mono`).inputFormat('lavfi');
+        : ffmpeg({ timeout: TIMEOUT.render }).input(`anullsrc=r=${sampleRate}:cl=mono`).inputOptions(['-f', 'lavfi']);
       cmd
         .duration(Math.max(1, totalDurationSeconds))
         .audioCodec('pcm_s16le')
@@ -293,7 +294,7 @@ export async function stitchDubbedAudio(params: {
       ? fromFile(background.path).duration(Math.max(1, totalDurationSeconds))
       : ffmpeg({ timeout: TIMEOUT.render })
           .input(`anullsrc=r=${sampleRate}:cl=mono`)
-          .inputFormat('lavfi')
+          .inputOptions(['-f', 'lavfi'])
           .duration(Math.max(1, totalDurationSeconds));
 
     for (const segPath of segmentPaths) {

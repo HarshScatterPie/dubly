@@ -6,7 +6,7 @@
 
 ## Executive summary
 
-The audit found two critical and eleven high findings. All of them are now fixed in code and covered by automated tests, except for the parts that live outside this repository: Firebase console settings, GCP backups, and running CI on GitHub.
+The audit found two critical and eleven high findings. All of them are now fixed in code and covered by automated tests, except for the parts that live outside this repository: Firebase console settings, GCP backups, and HTTPS for the production VM. CI is green on GitHub, and production now deploys `main` automatically once CI passes.
 
 The biggest changes:
 - **Team membership works by invitation.** An admin can no longer take over another user's workspace or create accounts.
@@ -88,9 +88,10 @@ Covered in §1 under tenancy, auth, SSRF, media, storage paths, validation, URLs
 - GitHub Actions CI: typecheck, emulator tests, build, `npm audit --audit-level=high`, TruffleHog secret scan, Docker build and smoke check.
 - `firebase.json` can't deploy rules.
 - Configuration, limits, release and rollback are documented in [DEPLOYMENT.md](DEPLOYMENT.md).
-- Nothing deploys automatically. Promotion stays manual, because no production pipeline existed to extend.
+- **Production VM (`dubly-app`) now deploys `main` by itself**, but only after that commit's CI run passes. Each release builds in its own folder, is health-checked, and rolls back automatically; the three newest releases are kept for instant rollback. The deployer is pull-based (a systemd timer on the VM), so GitHub holds no keys and the VM needs no inbound access. The VM also got Node 24 (Node 20 is end of life), 2 GB swap, and capacity limits sized for its 2 vCPU / 2 GB. See [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## 7. Remaining risks
+0. **Production runs on plain HTTP** (nginx on port 80, the VM's IP address). Sign-in tokens and all API traffic cross the network unencrypted. This is the most urgent remaining item; it needs a domain name plus a TLS certificate (`certbot --nginx`).
 1. **Unverified console state.** Self sign-up disabled? Which Firestore/Storage rules are deployed? Backups exist? If the deployed rules allow `users/{uid}/**` writes, users can still write their own voice documents. The server now ignores bad ones, but clients could also upload directly to the bucket.
 2. **No load test.** Capacity numbers (4 concurrent dubs, 3 heavy slots) are conservative guesses, not measurements.
 3. **The UI changes haven't been browser-tested.** That covers the new Team invite screen, the join dialog, share "turn off", async analysis, and the error-message format. They pass the typecheck and build, and the APIs behind them are tested.
@@ -107,7 +108,8 @@ Covered in §1 under tenancy, auth, SSRF, media, storage paths, validation, URLs
 - [ ] Create the **runtime service account** (permissions in SECURITY.md) and switch production to `CREDENTIALS_MODE=adc`; delete the long-lived keys.
 - [ ] Create the **log-based metrics and alerts** ([RUNBOOK.md](RUNBOOK.md)).
 - [ ] Restrict the **Firebase web API key** to the app's origins.
-- [ ] Run CI on GitHub (push the branch) and confirm the Docker image builds.
+- [x] Run CI on GitHub and confirm the Docker image builds: **done, green**.
+- [ ] Point a domain at the VM (34.100.230.64) and enable HTTPS.
 
 ## 9. Items requiring product decisions
 - Automatic expiry of old projects and media, account deletion, and workspace deletion. Nothing is deleted automatically today.
@@ -141,13 +143,15 @@ Covered in §1 under tenancy, auth, SSRF, media, storage paths, validation, URLs
 | Secret scan (pattern scan of the 125 files a commit would include, plus a check that no `.env`/credentials/`tmp`/`dist` paths are included) | none found. One real, public Firebase web key had been copied into a test fixture; it was replaced with a fake |
 | Server boot under the emulators (`tsx server/index.ts`) | listening, reconciliation scheduled, `/api/healthz` 200, unauthenticated `/api/projects` 401 |
 | Live check of the built-in samples against the new downloader | both allowed, and the flower sample downloaded at its full 1,128,375 bytes |
-| `docker build` | **not run**: Docker Desktop engine not running on this machine; CI builds it |
+| GitHub Actions CI | `ae03c0f` and later: **green** (typecheck, tests, build, audit, secret scan, **Docker build**). It first caught a real Linux-only ffmpeg bug, which was fixed |
+| Production VM | Deployed by hand (`ae03c0f`), then `f78aaef` **auto-deployed** after CI passed; public `/api/healthz` 200, unauthenticated `/api/projects` 401, security headers present, JSON logs, no startup errors |
 
 ## Production readiness: **READY WITH CONDITIONS**
 
 The code changes are complete and verified by tests. Before telling enterprise customers that Dubly is production-grade, these conditions must be met:
 
-1. CI passes on GitHub, including the Docker build.
+1. ~~CI passes on GitHub, including the Docker build.~~ **Done.**
+1a. **HTTPS in front of production** (new: production currently serves plain HTTP).
 2. The console items in §8 are done, especially backups with a successful restore test, and the deployed rules are reviewed.
 3. Someone clicks through the changed UI flows (§7.3) once in a browser.
 4. A load test runs against staging, to replace the guessed capacity limits with measured ones.

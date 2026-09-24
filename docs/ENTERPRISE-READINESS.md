@@ -17,7 +17,7 @@ Tracks every finding of [enterprise-readiness-audit.md](enterprise-readiness-aud
 | H-7 | 2018 ffmpeg, no format allow-list | ✅ | ffmpeg 6.1 (development) / Debian package (image); content-based allow-list; protocol whitelist; timeouts. Every media step tested on the new binary |
 | H-8 | No admission control | ✅ | Dub queue (2 per workspace, 4 per server, rest queued); 3 heavy-work slots |
 | H-9 | 1 MiB project document limit | ✅ | Measured (60 min × 3 languages failed); split layout (largest document 43% at 60 min × 10); lazy migration; rollback script |
-| H-10 | No tests / CI / reproducible deploy | 🟡 | 188 tests on the Firebase emulators; GitHub Actions workflow; Dockerfile; `start` script. **CI hasn't run on GitHub yet, and the image hasn't been built** (Docker Desktop wasn't running locally) |
+| H-10 | No tests / CI / reproducible deploy | ✅ | 188 tests on the Firebase emulators; GitHub Actions CI **green on GitHub**, including the Docker image build; `npm start`. Production VM deploys `main` automatically after CI passes (release folders, health check, automatic rollback) |
 | H-11 | Backup / DR unknown | 🔧 | DISASTER-RECOVERY.md with procedures. **PITR, exports, soft delete and a restore test need the console** |
 | M-1 | Revoked sessions valid 1 h | ✅ | Cached revocation check, ≤ 30 s |
 | M-2 | 6-day URLs, share tokens in logs | ✅ | 3 h URLs; hashed, revocable shares with 2 h media URLs; token redaction |
@@ -41,6 +41,11 @@ Tracks every finding of [enterprise-readiness-audit.md](enterprise-readiness-aud
 
 | Item | Status |
 |---|---|
+| **Production is served over plain HTTP** (nginx :80 on the VM's IP); Firebase ID tokens cross the network unencrypted | 🔧 **HIGH, open.** Needs a domain, then `certbot --nginx` |
+| Production VM ran Node 20 (end of life April 2026), no swap on 2 GB RAM, hand-copied code | ✅ Node 24.21 (checksum-verified), 2 GB swap, release-based auto-deploy |
+| `lavfi` silence input rejected by fluent-ffmpeg on Linux ffmpeg builds | ✅ Found by CI; replaced with a looped silent WAV |
+| The tsx CLI's child process cut the graceful drain short under systemd | ✅ The app now runs as the main process (`node --import tsx`) |
+| A deploy takes about 1 minute of downtime while the new release starts | ⏸ Acceptable for now; precompiling the server would shorten startup |
 | High-severity npm advisories (multer, onnxruntime-node/adm-zip) | ✅ Fixed by non-breaking upgrades |
 | 8 moderate advisories via `firebase-admin@13` | ⏸ Needs the `firebase-admin@14` major upgrade (planned change) |
 | The UI polls `GET /projects/:id` every 1.5 s, which returns every segment; with the split this costs 2 + languages reads per poll | ⏸ Performance follow-up: a lightweight status endpoint for polling |

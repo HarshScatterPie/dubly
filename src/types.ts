@@ -11,6 +11,7 @@ export type NavigationTab =
   | 'history'
   | 'workspace'
   | 'team'
+  | 'glossary'
   | 'usage'
   | 'settings';
 
@@ -89,7 +90,12 @@ export interface TranscriptSegment {
   confidence: number;
   /** Per-word timing within this segment — proportionally estimated from Gemini's segment-level timestamps (Vertex has no native word-level ASR). Refined further by forced alignment when available. Drives karaoke-style caption highlighting. */
   words?: TranscriptWord[];
+  /** How the line is spoken in the original (e.g. "excited and fast"), heard by the transcription model; steers the dubbed voice's delivery. */
+  delivery?: string;
 }
+
+/** Why a line deserves a reviewer's look: text flags are recomputed on every save, render flags come from the line's last dub. */
+export type QaFlag = 'untranslated' | 'wrong_script' | 'glossary' | 'condensed' | 'rushed' | 'overflow';
 
 export interface LocalizedSegment {
   id: string;
@@ -100,6 +106,47 @@ export interface LocalizedSegment {
   sourceText: string;
   translatedText: string;
   isEdited?: boolean;
+  /** Delivery direction for the dubbed voice; starts as the original line's delivery and can be edited. */
+  delivery?: string;
+  qaFlags?: QaFlag[];
+  /** Server-owned fingerprint of what the last render spoke for this line; clients cannot set it. */
+  renderKey?: string;
+}
+
+/** Lines of a rendered language that changed since its last render, and what re-rendering just those costs. */
+export interface RetakeInfo {
+  changedLineIds: string[];
+  seconds: number;
+  minutes: number;
+}
+
+/** A user's own defaults, saved to their account so they follow them to every device. */
+export interface UserPreferences {
+  /** Languages a new dub starts with already selected; empty means pick them each time. */
+  defaultTargetLanguages: string[];
+  defaultVoiceId: string;
+  translationStyle: TranslationStyle;
+  adaptExpressions: boolean;
+  voiceEmotion: VoiceEmotion;
+  voiceSpeed: number;
+  /** Voice lines with emotion and delivery (Gemini-TTS); off uses the steadier standard voices. */
+  expressiveVoices: boolean;
+  separateBackground: boolean;
+  autoLipSync: boolean;
+  /** Whether video downloads start with captions burned in. */
+  burnCaptions: boolean;
+}
+
+/** A workspace glossary term: `keep` terms (brand names) are never translated, `translate` terms use the given per-language rendering. */
+export interface GlossaryEntry {
+  id: string;
+  term: string;
+  mode: 'keep' | 'translate';
+  /** Language code -> required translation, for `translate` terms. */
+  translations?: Record<string, string>;
+  /** How the voice should say the term (a phonetic respelling), in every language. */
+  spokenAs?: string;
+  note?: string;
 }
 
 /**
@@ -177,6 +224,10 @@ export interface DubbingProject {
    * `languageVoiceMap`, then `speakerVoiceMap`, then `selectedVoiceId`.
    */
   languageSpeakerVoiceMap?: Record<string, Record<string, string>>;
+  /** The job (dub or analysis) currently running on this project, if any. */
+  activeJobId?: string | null;
+  /** Language code -> edits waiting to be rendered, for languages whose last render recorded line fingerprints. Computed by the server. */
+  retakeInfo?: Record<string, RetakeInfo>;
 }
 
 export interface TextToVoiceItem {

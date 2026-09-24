@@ -50,7 +50,11 @@ export const Header: React.FC<HeaderProps> = ({
       case 'usage':
         return { title: 'Usage & Quotas', subtitle: 'Monitor minutes, storage, and engine allocation' };
       case 'settings':
-        return { title: 'Settings', subtitle: 'Dubbing preferences and workspace profile' };
+        return { title: 'Settings', subtitle: 'Your account, dubbing defaults and notifications' };
+      case 'team':
+        return { title: 'Team', subtitle: 'Members, roles and invitations' };
+      case 'glossary':
+        return { title: 'Glossary', subtitle: 'Terms every translation and voice must get right' };
       default:
         // Without this, adding a tab to NavigationTab and forgetting to name it here
         // returns undefined and the header crashes the whole page on `details.title`.

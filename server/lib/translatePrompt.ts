@@ -10,7 +10,9 @@ export function buildTranslationPrompt(
   targetLanguageName: string,
   style: string,
   adaptExpressions: boolean,
-  scriptInstruction = ''
+  scriptInstruction = '',
+  // Workspace glossary lines for the terms in these segments (glossary.glossaryInstruction).
+  glossaryText = ''
 ): string {
   const list = segments
     .map((s) =>
@@ -23,7 +25,9 @@ export function buildTranslationPrompt(
   return `You are a professional video dubbing translator. Translate each dialogue segment below into ${targetLanguageName}.
 
 Style: ${style}.
-${scriptInstruction ? `SCRIPT & VOCABULARY (critical): ${scriptInstruction}\n` : ''}Translate every segment fully into ${targetLanguageName} — never leave a segment in the source language, never add content that is not in the source, and never merge or split segments.
+${scriptInstruction ? `SCRIPT & VOCABULARY (critical): ${scriptInstruction}\n` : ''}${
+    glossaryText ? `GLOSSARY (mandatory, overrides the script rule for these terms):\n${glossaryText}\n` : ''
+  }Translate every segment fully into ${targetLanguageName} — never leave a segment in the source language, never add content that is not in the source, and never merge or split segments.
 ${
   adaptExpressions
     ? 'Adapt idioms and cultural references naturally for a native speaker rather than translating literally.'

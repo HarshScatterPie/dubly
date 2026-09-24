@@ -18,6 +18,7 @@ import {
   SampleVideoPreset,
   TranscriptSegment,
   TranslationStyle,
+  UserPreferences,
   Voice,
   VoiceEmotion,
 } from '../../types';
@@ -28,15 +29,19 @@ import { StepLocalize } from './StepLocalize';
 import { StepVoice } from './StepVoice';
 import { StepProcessing } from './StepProcessing';
 import { StepExport } from './StepExport';
-import { speechToTextService } from '../../services/speechToTextService';
+import { speechToTextService, type TranscriptionResult } from '../../services/speechToTextService';
 import { translationService } from '../../services/translationService';
 import { videoService } from '../../services/videoService';
 import { projectService } from '../../services/projectService';
 import { voiceCloneService } from '../../services/voiceCloneService';
-import { loadDubbingPreferences } from '../SettingsModal';
+import { DEFAULT_PREFERENCES, DEFAULT_VOICE_ID } from '../../data/preferences';
+import { notifyWorkDone } from '../../lib/devicePrefs';
+import type { StudioStatus } from '../../lib/studioSession';
+import { projectProgress } from '../../lib/projectProgress';
 import { apiGet } from '../../lib/apiClient';
+import type { VoiceSelection } from '../../lib/voiceResolution';
+import { languageSegmentsOf } from '../LineReview';
 
-const savedPrefs = loadDubbingPreferences();
 const STEP_ORDER: DubbingStep[] = ['upload', 'understand', 'localize', 'voice', 'export'];
 const SWIPE_THRESHOLD_PX = 60;
 /** Mirrors the server's own ceiling — every language is a full TTS + render pass. */
@@ -49,7 +54,22 @@ interface DubbingStudioProps {
   onSaveProject: (project: DubbingProject) => void;
   onOpenWorkspace: (project: DubbingProject) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
+  /** The user's saved defaults; a new dub starts from them. */
+  preferences?: UserPreferences | null;
+  /** A project to reopen where it left off, e.g. after the page was reloaded. */
+  resumeProject?: DubbingProject | null;
+  /** Reports what the studio is doing, for the mini player shown while the user is on another screen. */
+  onStatusChange?: (status: StudioStatus) => void;
 }
+
+// What the mini player says about each step when nothing is running.
+const IDLE_LABELS: Record<DubbingStep, string> = {
+  upload: 'Ready to analyze',
+  understand: 'Transcript ready',
+  localize: 'Choose languages',
+  voice: 'Choose voices',
+  export: 'Dub ready',
+};
 
 export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   initialSampleId,
@@ -57,7 +77,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   onSaveProject,
   onOpenWorkspace,
   onShowToast,
+  preferences,
+  resumeProject,
+  onStatusChange,
 }) => {
+  const prefs = preferences ?? DEFAULT_PREFERENCES;
+  // Only a brand-new dub takes the default languages; a reopened project keeps its own.
+  const startsFresh = !initialProject && !resumeProject;
   // Check if we start with an initial sample
   const initialPreset = initialSampleId
     ? SAMPLE_VIDEOS.find((s) => s.id === initialSampleId) || SAMPLE_VIDEOS[0]
@@ -126,16 +152,16 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // Localization State
   // Several languages can be dubbed from one upload. The first entry is the primary one:
   // it drives the voice preview, the processing screen and the top-level project fields.
-  // Starts empty: the user picks every language themselves rather than having to un-pick a default.
-  const [targetLanguageCodes, setTargetLanguageCodes] = useState<string[]>([]);
+  // Starts with the languages the user chose to pre-select in Settings; with none chosen they pick every language themselves.
+  const [targetLanguageCodes, setTargetLanguageCodes] = useState<string[]>(() =>
+    startsFresh ? prefs.defaultTargetLanguages.slice(0, MAX_TARGET_LANGUAGES) : []
+  );
   // Which language the localize table shows and edits — the rest are still queued.
-  const [activeLanguageCode, setActiveLanguageCode] = useState<string>('');
+  const [activeLanguageCode, setActiveLanguageCode] = useState<string>(() => (startsFresh ? prefs.defaultTargetLanguages[0] || '' : ''));
   const [languageOutputs, setLanguageOutputs] = useState<Record<string, LanguageOutput>>({});
   const targetLanguageCode = targetLanguageCodes[0] || 'hi';
-  const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(
-    (savedPrefs?.defaultStyle as TranslationStyle) || 'natural'
-  );
-  const [adaptExpressions, setAdaptExpressions] = useState<boolean>(savedPrefs?.adaptExpressions ?? true);
+  const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(prefs.translationStyle);
+  const [adaptExpressions, setAdaptExpressions] = useState<boolean>(prefs.adaptExpressions);
   const [isTranslating, setIsTranslating] = useState<boolean>(false);
   const [hasGeneratedTranslation, setHasGeneratedTranslation] = useState<boolean>(false);
   const [localizedSegments, setLocalizedSegments] = useState<DubbingProject['localizedSegments']>([]);
@@ -144,24 +170,29 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // `selectedVoiceId` / `speakerVoiceMap` are the project-wide defaults; the two maps
   // below override them per target language, so one dub can be a male Hindi voice and a
   // female Spanish one. `voiceLanguageCode` is just which language the picker is on.
-  const [selectedVoiceId, setSelectedVoiceId] = useState<string>(savedPrefs?.defaultVoice || 'riya');
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>(prefs.defaultVoiceId);
   const [languageVoiceMap, setLanguageVoiceMap] = useState<Record<string, string>>({});
   const [languageSpeakerVoiceMap, setLanguageSpeakerVoiceMap] = useState<Record<string, Record<string, string>>>({});
-  const [voiceLanguageCode, setVoiceLanguageCode] = useState<string>(savedPrefs?.defaultTargetLang || 'hi');
+  const [voiceLanguageCode, setVoiceLanguageCode] = useState<string>(prefs.defaultTargetLanguages[0] || 'hi');
   const [customVoices, setCustomVoices] = useState<Voice[]>([]);
-  const [voiceSpeed, setVoiceSpeed] = useState<number>(1.0);
+  const [voiceSpeed, setVoiceSpeed] = useState<number>(prefs.voiceSpeed);
   const [voicePitch, setVoicePitch] = useState<number>(1.0);
-  const [voiceEmotion, setVoiceEmotion] = useState<VoiceEmotion>('friendly');
-  const [autoLipSync, setAutoLipSync] = useState<boolean>(false);
+  const [voiceEmotion, setVoiceEmotion] = useState<VoiceEmotion>(prefs.voiceEmotion);
+  const [autoLipSync, setAutoLipSync] = useState<boolean>(prefs.autoLipSync);
   const [lipSyncAvailable, setLipSyncAvailable] = useState<boolean>(false);
-  const [separateBackground, setSeparateBackground] = useState<boolean>(false);
+  const [separateBackground, setSeparateBackground] = useState<boolean>(prefs.separateBackground);
   const [separationAvailable, setSeparationAvailable] = useState<boolean>(false);
 
   React.useEffect(() => {
     // The user's cloned voices are offered right alongside the catalog in StepVoice.
     voiceCloneService
       .list()
-      .then((res) => setCustomVoices(res.voices.map((v) => voiceCloneService.toVoice(v))))
+      .then((res) => {
+        const voices = res.voices.map((v) => voiceCloneService.toVoice(v));
+        setCustomVoices(voices);
+        // A default pointing at a cloned voice that has since been deleted would be refused by the dub.
+        setSelectedVoiceId((current) => (current.startsWith('cloned:') && !voices.some((v) => v.id === current) ? DEFAULT_VOICE_ID : current));
+      })
       .catch(() => setCustomVoices([]));
   }, []);
 
@@ -230,6 +261,88 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setSeparateBackground(Boolean(p.separateBackground));
     maxReachedIndexRef.current = STEP_ORDER.indexOf('localize');
     setCurrentStep('localize');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Reopening a project where it left off (after a reload, say): its saved state picks the step, and a job still running is followed again.
+  React.useEffect(() => {
+    if (!resumeProject) return;
+    const goTo = (step: DubbingStep) => {
+      maxReachedIndexRef.current = STEP_ORDER.indexOf(step);
+      setCurrentStep(step);
+    };
+    const hydrate = (p: DubbingProject) => {
+      setProjectId(p.id);
+      setVideoPreviewUrl(p.videoUrl || null);
+      setFileName(p.videoFileName || `${p.title}.mp4`);
+      setFileSizeFormatted(p.videoFileSize);
+      setDurationFormatted(videoService.formatDuration(p.videoDuration));
+      setVideoDuration(p.videoDuration);
+      setResolution(p.videoResolution);
+      setTranscriptSegments(p.transcriptSegments || []);
+      setSourceLanguageCode(p.sourceLanguage);
+      if (p.transcriptSegments?.length) setDetectedLanguage(LANGUAGES.find((l) => l.code === p.sourceLanguage)?.name || p.sourceLanguage);
+      setSpeakersCount(p.speakersCount || 1);
+      setSpeakerVoiceMap(p.speakerVoiceMap || {});
+      setLanguageOutputs(p.languageOutputs || {});
+      // A project holds placeholder style and voice choices until the user makes them, so the user's own defaults stand until then.
+      const progress = projectProgress(p);
+      if (progress.targetLanguageNames.length) {
+        setTranslationStyle(p.translationStyle);
+        setAdaptExpressions(p.adaptExpressions);
+      }
+      if (progress.voiceName) {
+        setSelectedVoiceId(p.selectedVoiceId);
+        setLanguageVoiceMap(p.languageVoiceMap || {});
+        setLanguageSpeakerVoiceMap(p.languageSpeakerVoiceMap || {});
+        setVoiceSpeed(p.voiceSpeed ?? 1);
+        setVoicePitch(p.voicePitch ?? 1);
+        setVoiceEmotion(p.voiceEmotion || 'friendly');
+        setAutoLipSync(Boolean(p.autoLipSync));
+        setSeparateBackground(Boolean(p.separateBackground));
+      }
+      const languages = p.targetLanguages?.length ? p.targetLanguages : [p.targetLanguage];
+      const translated = languages.filter((code) => segmentsForLanguage(p, code).length > 0);
+      if (translated.length) {
+        setTargetLanguageCodes(languages);
+        setActiveLanguageCode(translated[0]);
+        setLocalizedSegments(segmentsForLanguage(p, translated[0]));
+        setHasGeneratedTranslation(true);
+      }
+      if (p.status === 'completed' && p.finalDubbedVideoUrl) {
+        setCompletedProject(p);
+        goTo('export');
+      } else if (translated.length) goTo('localize');
+      else if (p.transcriptSegments?.length) goTo('understand');
+      else goTo('upload');
+    };
+
+    hydrate(resumeProject);
+    const jobId = resumeProject.activeJobId;
+    if (!jobId) return;
+    const id = resumeProject.id;
+    projectService
+      .getJob(id, jobId)
+      .then(async (job) => {
+        if (!isMountedRef.current) return;
+        // It finished while the page was closed: show the result instead of following it.
+        if (job.settled) {
+          hydrate(await projectService.get(id));
+          return;
+        }
+        if (job.type === 'transcribe') {
+          goTo('understand');
+          void runAnalysis(id, () => speechToTextService.resume(id, jobId));
+        } else {
+          goTo('export');
+          setIsGeneratingDub(true);
+          setDubProgress(resumeProject.progressPercent || 5);
+          setProcessingMessage(resumeProject.currentProcessingMessage || 'Dubbing...');
+          dubStartedAtRef.current = Date.now();
+          pollDub(id);
+        }
+      })
+      .catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -368,6 +481,11 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // STEP 1 -> STEP 2: Analyze Video (real STT)
   const handleAnalyzeVideo = async () => {
     if (!videoPreviewUrl || !projectId) return;
+    await runAnalysis(projectId, () => speechToTextService.transcribe(projectId));
+  };
+
+  // Shows analysis progress and applies the transcript; `start` begins a transcription or follows one already running.
+  const runAnalysis = async (id: string, start: () => Promise<TranscriptionResult>) => {
     setIsAnalyzing(true);
     setCurrentStep('understand');
     setAnalysisProgress(0);
@@ -379,7 +497,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     const poll = async () => {
       while (polling && isMountedRef.current) {
         try {
-          const proj = await projectService.get(projectId);
+          const proj = await projectService.get(id);
           if (!polling || !isMountedRef.current) break;
           if (proj.currentProcessingMessage) {
             setAnalysisMessage(proj.currentProcessingMessage);
@@ -395,7 +513,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     void poll();
 
     try {
-      const res = await speechToTextService.transcribe(projectId);
+      const res = await start();
       polling = false;
       setAnalysisProgress(100);
       setTranscriptSegments(res.segments);
@@ -413,6 +531,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         `Detected ${res.wordsCount} words${res.speakersCount > 1 ? ` from ${res.speakersCount} speakers` : ''}.`,
         'success'
       );
+      notifyWorkDone('Analysis complete', `${res.wordsCount} words transcribed. Choose your languages next.`);
       // Said out loud rather than silently showing fewer lines than the model returned —
       // otherwise a transcript that lost 200 phantom lines just looks unexplained.
       if (res.removedSegments > 0) {
@@ -504,6 +623,14 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   /** The speaker->voice overrides in force for a language. */
   const speakerVoicesForLanguage = (code: string) => languageSpeakerVoiceMap[code] || speakerVoiceMap;
 
+  // Exactly the voice maps a dub request sends (see handleGenerateDub), so a line preview resolves to the voice the render will use.
+  const pendingVoiceSelection: VoiceSelection = {
+    selectedVoiceId,
+    speakerVoiceMap,
+    languageVoiceMap: Object.fromEntries(targetLanguageCodes.map((code) => [code, voiceForLanguage(code)])),
+    languageSpeakerVoiceMap: Object.fromEntries(targetLanguageCodes.map((code) => [code, speakerVoicesForLanguage(code)])),
+  };
+
   const handleSelectVoice = (voiceId: string) => {
     setLanguageVoiceMap((prev) => ({ ...prev, [voiceLanguageCode]: voiceId }));
     // The primary language also writes the project-wide field, so a single-language
@@ -560,10 +687,15 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       return;
     }
 
+    pollDub(projectId);
+  };
+
+  // Follows a dub on the server until it settles; also picks up a dub that was running before a reload.
+  const pollDub = (id: string) => {
     const poll = async () => {
       if (!isMountedRef.current) return;
       try {
-        const proj = await projectService.get(projectId);
+        const proj = await projectService.get(id);
         if (!isMountedRef.current) return;
         setDubProgress(proj.progressPercent);
         setProcessingMessage(proj.currentProcessingMessage || '');
@@ -573,11 +705,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           setCompletedProject(proj);
           onSaveProject(proj);
           onShowToast('Dubbing Finished!', 'Your localized video is ready for export.', 'success');
+          notifyWorkDone('Your dub is ready', `${proj.title} is ready to watch and download.`);
           return;
         }
         if (proj.status === 'failed') {
           setIsGeneratingDub(false);
           onShowToast('Dubbing Failed', proj.currentProcessingMessage || 'Something went wrong.', 'error');
+          notifyWorkDone('Dubbing failed', proj.currentProcessingMessage || 'Something went wrong.');
           setCurrentStep('voice');
           return;
         }
@@ -678,21 +812,30 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     }
   };
 
-  const handleUpdateLocalizedSegment = async (id: string, text: string) => {
-    const updated = localizedSegments.map((s) => (s.id === id ? { ...s, translatedText: text, isEdited: true } : s));
-    setLocalizedSegments(updated);
-    setLanguageOutputs((prev) => ({
-      ...prev,
-      [activeLanguageCode]: {
-        ...(prev[activeLanguageCode] || { languageCode: activeLanguageCode, status: 'draft', progressPercent: 0 }),
-        localizedSegments: updated,
-      },
-    }));
+  const handleUpdateLocalizedSegment = async (id: string, text: string, delivery: string) => {
+    const languageCode = activeLanguageCode;
+    const showSegments = (segments: DubbingProject['localizedSegments']) => {
+      setLocalizedSegments(segments);
+      setLanguageOutputs((prev) => ({
+        ...prev,
+        [languageCode]: {
+          ...(prev[languageCode] || { languageCode, status: 'draft', progressPercent: 0 }),
+          localizedSegments: segments,
+        },
+      }));
+    };
+    const updated = localizedSegments.map((s) =>
+      s.id === id ? { ...s, translatedText: text, delivery: delivery || undefined, isEdited: true } : s
+    );
+    showSegments(updated);
     if (projectId) {
       try {
         // Saved against the language being edited, not the project as a whole — otherwise
         // an edit to one language would land on whichever one happens to be primary.
-        await projectService.updateLanguageSegments(projectId, activeLanguageCode, updated);
+        const saved = await projectService.updateLanguageSegments(projectId, languageCode, updated);
+        // The server re-checks the saved lines, so its copy carries the up-to-date review flags.
+        const savedSegments = languageSegmentsOf(saved, languageCode);
+        if (savedSegments.length) showSegments(savedSegments);
       } catch {
         // best-effort — local state is already updated for display
       }
@@ -704,6 +847,47 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const selectedVoice =
     [...customVoices, ...VOICES].find((v) => v.id === voiceForLanguage(voiceLanguageCode)) || VOICES[0];
   const wordsCount = transcriptSegments.reduce((sum, s) => sum + s.wordsCount, 0);
+
+  // Tells the app what is happening here, so the mini player can show it while the user is on another screen.
+  React.useEffect(() => {
+    if (!onStatusChange) return;
+    const done = Boolean(completedProject) && currentStep === 'export' && !isGeneratingDub;
+    const busy = isUploading || isAnalyzing || isTranslating || isGeneratingDub;
+    const label = isUploading
+      ? 'Uploading video'
+      : isAnalyzing
+        ? 'Analyzing speech'
+        : isTranslating
+          ? 'Translating'
+          : isGeneratingDub
+            ? 'Dubbing'
+            : currentStep === 'localize' && hasGeneratedTranslation
+              ? 'Review translations'
+              : IDLE_LABELS[currentStep];
+    onStatusChange({
+      projectId,
+      title: completedProject?.title || fileName.replace(/\.[^/.]+$/, '') || 'Untitled dub',
+      videoUrl: (done && completedProject?.finalDubbedVideoUrl) || videoPreviewUrl,
+      label,
+      progress: isAnalyzing ? analysisProgress : isGeneratingDub ? dubProgress : null,
+      busy,
+      done,
+    });
+  }, [
+    onStatusChange,
+    projectId,
+    fileName,
+    videoPreviewUrl,
+    completedProject,
+    currentStep,
+    hasGeneratedTranslation,
+    isUploading,
+    isAnalyzing,
+    isTranslating,
+    isGeneratingDub,
+    analysisProgress,
+    dubProgress,
+  ]);
 
   const studioTopRef = useRef<HTMLDivElement>(null);
   // Every step opens at its top, instead of wherever the previous step was scrolled to.
@@ -808,6 +992,9 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           onUpdateLocalizedSegment={handleUpdateLocalizedSegment}
           onContinueToVoice={handleContinueToVoice}
           onShowToast={onShowToast}
+          voiceSelection={pendingVoiceSelection}
+          voiceCatalog={[...customVoices, ...VOICES]}
+          voiceEmotion={voiceEmotion}
         />
       )}
 
@@ -866,6 +1053,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
               onRestartProject={handleResetVideo}
               onOpenWorkspace={() => onOpenWorkspace(completedProject)}
               onShowToast={onShowToast}
+              defaultBurnCaptions={prefs.burnCaptions}
             />
           )
         )

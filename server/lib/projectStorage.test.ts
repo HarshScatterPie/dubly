@@ -15,7 +15,9 @@ beforeEach(async () => {
 });
 
 const seg = (i: number) => ({ id: `seg-${i}`, startTime: i, endTime: i + 1, text: `line ${i}`, speaker: 'Speaker 1', wordsCount: 2, confidence: 0.9, words: [{ text: 'line', start: i, end: i + 0.5 }] });
-const loc = (code: string, i: number) => ({ id: `loc-${code}-seg-${i}`, segmentId: `seg-${i}`, startTime: i, endTime: i + 1, speaker: 'Speaker 1', sourceText: `line ${i}`, translatedText: `${code} ${i}`, isEdited: false });
+// Lines are in each language's own script, so the server's review of saved lines has nothing to flag and they round-trip unchanged.
+const LINE_WORD: Record<string, string> = { hi: 'पंक्ति', ta: 'வரி' };
+const loc = (code: string, i: number) => ({ id: `loc-${code}-seg-${i}`, segmentId: `seg-${i}`, startTime: i, endTime: i + 1, speaker: 'Speaker 1', sourceText: `line ${i}`, translatedText: `${LINE_WORD[code]} ${i}`, isEdited: false });
 
 async function setup(user: TestUser) {
   const workspaceId = (await api.call('GET', '/api/workspace', { token: user.token })).body.id as string;
@@ -87,9 +89,9 @@ describe('project storage layout', () => {
     const { workspaceId, col } = await setup(user);
     await col.doc('proj-edit').set(legacyProject('proj-edit', user.uid));
 
-    const taEdit = [{ ...loc('ta', 1), translatedText: 'edited ta', isEdited: true }];
+    const taEdit = [{ ...loc('ta', 1), translatedText: 'திருத்திய வரி', isEdited: true }];
     expect((await api.call('PATCH', '/api/projects/proj-edit/languages/ta/segments', { token: user.token, body: { localizedSegments: taEdit } })).status).toBe(200);
-    const hiEdit = [{ ...loc('hi', 1), translatedText: 'edited hi', isEdited: true }];
+    const hiEdit = [{ ...loc('hi', 1), translatedText: 'संपादित पंक्ति', isEdited: true }];
     expect((await api.call('PATCH', '/api/projects/proj-edit', { token: user.token, body: { localizedSegments: hiEdit } })).status).toBe(200);
 
     const project = await getStoredProject(workspaceId, 'proj-edit');

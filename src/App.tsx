@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { Suspense, lazy, useEffect, useState } from 'react';
-import { DubbingProject, NavigationTab, ToastMessage, UserUsageStats } from './types';
+import React, { Suspense, lazy, useEffect, useRef, useState } from 'react';
+import { DubbingProject, NavigationTab, ToastMessage, UserPreferences, UserUsageStats } from './types';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { BrandLoader, BrandSplash } from './components/BrandLoader';
@@ -17,6 +17,10 @@ import { projectService } from './services/projectService';
 import { apiGet, type ApiError } from './lib/apiClient';
 import { workspaceService, type WorkspaceInfo } from './services/workspaceService';
 import { InviteAcceptDialog, takeInviteTokenFromUrl } from './components/InviteAcceptDialog';
+import { settingsService } from './services/settingsService';
+import { StudioMiniPlayer } from './components/StudioMiniPlayer';
+import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type StudioStatus } from './lib/studioSession';
+import { projectProgress } from './lib/projectProgress';
 
 takeInviteTokenFromUrl();
 
@@ -38,12 +42,27 @@ const ProjectsHistory = lazy(() =>
 );
 const UsageView = lazy(() => import('./components/UsageView').then((m) => ({ default: m.UsageView })));
 const TeamView = lazy(() => import('./components/TeamView').then((m) => ({ default: m.TeamView })));
+const GlossaryView = lazy(() => import('./components/GlossaryView').then((m) => ({ default: m.GlossaryView })));
 const ProjectWorkspace = lazy(() =>
   import('./components/ProjectWorkspace').then((m) => ({ default: m.ProjectWorkspace }))
 );
-const SettingsModal = lazy(() =>
-  import('./components/SettingsModal').then((m) => ({ default: m.SettingsModal }))
-);
+const SettingsView = lazy(() => import('./components/SettingsView').then((m) => ({ default: m.SettingsView })));
+
+// One dubbing studio at a time. It stays mounted while the user is on other screens, so its work and polling carry on behind the mini player.
+interface StudioSession {
+  key: string;
+  sampleId: string | null;
+  redubProject: DubbingProject | null;
+  resumeProject: DubbingProject | null;
+}
+
+const newStudioSession = (spec: Partial<Omit<StudioSession, 'key'>> = {}): StudioSession => ({
+  key: crypto.randomUUID(),
+  sampleId: null,
+  redubProject: null,
+  resumeProject: null,
+  ...spec,
+});
 
 const EMPTY_USAGE: UserUsageStats = {
   minutesDubbed: 0,
@@ -66,11 +85,14 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
   const [projects, setProjects] = useState<DubbingProject[]>([]);
   const [activeWorkspaceProject, setActiveWorkspaceProject] = useState<DubbingProject | null>(null);
-  const [initialDubSampleId, setInitialDubSampleId] = useState<string | null>(null);
-  // A finished project being dubbed into more languages, so the studio can reuse its upload and transcript.
-  const [redubProject, setRedubProject] = useState<DubbingProject | null>(null);
+  const [studioSession, setStudioSession] = useState<StudioSession | null>(null);
+  const [studioStatus, setStudioStatus] = useState<StudioStatus | null>(null);
+  const studioContainerRef = useRef<HTMLDivElement>(null);
+  const rememberedStudioIdRef = useRef<string | null>(null);
+  const restoreTriedRef = useRef(false);
+  // The user's saved defaults; null until loaded, when every consumer falls back to the built-in defaults.
+  const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [usage, setUsage] = useState<UserUsageStats>(EMPTY_USAGE);
-  const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -127,7 +149,7 @@ export default function App() {
   // load, since activeTab already defaults to 'dashboard').
   useEffect(() => {
     if (!user) return;
-    if (activeTab === 'dashboard' || activeTab === 'history') {
+    if (activeTab === 'dashboard' || activeTab === 'history' || activeTab === 'settings') {
       void refreshProjectsAndUsage();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -152,6 +174,82 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
+  useEffect(() => {
+    if (!user) {
+      // Signed out: nothing of the last account's studio may carry over to the next one.
+      setPreferences(null);
+      setStudioSession(null);
+      setStudioStatus(null);
+      rememberedStudioIdRef.current = null;
+      restoreTriedRef.current = false;
+      return;
+    }
+    settingsService
+      .getPreferences()
+      .then(setPreferences)
+      .catch(() => setPreferences(null));
+  }, [user]);
+
+  // Opening the dubbing screen with no studio running starts a fresh one.
+  useEffect(() => {
+    if (activeTab === 'dubbing' && !studioSession) setStudioSession(newStudioSession());
+  }, [activeTab, studioSession]);
+
+  // The studio's own video must not keep playing behind other screens; the mini player shows it instead.
+  useEffect(() => {
+    if (activeTab !== 'dubbing') studioContainerRef.current?.querySelectorAll('video').forEach((video) => video.pause());
+  }, [activeTab]);
+
+  // Remembers the studio's project so a reload or a closed tab can bring it back; starting over or a new dub replaces it.
+  useEffect(() => {
+    if (!user || !studioStatus) return;
+    const id = studioStatus.projectId;
+    if (id && id !== rememberedStudioIdRef.current) {
+      rememberStudioProject(user.uid, id);
+      rememberedStudioIdRef.current = id;
+    } else if (!id && rememberedStudioIdRef.current) {
+      forgetStudioProject();
+      rememberedStudioIdRef.current = null;
+    }
+  }, [user, studioStatus]);
+
+  // After a reload, unfinished work comes back in the mini player; finished dubs are in History instead.
+  useEffect(() => {
+    if (!user || !workspace || restoreTriedRef.current) return;
+    restoreTriedRef.current = true;
+    const id = recalledStudioProject(user.uid);
+    if (!id) return;
+    projectService
+      .get(id)
+      .then((project) => {
+        const unfinished = project.status !== 'completed' || Boolean(project.activeJobId);
+        if (!project.videoUrl || !unfinished) {
+          forgetStudioProject();
+          return;
+        }
+        setStudioSession((current) => current ?? newStudioSession({ resumeProject: project }));
+      })
+      .catch(() => forgetStudioProject());
+  }, [user, workspace]);
+
+  const handleCloseStudio = () => {
+    setStudioSession(null);
+    setStudioStatus(null);
+    forgetStudioProject();
+    rememberedStudioIdRef.current = null;
+    if (activeTab === 'dubbing') setActiveTab('dashboard');
+  };
+
+  // A new dub replaces the open one; that project is already saved and any job it started keeps running on the server.
+  const openStudio = (spec: Partial<Omit<StudioSession, 'key'>> = {}) => {
+    if (studioStatus?.projectId) {
+      showToast('Previous Dub Kept', 'Your earlier project is in History, and anything it was running carries on.', 'info');
+    }
+    setStudioStatus(null);
+    setStudioSession(newStudioSession(spec));
+    setActiveTab('dubbing');
+  };
+
   // After joining a team through an invitation everything the app holds belongs to the old workspace, so it is all re-read.
   const handleJoinedWorkspace = async (workspaceName: string) => {
     try {
@@ -161,6 +259,10 @@ export default function App() {
       showToast('Failed to Load Workspace', (err as Error).message, 'error');
     }
     setActiveWorkspaceProject(null);
+    setStudioSession(null);
+    setStudioStatus(null);
+    forgetStudioProject();
+    rememberedStudioIdRef.current = null;
     setActiveTab('dashboard');
     await refreshProjectsAndUsage(true);
     showToast('Joined Workspace', `You are now working in ${workspaceName}.`, 'success');
@@ -170,17 +272,9 @@ export default function App() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
-  const handleStartDubbing = (sampleId?: string) => {
-    setInitialDubSampleId(sampleId || null);
-    setRedubProject(null);
-    setActiveTab('dubbing');
-  };
+  const handleStartDubbing = (sampleId?: string) => openStudio({ sampleId: sampleId || null });
 
-  const handleRedubProject = (project: DubbingProject) => {
-    setRedubProject(project);
-    setInitialDubSampleId(null);
-    setActiveTab('dubbing');
-  };
+  const handleRedubProject = (project: DubbingProject) => openStudio({ redubProject: project });
 
   const handleSaveProject = async (newProj: DubbingProject) => {
     setProjects((prev) => [newProj, ...prev.filter((p) => p.id !== newProj.id)]);
@@ -191,9 +285,35 @@ export default function App() {
     }
   };
 
-  const handleOpenWorkspace = (project: DubbingProject) => {
-    setActiveWorkspaceProject(project);
-    setActiveTab('workspace');
+  // Finished projects open in the project workspace; unfinished ones reopen in the studio at the step they reached.
+  const handleOpenWorkspace = async (listed: DubbingProject) => {
+    if (projectProgress(listed).complete) {
+      setActiveWorkspaceProject(listed);
+      setActiveTab('workspace');
+      return;
+    }
+    if (studioStatus?.projectId === listed.id) {
+      setActiveTab('dubbing');
+      return;
+    }
+    // The list can be minutes old; the project may have moved on since.
+    const project = await projectService.get(listed.id).catch(() => listed);
+    const progress = projectProgress(project);
+    if (progress.complete) {
+      setActiveWorkspaceProject(project);
+      setActiveTab('workspace');
+    } else if (progress.stage === 'no_video') {
+      showToast('Nothing Uploaded Yet', 'This project never received its video. Upload one to start the dub.', 'info');
+      openStudio();
+    } else {
+      openStudio({ resumeProject: project });
+    }
+  };
+
+  // For a project the server just returned: show it, nothing to save.
+  const handleProjectRefreshed = (fresh: DubbingProject) => {
+    setActiveWorkspaceProject(fresh);
+    setProjects((prev) => prev.map((p) => (p.id === fresh.id ? fresh : p)));
   };
 
   const handleUpdateProject = async (updated: DubbingProject) => {
@@ -215,6 +335,7 @@ export default function App() {
 
   const handleDeleteProject = async (projectId: string) => {
     setProjects((prev) => prev.filter((p) => p.id !== projectId));
+    if (studioStatus?.projectId === projectId) handleCloseStudio();
     if (activeWorkspaceProject?.id === projectId) {
       setActiveWorkspaceProject(null);
       setActiveTab('dashboard');
@@ -227,10 +348,8 @@ export default function App() {
     }
   };
 
-  const handleSendToDubbingWithAudio = (_script: string, _voiceId: string, sampleVideoId?: string) => {
-    setInitialDubSampleId(sampleVideoId || null);
-    setActiveTab('dubbing');
-  };
+  const handleSendToDubbingWithAudio = (_script: string, _voiceId: string, sampleVideoId?: string) =>
+    openStudio({ sampleId: sampleVideoId || null });
 
   const handleStopAudio = () => {
     textToSpeechService.stopPlayback();
@@ -277,13 +396,7 @@ export default function App() {
         {/* Left Sidebar Navigation */}
         <Sidebar
           activeTab={activeTab}
-          onSelectTab={(tab) => {
-            if (tab === 'settings') {
-              setIsSettingsOpen(true);
-            } else {
-              setActiveTab(tab);
-            }
-          }}
+          onSelectTab={setActiveTab}
           usage={usage}
           onOpenNewProject={() => handleStartDubbing()}
           isMobileOpen={isMobileOpen}
@@ -297,13 +410,36 @@ export default function App() {
             activeTab={activeTab}
             onOpenMobileMenu={() => setIsMobileOpen(true)}
             onOpenNewProject={() => handleStartDubbing()}
-            onOpenSettings={() => setIsSettingsOpen(true)}
+            onOpenSettings={() => setActiveTab('settings')}
             onSearch={handleHeaderSearch}
             isPlayingAudio={isPlayingAudio}
             onStopAudio={handleStopAudio}
           />
 
           <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
+            {studioSession && (
+              <div ref={studioContainerRef} hidden={activeTab !== 'dubbing'}>
+                <Suspense
+                  fallback={
+                    <div className="flex items-center justify-center py-24">
+                      <BrandLoader label="Loading…" />
+                    </div>
+                  }
+                >
+                  <DubbingStudio
+                    key={studioSession.key}
+                    initialSampleId={studioSession.sampleId}
+                    initialProject={studioSession.redubProject}
+                    resumeProject={studioSession.resumeProject}
+                    preferences={preferences}
+                    onStatusChange={setStudioStatus}
+                    onSaveProject={handleSaveProject}
+                    onOpenWorkspace={handleOpenWorkspace}
+                    onShowToast={showToast}
+                  />
+                </Suspense>
+              </div>
+            )}
             <Suspense
               fallback={
                 <div className="flex items-center justify-center py-24">
@@ -314,23 +450,20 @@ export default function App() {
             {activeTab === 'dashboard' && (
               <Dashboard
                 projects={projects}
-                onNavigate={(tab) => {
-                  if (tab === 'settings') setIsSettingsOpen(true);
-                  else setActiveTab(tab);
-                }}
+                onNavigate={setActiveTab}
                 onOpenProject={handleOpenWorkspace}
                 onStartWithSample={(sampleId) => handleStartDubbing(sampleId)}
                 onDeleteProject={isAdmin ? handleDeleteProject : undefined}
               />
             )}
 
-            {activeTab === 'dubbing' && (
-              <DubbingStudio
-                key={redubProject ? `redub-${redubProject.id}` : initialDubSampleId || 'new'}
-                initialSampleId={initialDubSampleId}
-                initialProject={redubProject}
-                onSaveProject={handleSaveProject}
-                onOpenWorkspace={handleOpenWorkspace}
+            {activeTab === 'settings' && (
+              <SettingsView
+                preferences={preferences}
+                onPreferencesSaved={setPreferences}
+                workspace={workspace}
+                usage={usage}
+                onNavigate={setActiveTab}
                 onShowToast={showToast}
               />
             )}
@@ -364,6 +497,8 @@ export default function App() {
               <TeamView workspace={workspace} onChanged={setWorkspace} onShowToast={showToast} />
             )}
 
+            {activeTab === 'glossary' && <GlossaryView onShowToast={showToast} />}
+
             {activeTab === 'usage' && (
               <UsageView
                 usage={usage}
@@ -383,6 +518,7 @@ export default function App() {
                   project={activeWorkspaceProject}
                   onBack={() => setActiveTab('dashboard')}
                   onUpdateProject={handleUpdateProject}
+                  onProjectRefreshed={handleProjectRefreshed}
                   onShowToast={showToast}
                 />
               ) : (
@@ -412,17 +548,8 @@ export default function App() {
         </div>
       </div>
 
-      {/* Studio Settings Dialog — only mounted (and its chunk fetched) once actually opened;
-          `isSettingsOpen` alone isn't enough since a lazy component's import runs on first
-          render regardless of props, not on whatever condition its own JSX checks internally. */}
-      {isSettingsOpen && (
-        <Suspense fallback={null}>
-          <SettingsModal
-            isOpen={isSettingsOpen}
-            onClose={() => setIsSettingsOpen(false)}
-            onShowToast={showToast}
-          />
-        </Suspense>
+      {studioSession && studioStatus && activeTab !== 'dubbing' && (studioStatus.projectId || studioStatus.busy) && (
+        <StudioMiniPlayer status={studioStatus} onExpand={() => setActiveTab('dubbing')} onClose={handleCloseStudio} />
       )}
     </div>
   );

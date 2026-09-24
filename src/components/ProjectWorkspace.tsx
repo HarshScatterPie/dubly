@@ -22,6 +22,7 @@ import {
   Pause,
   Loader2,
   Wand2,
+  RotateCcw,
 } from 'lucide-react';
 import { DubbingProject, LocalizedSegment, TranscriptSegment, Voice } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
@@ -31,11 +32,18 @@ import { VideoPlayer } from './VideoPlayer';
 import { textToSpeechService } from '../services/textToSpeechService';
 import { renderService } from '../services/renderService';
 import { DownloadMenu } from './DownloadMenu';
+import { resolveVoice } from '../lib/voiceResolution';
+import { DeliveryInput, DeliveryTag, needsReview, QaFlagBadges, ReviewFilterToggle } from './LineReview';
+import { notifyWorkDone } from '../lib/devicePrefs';
+import { projectProgress } from '../lib/projectProgress';
+import { ProjectStatusBadge } from './ProjectStatusBadge';
 
 interface ProjectWorkspaceProps {
   project: DubbingProject;
   onBack: () => void;
   onUpdateProject: (updated: DubbingProject) => void;
+  /** Shows a project the server just returned, without saving it back. */
+  onProjectRefreshed: (fresh: DubbingProject) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
 }
 
@@ -43,6 +51,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   project,
   onBack,
   onUpdateProject,
+  onProjectRefreshed,
   onShowToast,
 }) => {
   const [activeTab, setActiveTab] = useState<'overview' | 'transcript' | 'translation' | 'voice' | 'export'>('overview');
@@ -65,6 +74,10 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const [redubMessage, setRedubMessage] = useState<string>('');
   const [customVoices, setCustomVoices] = useState<Voice[]>([]);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
+  const [editDelivery, setEditDelivery] = useState('');
+  const [reviewOnly, setReviewOnly] = useState(false);
+  // The language whose edited lines are being re-rendered, with the run's progress.
+  const [retake, setRetake] = useState<{ language: string; progress: number; message: string } | null>(null);
 
   useEffect(() => {
     voiceCloneService
@@ -72,6 +85,15 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       .then((res) => setCustomVoices(res.voices.map((v) => voiceCloneService.toVoice(v))))
       .catch(() => setCustomVoices([]));
   }, []);
+
+  // The project list leaves out which edited lines are waiting for a render, so the full project is loaded on open.
+  useEffect(() => {
+    projectService
+      .get(project.id)
+      .then(onProjectRefreshed)
+      .catch(() => undefined);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [project.id]);
 
   const sourceLang = LANGUAGES.find((l) => l.code === project.sourceLanguage) || LANGUAGES[10];
   const targetLang = LANGUAGES.find((l) => l.code === project.targetLanguage) || LANGUAGES[0];
@@ -119,8 +141,6 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       ? project.localizedSegments
       : project.languageOutputs?.[translationLanguage]?.localizedSegments || [];
   const translationLang = LANGUAGES.find((l) => l.code === translationLanguage) || targetLang;
-  const translationVoice =
-    availableVoices.find((v) => v.id === savedVoiceForLanguage(translationLanguage)) || selectedVoice;
 
   const activeVoiceId = pendingVoiceId ?? savedVoiceForLanguage(voiceLanguage);
   const hasVoiceChange = pendingVoiceId !== null && pendingVoiceId !== savedVoiceForLanguage(voiceLanguage);
@@ -134,9 +154,9 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
     onShowToast('Transcript Updated', 'Segment text saved.', 'success');
   };
 
-  const handleUpdateLocalizedSegment = async (locId: string, newText: string) => {
+  const handleUpdateLocalizedSegment = async (locId: string, newText: string, delivery: string) => {
     const updatedLoc = translationSegments.map((s) =>
-      s.id === locId ? { ...s, translatedText: newText, isEdited: true } : s
+      s.id === locId ? { ...s, translatedText: newText, delivery: delivery.trim() || undefined, isEdited: true } : s
     );
     try {
       // The dedicated per-language endpoint, not the generic project patch: the generic
@@ -144,7 +164,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       // so an edit made while viewing a secondary language would silently vanish — its
       // segment ids (`loc-<lang>-...`) don't even appear in that array.
       const saved = await projectService.updateLanguageSegments(project.id, translationLanguage, updatedLoc);
-      onUpdateProject(saved);
+      onProjectRefreshed(saved);
       setEditingSegId(null);
       onShowToast('Translation Updated', 'Segment translation saved.', 'success');
     } catch (err) {
@@ -200,6 +220,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
           setPendingVoiceId(null);
           onUpdateProject(fresh);
           onShowToast('Re-dub Complete', `${langName} now uses ${voice?.name}.`, 'success');
+          notifyWorkDone('Re-dub complete', `${project.title}: ${langName} now uses ${voice?.name}.`);
           return;
         }
         if (fresh.status === 'failed') {
@@ -211,6 +232,55 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       } catch (err) {
         setIsRedubbing(false);
         onShowToast('Re-dub Failed', (err as Error).message, 'error');
+      }
+    };
+    void poll();
+  };
+
+  const pendingRetake = project.retakeInfo?.[translationLanguage];
+  const changedLineIds = new Set(pendingRetake?.changedLineIds ?? []);
+  const flaggedCount = translationSegments.filter(needsReview).length;
+  const shownTranslationSegments = reviewOnly ? translationSegments.filter(needsReview) : translationSegments;
+
+  // Plays a line in the voice its speaker gets in this language, directed the way the dub directs it.
+  const handlePreviewLine = (loc: LocalizedSegment) => {
+    const voice = resolveVoice(project, translationLanguage, loc.speaker, availableVoices);
+    textToSpeechService.speakText(loc.translatedText, voice, translationLanguage, {
+      onError: (err) => onShowToast('Playback Failed', err.message, 'error'),
+      emotion: project.voiceEmotion,
+      delivery: loc.delivery,
+    });
+  };
+
+  // Re-renders the edited lines of one language; only the changed lines are charged.
+  const handleRetake = async () => {
+    const language = translationLanguage;
+    const langName = LANGUAGES.find((l) => l.code === language)?.name || language;
+    setRetake({ language, progress: 3, message: `Starting ${langName} update...` });
+    try {
+      await projectService.retakeLines(project.id, language);
+    } catch (err) {
+      setRetake(null);
+      onShowToast('Update Failed to Start', (err as Error).message, 'error');
+      return;
+    }
+    const poll = async () => {
+      try {
+        const fresh = await projectService.get(project.id);
+        if (fresh.status === 'completed' || fresh.status === 'failed') {
+          setRetake(null);
+          onProjectRefreshed(fresh);
+          if (fresh.status === 'completed') {
+            onShowToast('Dub Updated', `${langName} now has your edited lines.`, 'success');
+            notifyWorkDone('Dub updated', `${project.title}: ${langName} now has your edited lines.`);
+          } else onShowToast('Update Failed', fresh.currentProcessingMessage || 'Something went wrong.', 'error');
+          return;
+        }
+        setRetake({ language, progress: fresh.progressPercent, message: fresh.currentProcessingMessage || 'Rendering...' });
+        setTimeout(poll, 1500);
+      } catch (err) {
+        setRetake(null);
+        onShowToast('Update Failed', (err as Error).message, 'error');
       }
     };
     void poll();
@@ -257,9 +327,8 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
               <h2 className="text-xl sm:text-2xl font-bold text-[#0F172A] tracking-tight">
                 {project.title}
               </h2>
-              <span className="px-2.5 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50/80 text-emerald-600 border border-emerald-200/60">
-                Completed
-              </span>
+              {/* The project's real state: this screen also shows projects whose re-dub is running or failed. */}
+              <ProjectStatusBadge progress={projectProgress(project)} />
             </div>
             <p className="text-xs text-[#64748B] mt-0.5">
               {sourceLang.name} → {targetLang.name} · Voice: {selectedVoice.name} · {project.videoFileSize}
@@ -536,28 +605,73 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
             </div>
           )}
 
+          {(pendingRetake || retake?.language === translationLanguage) && (
+            <div className="p-4 rounded-2xl bg-[#F05637]/5 border border-[#F05637]/30 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-bold text-[#0F172A]">
+                    {retake?.language === translationLanguage
+                      ? retake.message
+                      : `${pendingRetake!.changedLineIds.length} edited line${pendingRetake!.changedLineIds.length === 1 ? '' : 's'} not in the ${translationLang.name} dub yet`}
+                  </p>
+                  {!retake && pendingRetake && (
+                    <p className="text-[11px] text-[#64748B] mt-0.5">
+                      Only the changed lines are charged: about {Math.max(0.1, pendingRetake.minutes).toFixed(1)} min of your allowance.
+                    </p>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  onClick={handleRetake}
+                  disabled={Boolean(retake) || isRedubbing}
+                  className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {retake ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                  {retake ? `Updating... ${retake.progress}%` : 'Update the dub'}
+                </button>
+              </div>
+              {retake?.language === translationLanguage && (
+                <div className="h-1.5 rounded-full bg-[#E2E8F0] overflow-hidden">
+                  <div className="h-full bg-[#F05637] transition-all" style={{ width: `${Math.max(3, retake.progress)}%` }} />
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <ReviewFilterToggle count={flaggedCount} active={reviewOnly} onToggle={() => setReviewOnly(!reviewOnly)} />
+          </div>
+
           <div className="space-y-3">
             {translationSegments.length === 0 && (
               <p className="text-xs text-[#94A3B8] text-center py-8">
                 No translation yet for {translationLang.name}.
               </p>
             )}
-            {translationSegments.map((loc) => {
+            {shownTranslationSegments.map((loc) => {
               const isEditing = editingSegId === loc.id;
               return (
                 <div key={loc.id} className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
-                  <div className="flex items-center justify-between text-xs text-[#64748B] font-mono">
-                    <span>
-                      {formatTime(loc.startTime)} — {formatTime(loc.endTime)}
+                  <div className="flex items-center justify-between gap-2 text-xs text-[#64748B] font-mono">
+                    <span className="flex flex-wrap items-center gap-1.5">
+                      <span>
+                        {formatTime(loc.startTime)} — {formatTime(loc.endTime)}
+                      </span>
+                      {changedLineIds.has(loc.id) && (
+                        <span
+                          title="Edited since the last render. Update the dub to hear it."
+                          className="px-1.5 py-0.5 rounded-md bg-sky-50 border border-sky-200 text-sky-700 text-[10px] font-semibold font-sans"
+                        >
+                          Not in the dub yet
+                        </span>
+                      )}
+                      <DeliveryTag delivery={loc.delivery} />
+                      <QaFlagBadges flags={loc.qaFlags} />
                     </span>
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2 shrink-0">
                       <button
                         type="button"
-                        onClick={() =>
-                          textToSpeechService.speakText(loc.translatedText, translationVoice, translationLanguage, {
-                            onError: (err) => onShowToast('Playback Failed', err.message, 'error'),
-                          })
-                        }
+                        onClick={() => handlePreviewLine(loc)}
                         className="text-[#64748B] hover:text-[#D94B2E]"
                         title="Listen"
                       >
@@ -569,6 +683,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                           onClick={() => {
                             setEditingSegId(loc.id);
                             setEditText(loc.translatedText);
+                            setEditDelivery(loc.delivery || '');
                           }}
                           className="text-[#D94B2E] hover:text-[#ff9d83] text-xs font-semibold"
                         >
@@ -588,6 +703,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                         rows={2}
                         className="w-full p-2.5 rounded-xl bg-[#FFFFFF] border border-[#F05637] text-[#0F172A] text-xs focus:outline-none focus:ring-1 focus:ring-[#F05637]"
                       />
+                      <DeliveryInput value={editDelivery} onChange={setEditDelivery} />
                       <div className="flex justify-end gap-2">
                         <button
                           type="button"
@@ -598,7 +714,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleUpdateLocalizedSegment(loc.id, editText)}
+                          onClick={() => handleUpdateLocalizedSegment(loc.id, editText, editDelivery)}
                           className="px-3 py-1 bg-[#F05637] text-white text-xs font-semibold rounded-lg shadow-[0_0_10px_rgba(240,86,55,0.3)]"
                         >
                           Save

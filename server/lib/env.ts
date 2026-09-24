@@ -12,6 +12,9 @@ export const env = {
   vertexGeminiLocation: process.env.VERTEX_GEMINI_LOCATION || 'global',
   geminiSttModel: process.env.GEMINI_STT_MODEL || 'gemini-3.5-flash-lite',
   geminiTranslateModel: process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
+  // `gemini` voices lines with emotion and delivery direction; `chirp` is the plain Chirp3-HD voice it falls back to.
+  ttsEngine: (process.env.TTS_ENGINE === 'chirp' ? 'chirp' : 'gemini') as 'gemini' | 'chirp',
+  geminiTtsModel: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-tts',
   firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
   // Needed only with CREDENTIALS_MODE=adc, where it cannot be read from a key file.
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',

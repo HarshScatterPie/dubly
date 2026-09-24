@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import {
   Download,
@@ -27,6 +27,7 @@ import { renderService } from '../../services/renderService';
 import { projectService } from '../../services/projectService';
 import { DownloadMenu } from '../DownloadMenu';
 import { ShareDialog } from '../ShareDialog';
+import { loadDevicePrefs } from '../../lib/devicePrefs';
 
 interface StepExportProps {
   project: DubbingProject;
@@ -34,6 +35,8 @@ interface StepExportProps {
   onRestartProject: () => void;
   onOpenWorkspace: () => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
+  /** Whether downloads start with captions burned in (the user's saved default). */
+  defaultBurnCaptions?: boolean;
 }
 
 export const StepExport: React.FC<StepExportProps> = ({
@@ -42,9 +45,11 @@ export const StepExport: React.FC<StepExportProps> = ({
   onRestartProject,
   onOpenWorkspace,
   onShowToast,
+  defaultBurnCaptions = false,
 }) => {
+  const rootRef = useRef<HTMLDivElement>(null);
   const [activeTrack, setActiveTrack] = useState<'dubbed' | 'original'>('dubbed');
-  const [burnCaptions, setBurnCaptions] = useState<boolean>(false);
+  const [burnCaptions, setBurnCaptions] = useState<boolean>(defaultBurnCaptions);
   const [showShare, setShowShare] = useState<boolean>(false);
   // Which language's render the player and the download buttons are pointed at. A project
   // can hold several, so every export action below is scoped to this one.
@@ -81,7 +86,8 @@ export const StepExport: React.FC<StepExportProps> = ({
   const activeSegments = active?.segments || [];
 
   useEffect(() => {
-    // Fire festive celebration confetti
+    // Only on screen and only if the user wants it: the studio also finishes, or is restored, while hidden behind another screen.
+    if (!loadDevicePrefs().celebrate || rootRef.current?.offsetParent === null) return;
     try {
       confetti({
         particleCount: 80,
@@ -148,7 +154,7 @@ export const StepExport: React.FC<StepExportProps> = ({
   const readyCount = dubbedLanguages.filter((l) => l.videoUrl).length;
 
   return (
-    <div className="space-y-6 animate-fade-in">
+    <div ref={rootRef} className="space-y-6 animate-fade-in">
       {/* Success banner */}
       <div className="relative overflow-hidden rounded-3xl glass-panel p-6 sm:p-7">
         <div aria-hidden className="pointer-events-none absolute -top-24 -left-16 w-72 h-72 rounded-full bg-[#F05637]/10 blur-3xl" />

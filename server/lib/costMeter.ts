@@ -12,6 +12,8 @@ const USD_TO_INR = 83;
 
 // Google Cloud TTS list prices per 1M characters.
 const GOOGLE_CHIRP3_HD_PER_1M_USD = 30;
+// gemini-2.5-flash-tts bills $10 per 1M audio tokens (25/s) plus $0.50 per 1M text tokens; about 0.07 s of speech per character.
+const GEMINI_TTS_PER_1M_CHARS_USD = 18;
 const GEMINI_AUDIO_TOKENS_PER_SECOND = 32;
 
 interface GeminiPrice {
@@ -86,6 +88,7 @@ export function recordStt(meter: CostMeter, provider: string, seconds: number): 
 
 function ttsCostInr(provider: string, chars: number): number {
   if (provider === 'vertex') return (chars / 1_000_000) * GOOGLE_CHIRP3_HD_PER_1M_USD * USD_TO_INR;
+  if (provider === 'gemini-tts') return (chars / 1_000_000) * GEMINI_TTS_PER_1M_CHARS_USD * USD_TO_INR;
   return 0;
 }
 

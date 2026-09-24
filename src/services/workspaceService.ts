@@ -1,4 +1,5 @@
-import { apiDelete, apiGet, apiPatch, apiPost } from '../lib/apiClient';
+import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../lib/apiClient';
+import type { GlossaryEntry } from '../types';
 
 export type WorkspaceRole = 'admin' | 'editor';
 
@@ -50,4 +51,6 @@ export const workspaceService = {
   acceptInvite: (token: string) => apiPost<{ workspaceId: string; role: WorkspaceRole }>('/api/invites/accept', { token }),
   changeRole: (uid: string, role: WorkspaceRole) => apiPatch<unknown>(`/api/workspace/members/${uid}`, { role }),
   removeMember: (uid: string) => apiDelete(`/api/workspace/members/${uid}`),
+  getGlossary: () => apiGet<{ entries: GlossaryEntry[]; canEdit: boolean }>('/api/workspace/glossary'),
+  saveGlossary: (entries: GlossaryEntry[]) => apiPut<{ entries: GlossaryEntry[]; canEdit: boolean }>('/api/workspace/glossary', { entries }),
 };

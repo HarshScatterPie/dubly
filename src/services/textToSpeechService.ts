@@ -56,7 +56,7 @@ async function computeWaveformPeaks(dataUri: string, sampleCount = 64): Promise<
 
 export class TextToSpeechService {
   /**
-   * Generates natural speech audio via Google Cloud TTS (Chirp3-HD), routed server-side.
+   * Generates natural speech audio via Google Cloud TTS (Gemini-TTS, falling back to Chirp3-HD), routed server-side.
    */
   public async generateSpeech(text: string, options: TTSOptions): Promise<TTSResult> {
     const { audioUrl, durationSeconds, provider } = await apiPost<GenerateResponse>('/api/tts/generate', {
@@ -65,6 +65,7 @@ export class TextToSpeechService {
       languageCode: options.languageCode,
       speed: options.speed,
       pitch: options.pitch,
+      emotion: options.emotion,
     });
     const waveformPeaks = await computeWaveformPeaks(audioUrl);
     return { audioUrl, durationSeconds, waveformPeaks, provider };
@@ -75,13 +76,22 @@ export class TextToSpeechService {
     text: string,
     voice: Voice,
     languageCode?: string,
-    opts: { onStart?: () => void; onEnd?: () => void; onError?: (err: Error) => void } = {}
+    opts: {
+      onStart?: () => void;
+      onEnd?: () => void;
+      onError?: (err: Error) => void;
+      // The same direction a dub gives the line, so a preview sounds like the render.
+      emotion?: VoiceEmotion;
+      delivery?: string;
+    } = {}
   ): Promise<void> {
     try {
       const { audioUrl } = await apiPost<GenerateResponse>('/api/tts/generate', {
         text,
         voiceId: voice.id,
         languageCode: languageCode || voice.languageCode,
+        emotion: opts.emotion,
+        delivery: opts.delivery || undefined,
       });
       audioPlayer.play(audioUrl, opts);
     } catch (err) {

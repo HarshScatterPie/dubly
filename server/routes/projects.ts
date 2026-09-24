@@ -56,6 +56,9 @@ import { withLogContext } from '../lib/log';
 import { deleteSharesForProject } from './share';
 import { assertStorageAvailable, invalidateStorageUsage } from '../lib/storageUsage';
 import { schemas, validateBody } from '../lib/validation';
+import { getGlossary } from '../lib/glossaryStore';
+import { reconcileSavedSegments, textQaFlags, withFlags } from '../lib/lineReview';
+import { withRetakeInfo } from '../lib/retake';
 
 /**
  * Auto-assigns a distinct voice per detected speaker so a multi-speaker dub sounds like
@@ -160,7 +163,7 @@ projectsRouter.get('/', async (req, res) => {
 projectsRouter.get('/:id', async (req, res) => {
   const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
-  res.json(await toClientProject(stored));
+  res.json(withRetakeInfo(await toClientProject(stored), stored));
 });
 
 const PATCHABLE_FIELDS = [
@@ -189,8 +192,16 @@ projectsRouter.patch('/:id', validateBody(schemas.patchProject), async (req, res
   for (const field of PATCHABLE_FIELDS) {
     if (field in (req.body || {})) patch[field] = req.body[field];
   }
+  // The top-level lines are the primary language's; they get the same server-side review as a per-language save.
+  if (Array.isArray(patch.localizedSegments)) {
+    patch.localizedSegments = reconcileSavedSegments(patch.localizedSegments as LocalizedSegment[], segmentsForLanguage(stored, stored.targetLanguage), {
+      languageCode: stored.targetLanguage,
+      sourceLanguageCode: stored.sourceLanguage,
+      glossary: await getGlossary(req.workspaceId!),
+    });
+  }
   const updated = await updateStoredProject(req.workspaceId!, req.params.id, patch);
-  res.json(await toClientProject(updated));
+  res.json(withRetakeInfo(await toClientProject(updated), updated));
 });
 
 // Deleting is the one project action editors cannot take.
@@ -545,7 +556,7 @@ projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.trans
   }
 
   try {
-    const settings = await getSettings(req.uid!);
+    const [settings, glossary] = await Promise.all([getSettings(req.uid!), getGlossary(req.workspaceId!)]);
     // Some STT chunks (e.g. a silent lead-in) come back with empty text — sending those
     // to translation is meaningless. Skip them; they map to an empty translation.
     const translatable = stored.transcriptSegments.filter((s) => s.text.trim().length > 0);
@@ -569,19 +580,25 @@ projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.trans
 
       const { translations } =
         sourceLines.length > 0
-          ? await routeTranslateSegments(sourceLines, languageCode, finalStyle, finalAdapt, settings.translateProvider)
+          ? await routeTranslateSegments(sourceLines, languageCode, finalStyle, finalAdapt, settings.translateProvider, glossary)
           : { translations: {} as Record<string, string> };
 
-      const segments: LocalizedSegment[] = stored.transcriptSegments.map((seg) => ({
-        id: `loc-${languageCode}-${seg.id}`,
-        segmentId: seg.id,
-        startTime: seg.startTime,
-        endTime: seg.endTime,
-        speaker: seg.speaker,
-        sourceText: seg.text,
-        translatedText: translations[seg.id] || seg.text,
-        isEdited: false,
-      }));
+      const review = { languageCode, sourceLanguageCode: stored.sourceLanguage, glossary };
+      const segments: LocalizedSegment[] = stored.transcriptSegments.map((seg) => {
+        const line: LocalizedSegment = {
+          id: `loc-${languageCode}-${seg.id}`,
+          segmentId: seg.id,
+          startTime: seg.startTime,
+          endTime: seg.endTime,
+          speaker: seg.speaker,
+          sourceText: seg.text,
+          translatedText: translations[seg.id] || seg.text,
+          isEdited: false,
+          // The original's delivery carries over, so the dubbed voice performs the line the same way.
+          ...(seg.delivery ? { delivery: seg.delivery } : {}),
+        };
+        return withFlags(line, textQaFlags(line, review));
+      });
       return { languageCode, segments };
     });
 
@@ -625,7 +642,7 @@ projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.trans
       localizedSegments: keepPrimary ? segmentsForLanguage(stored, primaryCode) : primary.segments,
       currentStep: 'localize',
     });
-    res.json(await toClientProject(updated));
+    res.json(withRetakeInfo(await toClientProject(updated), updated));
   } catch (err) {
     log.error('translate_failed', err, { projectId: req.params.id });
     res.status(500).json({ error: (err as Error).message });
@@ -644,11 +661,16 @@ projectsRouter.patch('/:id/languages/:code/segments', validateBody(schemas.patch
   if (!stored) return res.status(404).json({ error: 'Project not found' });
 
   const languageCode = req.params.code;
-  const segments = req.body?.localizedSegments;
-  if (!Array.isArray(segments)) return res.status(400).json({ error: 'localizedSegments must be an array' });
+  if (!Array.isArray(req.body?.localizedSegments)) return res.status(400).json({ error: 'localizedSegments must be an array' });
   if (!projectLanguages(stored).includes(languageCode)) {
     return res.status(404).json({ error: `Project is not being dubbed into ${languageCode}` });
   }
+  // Fingerprints and render flags stay the server's; text flags are recomputed for what was saved.
+  const segments = reconcileSavedSegments(req.body.localizedSegments as LocalizedSegment[], segmentsForLanguage(stored, languageCode), {
+    languageCode,
+    sourceLanguageCode: stored.sourceLanguage,
+    glossary: await getGlossary(req.workspaceId!),
+  });
 
   const patch: Partial<StoredProject> = {
     languageOutputs: {
@@ -665,5 +687,5 @@ projectsRouter.patch('/:id/languages/:code/segments', validateBody(schemas.patch
   if (languageCode === stored.targetLanguage) patch.localizedSegments = segments;
 
   const updated = await updateStoredProject(req.workspaceId!, req.params.id, patch);
-  res.json(await toClientProject(updated));
+  res.json(withRetakeInfo(await toClientProject(updated), updated));
 });

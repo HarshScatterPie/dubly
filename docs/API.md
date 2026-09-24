@@ -24,7 +24,8 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | GET | `/api/healthz` | Public liveness check: `{ ok: true }` |
 | GET | `/api/health` | Provider and optional-engine availability |
 | GET | `/api/profile` | Name, role and workspace from the shared ScatterStudio profile (whitelisted fields only) |
-| GET/PUT | `/api/settings` | Per-user provider preferences; values in `auto` \| `vertex` |
+| GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews with Chirp3-HD |
+| POST | `/api/profile/sign-out-everywhere` | Revokes every session of the caller's account, this one included (`204`); their tokens are refused from then on |
 | GET | `/api/usage` | Monthly minutes (used, limit, reset time) and storage measured from the bucket |
 
 ### Workspace and invitations
@@ -38,6 +39,8 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | DELETE | `/api/workspace/invites/:inviteId` | admin | Withdraw an invitation |
 | PATCH | `/api/workspace/members/:uid` | admin | `{ role }`. The last admin can't be demoted |
 | DELETE | `/api/workspace/members/:uid` | admin | Removes the member, who returns to their own workspace if they had one |
+| GET | `/api/workspace/glossary` | member | `{ entries, canEdit }` |
+| PUT | `/api/workspace/glossary` | admin | `{ entries }` (≤ 300; each `{ id, term, mode: keep\|translate, translations?, spokenAs?, note? }`; terms unique regardless of case). Replaces the whole list. Translations, line shortening, review flags and the voice's pronunciation follow it |
 | POST | `/api/invites/preview` | any signed-in user | `{ token }`. Answers only if the signed-in email matches the invitation, otherwise the uniform `404 INVITE_NOT_FOUND` |
 | POST | `/api/invites/accept` | any signed-in user | `{ token }`. Joins the workspace. Idempotent for the same user. `410 INVITE_EXPIRED`; `409 IN_OTHER_TEAM` if the caller is in another team with other members |
 
@@ -46,14 +49,15 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 |---|---|---|
 | POST | `/api/projects` | `{ title?, sourceLanguage?, targetLanguage? }` |
 | GET | `/api/projects` | All projects of the workspace, with 3-hour signed media URLs |
-| GET | `/api/projects/:id` | One project, with segments reassembled |
+| GET | `/api/projects/:id` | One project, with segments reassembled, plus `retakeInfo`: per language, the lines edited since its last render (`changedLineIds`, `seconds`, `minutes`). The list endpoint leaves `retakeInfo` out |
 | PATCH | `/api/projects/:id` | Title, voice choices, maps, style, transcript/localized segments, `currentStep` |
 | DELETE | `/api/projects/:id` | **Admin only.** Deletes the project, its segment documents, every file in its own storage folder and its share links |
 | POST | `/api/projects/:id/upload` | multipart `file`, ≤ 500 MB, ≤ 60 min. MP4/MOV/WebM, checked by content. `400 UNSUPPORTED_MEDIA` / `MEDIA_UNREADABLE` / `NO_AUDIO_STREAM` / `VIDEO_TOO_LONG`; `413 STORAGE_LIMIT_REACHED` when enforcement is on |
 | POST | `/api/projects/:id/import-sample` | `{ sampleId }`, one of the built-in samples. `400 UNKNOWN_SAMPLE` for anything else |
 | POST | `/api/projects/:id/transcribe` | With `Prefer: respond-async`: `202 { jobId }`, then poll the job. Without it: waits and returns the project plus `detectedLanguage`, `removedSegments`, `sanitizeNote`. `409 JOB_ALREADY_RUNNING` |
 | POST | `/api/projects/:id/translate` | `{ targetLanguageCodes (≤ 10), style?, adaptExpressions?, regenerate? }` |
-| PATCH | `/api/projects/:id/languages/:code/segments` | `{ localizedSegments }`: edited lines for one language |
+| PATCH | `/api/projects/:id/languages/:code/segments` | `{ localizedSegments }`: edited lines for one language (`translatedText`, `delivery`). The server keeps its own `renderKey`, render flags and slot timings for existing lines and recomputes `qaFlags` |
+| POST | `/api/projects/:id/languages/:code/retake` | Re-renders one language after line edits, charging only the lines whose fingerprint changed since its last render (in 0.1-minute steps, at least 0.1, never more than a full re-dub). Header `Idempotency-Key`. `202 { jobId, changedLines, minutes }`. `400 NOTHING_TO_RETAKE`, `400 RETAKE_UNAVAILABLE` (rendered before line fingerprints existed: re-dub instead), plus the dub errors |
 | POST | `/api/projects/:id/dub` | Voice choices plus `languages?`. Header `Idempotency-Key` (recommended). `202 { status, jobId }`. `409 JOB_ALREADY_RUNNING`, `403 QUOTA_EXCEEDED`, `400 VIDEO_DURATION_UNKNOWN`. The dub may wait in the queue (the project message says so) |
 | POST | `/api/projects/:id/export-video` | `{ languageCode?, captions? }` → `{ url }`. Captioned renders are made once and cached |
 
@@ -77,4 +81,4 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | GET | `/api/voices` | The caller's cloned voices (only those whose sample lives in the caller's own folder) |
 | POST | `/api/voices` | multipart `sample` (≤ 25 MB, 5–120 s audio, checked by content) plus `name?`, `gender?`, `languageCode?` |
 | DELETE | `/api/voices/:id` | Deletes the voice, and its sample only when the sample is in the caller's own folder |
-| POST | `/api/tts/generate` | `{ text, voiceId, languageCode?, speed?, pitch? }` → a WAV data URL. No length limit beyond the 2 MB body |
+| POST | `/api/tts/generate` | `{ text, voiceId, languageCode?, speed?, pitch?, emotion?, delivery? }` → a WAV data URL. `emotion` and `delivery` direct the voice as a dub would. No length limit beyond the 2 MB body |

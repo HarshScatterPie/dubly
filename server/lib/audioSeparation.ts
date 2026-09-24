@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { ffmpegDir } from './mediaTools';
-import { lipsyncDir } from './paths';
+import { venvPython, venvSitePackages } from './paths';
 
 /**
  * Splits the source audio into vocals and everything-else, so a dub can replace only the
@@ -16,7 +16,7 @@ import { lipsyncDir } from './paths';
  * Runs Demucs locally on CPU (no API, no per-minute cost). It is slow, so callers treat
  * it as an optional enhancement and fall back to ducking when it is unavailable.
  */
-const VENV_PYTHON = path.join(lipsyncDir, 'venv', 'Scripts', 'python.exe');
+const VENV_PYTHON = venvPython;
 
 // Demucs' default model. The faster quantized variant (mdx_extra_q) needs `diffq`, which
 // has no prebuilt Windows wheel and fails to compile without a C toolchain, so it isn't a
@@ -25,7 +25,7 @@ const MODEL = 'htdemucs';
 
 export function isSeparationAvailable(): boolean {
   if (!existsSync(VENV_PYTHON)) return false;
-  return existsSync(path.join(lipsyncDir, 'venv', 'Lib', 'site-packages', 'demucs'));
+  return existsSync(path.join(venvSitePackages(), 'demucs'));
 }
 
 /**

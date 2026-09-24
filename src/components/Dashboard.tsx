@@ -13,16 +13,17 @@ import {
   Play,
   Languages,
   Clock,
-  CheckCircle2,
   Share2,
   Trash2,
   Globe,
   SlidersHorizontal,
 } from 'lucide-react';
 import { DubbingProject, NavigationTab } from '../types';
-import { SAMPLE_VIDEOS, LANGUAGES, VOICES } from '../data/mockData';
+import { SAMPLE_VIDEOS } from '../data/mockData';
 import { videoService } from '../services/videoService';
 import { ConfirmDialog } from './ConfirmDialog';
+import { projectProgress, targetsSummary } from '../lib/projectProgress';
+import { ProjectStatusBadge } from './ProjectStatusBadge';
 
 interface DashboardProps {
   projects: DubbingProject[];
@@ -41,16 +42,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
   onDeleteProject,
 }) => {
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
-
-  const getLangName = (code: string) => {
-    const l = LANGUAGES.find((item) => item.code === code);
-    return l ? `${l.flag} ${l.name}` : code;
-  };
-
-  const getVoiceName = (id: string) => {
-    const v = VOICES.find((item) => item.id === id);
-    return v ? `${v.name} (${v.accent.split(' ')[0]})` : id;
-  };
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
@@ -280,24 +271,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
                   {/* Status Badge */}
                   <div className="absolute top-2 left-2">
-                    {project.status === 'completed' ? (
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50/90 text-emerald-600 border border-emerald-200/60 flex items-center gap-1">
-                        <CheckCircle2 className="w-3 h-3" />
-                        <span>Ready</span>
-                      </span>
-                    ) : project.status === 'processing' ? (
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-coral-50/90 text-coral-600 border border-coral-200/60">
-                        Processing
-                      </span>
-                    ) : project.status === 'failed' ? (
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-rose-50/90 text-rose-600 border border-rose-200/60">
-                        Failed
-                      </span>
-                    ) : (
-                      <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-50/90 text-slate-400 border border-slate-300/60">
-                        Draft
-                      </span>
-                    )}
+                    <ProjectStatusBadge progress={projectProgress(project)} />
                   </div>
                 </div>
 
@@ -311,21 +285,36 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       {project.title}
                     </h4>
 
-                    {/* Language Translation Mapping */}
-                    <div className="flex items-center gap-2 mt-2 text-xs">
-                      <span className="px-2 py-0.5 rounded bg-[#F8FAFC] text-[#64748B] border border-[#E2E8F0]">
-                        {getLangName(project.sourceLanguage)}
-                      </span>
-                      <ArrowRight className="w-3.5 h-3.5 text-[#94A3B8]" />
-                      <span className="px-2 py-0.5 rounded bg-[#F05637]/20 text-[#D94B2E] border border-[#F05637]/40 font-semibold">
-                        {getLangName(project.targetLanguage)}
-                      </span>
-                    </div>
+                    {/* Language Translation Mapping: only what analysis and translation actually established */}
+                    {(() => {
+                      const progress = projectProgress(project);
+                      const targets = targetsSummary(progress);
+                      return (
+                        <>
+                          <div className="flex items-center gap-2 mt-2 text-xs">
+                            <span className={`px-2 py-0.5 rounded border ${progress.sourceLanguageName ? 'bg-[#F8FAFC] text-[#64748B] border-[#E2E8F0]' : 'bg-transparent text-[#94A3B8] border-dashed border-[#CBD5E1] italic'}`}>
+                              {progress.sourceLanguageName ?? 'Not analyzed'}
+                            </span>
+                            <ArrowRight className="w-3.5 h-3.5 text-[#94A3B8]" />
+                            <span className={`px-2 py-0.5 rounded border ${targets ? 'bg-[#F05637]/20 text-[#D94B2E] border-[#F05637]/40 font-semibold' : 'bg-transparent text-[#94A3B8] border-dashed border-[#CBD5E1] italic'}`}>
+                              {targets ?? 'Not chosen'}
+                            </span>
+                          </div>
 
-                    <div className="flex items-center justify-between text-[11px] text-[#64748B] mt-2.5 pt-2 border-t border-[#E2E8F0]">
-                      <span>Voice: <strong className="text-[#0F172A]">{getVoiceName(project.selectedVoiceId)}</strong></span>
-                      <span className="text-[#94A3B8]">{project.wordsCount} words</span>
-                    </div>
+                          <div className="flex items-center justify-between gap-2 text-[11px] text-[#64748B] mt-2.5 pt-2 border-t border-[#E2E8F0]">
+                            <span className="truncate">
+                              Voice:{' '}
+                              {progress.voiceName ? <strong className="text-[#0F172A]">{progress.voiceName}</strong> : <span className="italic text-[#94A3B8]">Not chosen</span>}
+                            </span>
+                            {progress.complete || progress.running ? (
+                              <span className="text-[#94A3B8] shrink-0">{project.wordsCount} words</span>
+                            ) : (
+                              <span className="text-amber-700 font-semibold shrink-0">Next: {progress.nextStep}</span>
+                            )}
+                          </div>
+                        </>
+                      );
+                    })()}
                   </div>
 
                   {/* Card Bottom Actions */}
@@ -335,19 +324,22 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       onClick={() => onOpenProject(project)}
                       className="text-xs font-semibold text-[#D94B2E] hover:text-[#ff9d83] flex items-center gap-1"
                     >
-                      <span>Open Studio</span>
+                      <span>{projectProgress(project).complete ? 'Open Studio' : 'Continue'}</span>
                       <ArrowRight className="w-3 h-3" />
                     </button>
 
                     <div className="flex items-center gap-1">
-                      <button
-                        type="button"
-                        onClick={() => onOpenProject(project)}
-                        className="p-1.5 text-[#64748B] hover:text-[#0F172A] rounded hover:bg-[#F8FAFC] transition-colors"
-                        title="Share / Export"
-                      >
-                        <Share2 className="w-3.5 h-3.5" />
-                      </button>
+                      {/* Only a finished dub has anything to share. */}
+                      {projectProgress(project).complete && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenProject(project)}
+                          className="p-1.5 text-[#64748B] hover:text-[#0F172A] rounded hover:bg-[#F8FAFC] transition-colors"
+                          title="Share / Export"
+                        >
+                          <Share2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       {onDeleteProject && (
                         <button
                           type="button"

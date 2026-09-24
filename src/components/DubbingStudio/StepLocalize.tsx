@@ -19,9 +19,13 @@ import {
   LocalizedSegment,
   TranscriptSegment,
   TranslationStyle,
+  Voice,
+  VoiceEmotion,
 } from '../../types';
 import { LANGUAGES, VOICES } from '../../data/mockData';
 import { textToSpeechService } from '../../services/textToSpeechService';
+import { resolveVoice, type VoiceSelection } from '../../lib/voiceResolution';
+import { DeliveryInput, DeliveryTag, needsReview, QaFlagBadges, ReviewFilterToggle } from '../LineReview';
 import { StickyActionBar } from './StickyActionBar';
 
 interface StepLocalizeProps {
@@ -46,9 +50,14 @@ interface StepLocalizeProps {
   onChangeStyle: (style: TranslationStyle) => void;
   onToggleAdaptExpressions: () => void;
   onGenerateTranslation: () => void;
-  onUpdateLocalizedSegment: (id: string, text: string) => void;
+  onUpdateLocalizedSegment: (id: string, text: string, delivery: string) => void;
   onContinueToVoice: () => void;
   onShowToast?: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
+  /** The voice choices so far, so a line preview uses the voice that line will actually get. */
+  voiceSelection: VoiceSelection;
+  /** The user's cloned voices plus the catalog. */
+  voiceCatalog: Voice[];
+  voiceEmotion: VoiceEmotion;
 }
 
 export const StepLocalize: React.FC<StepLocalizeProps> = ({
@@ -71,11 +80,16 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
   onUpdateLocalizedSegment,
   onContinueToVoice,
   onShowToast,
+  voiceSelection,
+  voiceCatalog,
+  voiceEmotion,
 }) => {
   const [selectedFilter, setSelectedFilter] = useState<'all' | 'indian' | 'global' | 'asian'>('indian');
   const [searchQuery, setSearchQuery] = useState('');
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const [editDelivery, setEditDelivery] = useState('');
+  const [reviewOnly, setReviewOnly] = useState(false);
   const [activeSpeechLocId, setActiveSpeechLocId] = useState<string | null>(null);
   const [showPicker, setShowPicker] = useState(false);
   const isPickerVisible = !hasGeneratedTranslation || showPicker;
@@ -110,11 +124,12 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
   const handleStartEdit = (seg: LocalizedSegment) => {
     setEditingLocId(seg.id);
     setEditText(seg.translatedText);
+    setEditDelivery(seg.delivery || '');
   };
 
   const handleSaveEdit = (segId: string) => {
     if (editText.trim()) {
-      onUpdateLocalizedSegment(segId, editText.trim());
+      onUpdateLocalizedSegment(segId, editText.trim(), editDelivery.trim());
     }
     setEditingLocId(null);
   };
@@ -126,10 +141,13 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
       return;
     }
     setActiveSpeechLocId(seg.id);
-    const previewVoice = VOICES.find((v) => v.languageCode === activeLanguageCode) || VOICES[0];
+    // The voice this speaker gets in this language, resolved by the same rules the renderer uses.
+    const previewVoice = resolveVoice(voiceSelection, activeLanguageCode, seg.speaker, voiceCatalog.length ? voiceCatalog : VOICES);
     await textToSpeechService.speakText(seg.translatedText, previewVoice, activeLanguageCode, {
       onEnd: () => setActiveSpeechLocId((cur) => (cur === seg.id ? null : cur)),
       onError: (err) => onShowToast?.('Playback Failed', err.message, 'error'),
+      emotion: voiceEmotion,
+      delivery: seg.delivery,
     });
   };
 
@@ -140,7 +158,9 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
   };
 
   // Lines with no speech (silent lead-ins) have nothing to review, so they are not shown as empty "" rows.
-  const visibleSegments = localizedSegments.filter((s) => (s.sourceText || s.translatedText).trim().length > 0);
+  const spokenSegments = localizedSegments.filter((s) => (s.sourceText || s.translatedText).trim().length > 0);
+  const flaggedCount = spokenSegments.filter(needsReview).length;
+  const visibleSegments = reviewOnly ? spokenSegments.filter(needsReview) : spokenSegments;
 
   const totalWordsTranslated = localizedSegments.reduce(
     (sum, s) => sum + (s.translatedText.split(/\s+/).filter(Boolean).length || 1),
@@ -408,6 +428,10 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
           )}
 
 
+          <div className="flex justify-end">
+            <ReviewFilterToggle count={flaggedCount} active={reviewOnly} onToggle={() => setReviewOnly(!reviewOnly)} />
+          </div>
+
           {/* Dual Column Side-by-Side Table Header */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             {/* Left Header */}
@@ -456,9 +480,13 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
 
                   {/* Right Column: Localized */}
                   <div className="space-y-1.5">
-                    <div className="flex items-center justify-between text-[11px] font-mono text-[#D94B2E]">
-                      <span className="px-1.5 py-0.5 rounded bg-[#F05637]/20 border border-[#F05637]/30 text-xs">
-                        {targetLang.name}
+                    <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-[#D94B2E]">
+                      <span className="flex flex-wrap items-center gap-1.5">
+                        <span className="px-1.5 py-0.5 rounded bg-[#F05637]/20 border border-[#F05637]/30 text-xs">
+                          {targetLang.name}
+                        </span>
+                        <DeliveryTag delivery={loc.delivery} />
+                        <QaFlagBadges flags={loc.qaFlags} />
                       </span>
 
                       <div className="flex items-center gap-1.5">
@@ -495,6 +523,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
                           rows={2}
                           className="w-full p-2.5 rounded-xl bg-[#F8FAFC] border border-[#F05637] text-[#0F172A] text-sm focus:outline-none font-sans resize-none"
                         />
+                        <DeliveryInput value={editDelivery} onChange={setEditDelivery} />
                         <div className="flex items-center justify-end gap-2">
                           <button
                             type="button"
@@ -536,7 +565,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
           ) : hasGeneratedTranslation && !isPickerVisible ? (
             <span>
               <strong className="text-[#0F172A]">{totalWordsTranslated} words</strong> in {targetLang.name} across{' '}
-              {visibleSegments.length} lines · click any line to edit it
+              {spokenSegments.length} lines · click any line to edit it
             </span>
           ) : selectedLangs.length === 0 ? (
             <span>Pick at least one language above to continue</span>

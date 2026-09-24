@@ -15,6 +15,8 @@
 | `language_failed` | One language of a dub failed; the others continue | `languageCode` |
 | `job_cost` | End of every dub and transcription | `ttsChars, sttSeconds, estimatedInr` |
 | `provider_call` / `provider_retry` / `provider_error` | Vertex and TTS calls | `provider, operation, attempts, durationMs` |
+| `tts_engine_fallback` | A line was voiced with Chirp3-HD instead of Gemini-TTS | `reason (quota\|refused), pauseMs, languageCode` |
+| `tts_engine_unavailable` | Gemini-TTS is not enabled or permitted for the project; Chirp3-HD is used for 30 minutes | `model` |
 | `heavy_slot_wait` | A transcription or caption render had to wait | `inUse, waiting` |
 | `records_swept` | Hourly retention sweep | `deleted` |
 | `retained_shared_objects` | A deleted project referenced files outside its own folder (kept) | `paths` |
@@ -55,6 +57,10 @@
 **Provider outage (Vertex or TTS).**
 - Calls retry with backoff. Dubs whose languages all fail end as `failed` with a full refund; partial failures bill only what rendered.
 - Nothing to repair afterwards: users retry when the provider recovers.
+
+**Dubs sound flat (no emotion).**
+- Lines fell back to Chirp3-HD. `tts_engine_fallback` with `reason: quota` means Gemini-TTS ran out of quota (it is retried after 90 s); raise the quota. `tts_engine_unavailable` means the model is not enabled for the GCP project.
+- `TTS_ENGINE=chirp` switches the fallback on permanently.
 
 **A customer disputes minutes.**
 - Compare the workspace's `meta/usage` with its jobs (`minutesReserved`, `minutesRefunded`, `status`).

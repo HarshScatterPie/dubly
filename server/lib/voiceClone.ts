@@ -5,7 +5,7 @@ import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { ffmpegDir } from './mediaTools';
-import { lipsyncDir, serverRoot, tmpDir } from './paths';
+import { serverRoot, tmpDir, venvPython, venvSitePackages } from './paths';
 
 /**
  * Speaks text in a voice taken from one short recording the user supplied.
@@ -18,10 +18,10 @@ import { lipsyncDir, serverRoot, tmpDir } from './paths';
  * Like lip-sync and separation, this is treated as an optional capability: if the engine
  * isn't installed, callers fall back to a catalog voice rather than failing.
  */
-const VENV_PYTHON = path.join(lipsyncDir, 'venv', 'Scripts', 'python.exe');
+const VENV_PYTHON = venvPython;
 const WORKER_SCRIPT = path.join(serverRoot, 'scripts', 'voice_clone.py');
 
-const SITE_PACKAGES = path.join(lipsyncDir, 'venv', 'Lib', 'site-packages');
+const SITE_PACKAGES = venvSitePackages();
 /** Package directory each engine installs under, used for the cheap availability check. */
 const ENGINE_PACKAGES = { chatterbox: 'chatterbox', indicf5: 'f5_tts' } as const;
 

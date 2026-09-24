@@ -73,6 +73,11 @@ export class ProjectService {
   }> {
     // Runs as a background job on the server; this waits for it by polling instead of holding one request open for minutes.
     const { jobId } = await apiPost<{ jobId: string }>(`/api/projects/${projectId}/transcribe`, undefined, { Prefer: 'respond-async' });
+    return this.awaitTranscription(projectId, jobId);
+  }
+
+  /** Waits for a transcription job that is already running (one started before a page reload, say) and returns its result. */
+  public async awaitTranscription(projectId: string, jobId: string): Promise<Awaited<ReturnType<ProjectService['transcribe']>>> {
     const job = await this.waitForJob(projectId, jobId);
     if (job.status !== 'completed') throw new Error(job.message || 'Analysis failed. Please try again.');
     const project = await this.get(projectId);
@@ -157,6 +162,11 @@ export class ProjectService {
   ): Promise<{ status: string; jobId?: string }> {
     // One key per start: if this request is retried the server hands back the same job instead of starting (and charging) a second one.
     return apiPost<{ status: string; jobId?: string }>(`/api/projects/${projectId}/dub`, opts, { 'Idempotency-Key': crypto.randomUUID() });
+  }
+
+  /** Re-renders one language with its edited lines, charged only for the lines that changed since its last render. */
+  public retakeLines(projectId: string, languageCode: string): Promise<{ status: string; jobId: string; changedLines: number; minutes: number }> {
+    return apiPost(`/api/projects/${projectId}/languages/${languageCode}/retake`, undefined, { 'Idempotency-Key': crypto.randomUUID() });
   }
 }
 

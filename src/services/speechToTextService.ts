@@ -25,6 +25,15 @@ export class SpeechToTextService {
    * Gemini diarization pass run server-side right after transcription.
    */
   public async transcribe(projectId: string): Promise<TranscriptionResult> {
+    return this.toResult(await projectService.transcribe(projectId));
+  }
+
+  /** Follows a transcription that is already running, e.g. one started before the page was reloaded. */
+  public async resume(projectId: string, jobId: string): Promise<TranscriptionResult> {
+    return this.toResult(await projectService.awaitTranscription(projectId, jobId));
+  }
+
+  private toResult(raw: Awaited<ReturnType<typeof projectService.transcribe>>): TranscriptionResult {
     const {
       transcriptSegments,
       wordsCount,
@@ -34,7 +43,7 @@ export class SpeechToTextService {
       speakerVoiceMap,
       removedSegments,
       sanitizeNote,
-    } = await projectService.transcribe(projectId);
+    } = raw;
     return {
       language: detectedLanguage,
       languageCode: sourceLanguageCode,

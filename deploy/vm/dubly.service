@@ -12,7 +12,8 @@ Environment=NODE_ENV=production
 Environment=PATH=/opt/node-24/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # Operational settings (proxy hops, capacity limits); secrets stay in server/.env and server/credentials.
 EnvironmentFile=-__HOME__/dubly-shared/runtime.env
-ExecStart=/opt/node-24/bin/node node_modules/tsx/dist/cli.mjs server/index.ts
+# tsx is loaded in-process (not the tsx CLI, which runs the app as a child), so SIGTERM reaches the app and it can drain.
+ExecStart=/opt/node-24/bin/node --import tsx server/index.ts
 Restart=always
 RestartSec=5
 # SIGTERM goes to Node only, so it can drain; ffmpeg children are stopped with it, not before it.

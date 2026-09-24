@@ -9,5 +9,7 @@ export default defineConfig({
     testTimeout: 30_000,
     hookTimeout: 30_000,
     setupFiles: ['server/test/setup.ts'],
+    // On GitHub Actions failures also become annotations on the run.
+    reporters: process.env.GITHUB_ACTIONS ? ['default', 'github-actions'] : ['default'],
   },
 });

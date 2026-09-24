@@ -27,7 +27,7 @@ jobs:
           cache: npm
 
       # The Firestore/Auth/Storage emulators run on Java.
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 21
@@ -45,7 +45,18 @@ jobs:
         run: npm run typecheck
 
       - name: Tests (Firebase emulators)
-        run: npm test
+        run: |
+          set -o pipefail
+          npm test 2>&1 | tee test-output.txt
+
+      # Surfaces the end of the test output as an annotation, readable on the run page (and via the API) without admin rights.
+      - name: Report test output on failure
+        if: failure()
+        run: |
+          tail -n 60 test-output.txt | sed -E 's/\x1b\[[0-9;]*m//g' > tail.txt || true
+          for f in firestore-debug.log firebase-debug.log; do [ -f "$f" ] && tail -n 15 "$f" >> tail.txt; done
+          body=$(sed -e 's/%/%25/g' tail.txt | sed -e ':a;N;$!ba;s/\n/%0A/g')
+          echo "::error title=Test output (last lines)::${body}"
 
       - name: Build frontend
         run: npm run build

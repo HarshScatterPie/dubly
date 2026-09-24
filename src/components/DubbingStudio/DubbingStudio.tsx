@@ -44,6 +44,8 @@ const MAX_TARGET_LANGUAGES = 10;
 
 interface DubbingStudioProps {
   initialSampleId?: string | null;
+  /** An existing project to dub into more languages: its upload and transcript are reused, so the studio opens on Localize. */
+  initialProject?: DubbingProject | null;
   onSaveProject: (project: DubbingProject) => void;
   onOpenWorkspace: (project: DubbingProject) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
@@ -51,6 +53,7 @@ interface DubbingStudioProps {
 
 export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   initialSampleId,
+  initialProject,
   onSaveProject,
   onOpenWorkspace,
   onShowToast,
@@ -112,7 +115,10 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
 
   // Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analysisStage, setAnalysisStage] = useState(0);
+  // Real progress, polled from the server while transcription runs.
+  const [analysisProgress, setAnalysisProgress] = useState(0);
+  const [analysisMessage, setAnalysisMessage] = useState('');
+  const [analysisElapsedSeconds, setAnalysisElapsedSeconds] = useState(0);
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [speakersCount, setSpeakersCount] = useState<number>(1);
   const [speakerVoiceMap, setSpeakerVoiceMap] = useState<Record<string, string>>({});
@@ -120,11 +126,10 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // Localization State
   // Several languages can be dubbed from one upload. The first entry is the primary one:
   // it drives the voice preview, the processing screen and the top-level project fields.
-  const [targetLanguageCodes, setTargetLanguageCodes] = useState<string[]>([
-    savedPrefs?.defaultTargetLang || 'hi',
-  ]);
+  // Starts empty: the user picks every language themselves rather than having to un-pick a default.
+  const [targetLanguageCodes, setTargetLanguageCodes] = useState<string[]>([]);
   // Which language the localize table shows and edits — the rest are still queued.
-  const [activeLanguageCode, setActiveLanguageCode] = useState<string>(savedPrefs?.defaultTargetLang || 'hi');
+  const [activeLanguageCode, setActiveLanguageCode] = useState<string>('');
   const [languageOutputs, setLanguageOutputs] = useState<Record<string, LanguageOutput>>({});
   const targetLanguageCode = targetLanguageCodes[0] || 'hi';
   const [translationStyle, setTranslationStyle] = useState<TranslationStyle>(
@@ -185,6 +190,48 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
 
   // Completed Project Holder
   const [completedProject, setCompletedProject] = useState<DubbingProject | null>(null);
+
+  // Languages this project already has a finished dub for, shown as done in the picker.
+  const alreadyDubbedCodes = React.useMemo(() => {
+    const p = initialProject;
+    if (!p) return [] as string[];
+    const codes = p.targetLanguages?.length ? p.targetLanguages : [p.targetLanguage];
+    return codes.filter((code) =>
+      code === p.targetLanguage ? Boolean(p.finalDubbedVideoUrl) : Boolean(p.languageOutputs?.[code]?.finalDubbedVideoUrl)
+    );
+  }, [initialProject]);
+
+  // Re-dubbing from History: everything up to the transcript already exists, so skip straight to choosing languages.
+  React.useEffect(() => {
+    const p = initialProject;
+    if (!p) return;
+    setProjectId(p.id);
+    setVideoPreviewUrl(p.videoUrl);
+    setFileName(p.videoFileName || `${p.title}.mp4`);
+    setFileSizeFormatted(p.videoFileSize);
+    setDurationFormatted(videoService.formatDuration(p.videoDuration));
+    setVideoDuration(p.videoDuration);
+    setResolution(p.videoResolution);
+    setTranscriptSegments(p.transcriptSegments || []);
+    setSourceLanguageCode(p.sourceLanguage);
+    setDetectedLanguage(LANGUAGES.find((l) => l.code === p.sourceLanguage)?.name || p.sourceLanguage);
+    setSpeakersCount(p.speakersCount || 1);
+    setSpeakerVoiceMap(p.speakerVoiceMap || {});
+    setLanguageOutputs(p.languageOutputs || {});
+    setTranslationStyle(p.translationStyle);
+    setAdaptExpressions(p.adaptExpressions);
+    setSelectedVoiceId(p.selectedVoiceId);
+    setLanguageVoiceMap(p.languageVoiceMap || {});
+    setLanguageSpeakerVoiceMap(p.languageSpeakerVoiceMap || {});
+    setVoiceSpeed(p.voiceSpeed ?? 1);
+    setVoicePitch(p.voicePitch ?? 1);
+    setVoiceEmotion(p.voiceEmotion || 'friendly');
+    setAutoLipSync(Boolean(p.autoLipSync));
+    setSeparateBackground(Boolean(p.separateBackground));
+    maxReachedIndexRef.current = STEP_ORDER.indexOf('localize');
+    setCurrentStep('localize');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // If we started from a sample preset, import it into a real backend project on mount.
   React.useEffect(() => {
@@ -267,7 +314,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     try {
       const draft = await projectService.createDraft(sample.title, 'en', targetLanguageCode);
       setProjectId(draft.id);
-      const imported = await projectService.importSample(draft.id, sample.videoUrl, `${sample.title}.mp4`);
+      const imported = await projectService.importSample(draft.id, sample.id);
       setDurationFormatted(videoService.formatDuration(imported.videoDuration));
       setVideoDuration(imported.videoDuration);
       setResolution(imported.videoResolution);
@@ -280,14 +327,12 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     }
   };
 
-  /** Adds or removes a target language, never leaving the selection empty. */
+  /** Adds or removes a target language; the Translate button stays disabled while none are picked. */
   const handleToggleTargetLanguage = (code: string) => {
     setTargetLanguageCodes((prev) => {
       if (prev.includes(code)) {
-        // Keeping at least one selected means the Generate button never becomes a no-op.
-        if (prev.length === 1) return prev;
         const next = prev.filter((c) => c !== code);
-        setActiveLanguageCode((active) => (active === code ? next[0] : active));
+        setActiveLanguageCode((active) => (active === code ? next[0] || '' : active));
         return next;
       }
       if (prev.length >= MAX_TARGET_LANGUAGES) {
@@ -325,15 +370,34 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     if (!videoPreviewUrl || !projectId) return;
     setIsAnalyzing(true);
     setCurrentStep('understand');
-    setAnalysisStage(1);
+    setAnalysisProgress(0);
+    setAnalysisMessage('Starting up');
+    setAnalysisElapsedSeconds(0);
 
-    setTimeout(() => setAnalysisStage(2), 500);
-    setTimeout(() => setAnalysisStage(3), 1000);
-    setTimeout(() => setAnalysisStage(4), 1500);
+    const startedAt = Date.now();
+    let polling = true;
+    const poll = async () => {
+      while (polling && isMountedRef.current) {
+        try {
+          const proj = await projectService.get(projectId);
+          if (!polling || !isMountedRef.current) break;
+          if (proj.currentProcessingMessage) {
+            setAnalysisMessage(proj.currentProcessingMessage);
+            setAnalysisProgress((prev) => Math.max(prev, proj.progressPercent || 0));
+          }
+        } catch {
+          // a missed poll just means the display lags a second
+        }
+        setAnalysisElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    };
+    void poll();
 
     try {
       const res = await speechToTextService.transcribe(projectId);
-      setAnalysisStage(5);
+      polling = false;
+      setAnalysisProgress(100);
       setTranscriptSegments(res.segments);
       setDetectedLanguage(res.language);
       setSourceLanguageCode(res.languageCode);
@@ -362,6 +426,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       onShowToast('Analysis Failed', (err as Error).message, 'error');
       setCurrentStep('upload');
     } finally {
+      polling = false;
       if (isMountedRef.current) setIsAnalyzing(false);
     }
   };
@@ -376,7 +441,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
 
   // STEP 3: Generate Translation — every selected language in one call.
   const handleGenerateTranslation = async () => {
-    if (!projectId) return;
+    if (!projectId || targetLanguageCodes.length === 0) return;
     setIsTranslating(true);
     try {
       const project = await translationService.translateSegments(
@@ -485,6 +550,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         ),
         autoLipSync,
         separateBackground,
+        // Only this run's languages: a project's already-finished dubs are kept, not re-rendered and re-billed.
+        languages: targetLanguageCodes,
       });
     } catch (err) {
       setIsGeneratingDub(false);
@@ -533,9 +600,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       onShowToast('Language Limit Reached', `You can dub into ${MAX_TARGET_LANGUAGES} languages at a time.`, 'info');
       return;
     }
-    const nextCodes = targetLanguageCodes.includes(newLangCode)
-      ? targetLanguageCodes
-      : [...targetLanguageCodes, newLangCode];
+    const nextCodes = [newLangCode];
     setTargetLanguageCodes(nextCodes);
     setActiveLanguageCode(newLangCode);
     setCurrentStep('localize');
@@ -640,6 +705,12 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     [...customVoices, ...VOICES].find((v) => v.id === voiceForLanguage(voiceLanguageCode)) || VOICES[0];
   const wordsCount = transcriptSegments.reduce((sum, s) => sum + s.wordsCount, 0);
 
+  const studioTopRef = useRef<HTMLDivElement>(null);
+  // Every step opens at its top, instead of wherever the previous step was scrolled to.
+  React.useEffect(() => {
+    studioTopRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }, [currentStep]);
+
   const currentStepIndex = STEP_ORDER.indexOf(currentStep);
   maxReachedIndexRef.current = Math.max(maxReachedIndexRef.current, currentStepIndex);
   const canGoToIndex = (idx: number) => idx >= 0 && idx <= maxReachedIndexRef.current;
@@ -694,7 +765,11 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       {step === 'understand' && (
         <StepUnderstand
           isAnalyzing={isAnalyzing}
-          analysisStage={analysisStage}
+          analysisProgress={analysisProgress}
+          analysisMessage={analysisMessage}
+          analysisElapsedSeconds={analysisElapsedSeconds}
+          fileName={fileName}
+          durationFormatted={durationFormatted}
           videoPreviewUrl={videoPreviewUrl || ''}
           transcriptSegments={transcriptSegments}
           wordsCount={wordsCount}
@@ -709,6 +784,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
 
       {step === 'localize' && (
         <StepLocalize
+          alreadyDubbedCodes={alreadyDubbedCodes}
           sourceLanguageCode={sourceLanguageCode}
           targetLanguageCodes={targetLanguageCodes}
           activeLanguageCode={activeLanguageCode}
@@ -779,6 +855,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
             progressPercent={dubProgress}
             elapsedSeconds={dubElapsedSeconds}
             statusMessage={processingMessage}
+            fileName={fileName}
+            durationFormatted={durationFormatted}
           />
         ) : (
           completedProject && (
@@ -796,7 +874,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   );
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8">
+    <div ref={studioTopRef} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 scroll-mt-4">
       {/* Studio Header & Stepper */}
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -880,9 +958,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         </div>
       </div>
 
-      {/* Swipeable step viewport — each step is its own full-height, independently
-          scrolling pane; swipe (touch) or the arrow buttons move between panes instead
-          of scrolling down one long page. */}
+      {/* Only the page scrolls: a nested scroll pane here fought the page scroller and broke the sticky action bars. */}
       <div className="relative">
         <button
           type="button"
@@ -903,24 +979,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           <ChevronRight className="w-5 h-5" />
         </button>
 
-        <div
-          className="overflow-hidden"
-          onTouchStart={handleTouchStart}
-          onTouchEnd={handleTouchEnd}
-        >
-          <div
-            className="flex transition-transform duration-300 ease-out"
-            style={{ transform: `translateX(-${currentStepIndex * 100}%)` }}
-          >
-            {STEP_ORDER.map((step) => (
-              <div
-                key={step}
-                className="w-full shrink-0 max-h-[75vh] min-h-[360px] overflow-y-auto custom-scrollbar px-0.5"
-              >
-                {step === currentStep && renderStepContent(step)}
-              </div>
-            ))}
-          </div>
+        <div key={currentStep} className="min-h-[360px] animate-fade-in" onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
+          {renderStepContent(currentStep)}
         </div>
       </div>
     </div>

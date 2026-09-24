@@ -1,4 +1,4 @@
-import ffmpeg from 'fluent-ffmpeg';
+import { ffmpeg } from './mediaTools';
 import { detectSpeechRegionsVad, isVadAvailable } from './vad';
 
 /**
@@ -53,7 +53,9 @@ function detectSpeechRegionsByAmplitude(audioPath: string, totalDuration: number
     const silenceStarts: number[] = [];
     const silenceEnds: number[] = [];
 
-    const cmd = ffmpeg(audioPath)
+    const cmd = ffmpeg({ timeout: 10 * 60 })
+      .input(audioPath)
+      .inputOptions(['-protocol_whitelist', 'file'])
       .audioFilters(`silencedetect=noise=${NOISE_FLOOR_DB}dB:d=${MIN_SILENCE_SECONDS}`)
       .format('null')
       .output('-');

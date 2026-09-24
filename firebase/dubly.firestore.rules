@@ -1,0 +1,22 @@
+rules_version = '2';
+
+// REFERENCE FRAGMENT: not deployed from this repo. The Firebase project is shared with ScatterStudio, and a rules deploy
+// replaces the whole project's rules, so the ScatterStudio rules owner merges these blocks into theirs (docs/FIREBASE-RULES.md).
+//
+// Dubly's backend uses the Admin SDK, which bypasses rules; the Dubly frontend never touches Firestore directly. Every
+// Dubly-owned path is therefore closed to clients. Firestore ORs matching rules together, so these denies only take effect
+// if no broader rule (e.g. `match /users/{uid}/{document=**}`) allows the same path.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /workspaces/{document=**} { allow read, write: if false; }
+    match /workspaceMembership/{uid} { allow read, write: if false; }
+    match /invites/{inviteId} { allow read, write: if false; }
+    match /jobs/{jobId} { allow read, write: if false; }
+    match /jobIdempotency/{key} { allow read, write: if false; }
+    match /shares/{token} { allow read, write: if false; }
+    // Dubly data kept under ScatterStudio's users/{uid} tree. The users/{uid} document itself belongs to ScatterStudio.
+    match /users/{uid}/voices/{voiceId} { allow read, write: if false; }
+    match /users/{uid}/meta/{docId} { allow read, write: if false; }
+    match /users/{uid}/projects/{document=**} { allow read, write: if false; }
+  }
+}

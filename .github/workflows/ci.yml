@@ -1,0 +1,80 @@
+name: CI
+
+# Every push and pull request must pass typecheck, tests (against Firebase emulators, never the real project), the production
+# build, a dependency audit and a secret scan, and the Docker image must build. Nothing here deploys.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      # The Firestore/Auth/Storage emulators run on Java.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Firebase emulator downloads
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ hashFiles('package-lock.json') }}
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests (Firebase emulators)
+        run: npm test
+
+      - name: Build frontend
+        run: npm run build
+
+      # Fails on high/critical advisories in production dependencies; moderate ones are tracked in docs/SECURITY.md.
+      - name: Dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan history for secrets
+        uses: trufflesecurity/trufflehog@v3.90.0
+        with:
+          extra_args: --results=verified,unknown
+
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production image (not pushed)
+        run: docker build -t dubly:ci .
+      - name: Image has a working ffmpeg and starts its runtime
+        run: |
+          docker run --rm --entrypoint ffmpeg dubly:ci -hide_banner -version | head -1
+          docker run --rm --entrypoint node dubly:ci -e "require('fs').accessSync('dist/index.html'); console.log('frontend bundle present')"

@@ -8,7 +8,6 @@ import {
   onAuthStateChanged,
   signInWithPopup,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   signOut as firebaseSignOut,
   type User,
 } from 'firebase/auth';
@@ -36,7 +35,6 @@ interface AuthContextValue {
   error: string | null;
   signInWithGoogle: () => Promise<void>;
   signInWithEmail: (email: string, password: string) => Promise<void>;
-  signUpWithEmail: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
 }
 
@@ -97,23 +95,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const signUpWithEmail = async (email: string, password: string) => {
-    setError(null);
-    try {
-      await createUserWithEmailAndPassword(auth, email, password);
-    } catch (err) {
-      setError((err as Error).message || 'Account creation failed');
-      throw err;
-    }
-  };
-
   const signOut = async () => {
     await firebaseSignOut(auth);
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, profile, loading, error, signInWithGoogle, signInWithEmail, signUpWithEmail, signOut }}
+      value={{ user, profile, loading, error, signInWithGoogle, signInWithEmail, signOut }}
     >
       {children}
     </AuthContext.Provider>

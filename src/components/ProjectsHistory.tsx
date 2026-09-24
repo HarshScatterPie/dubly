@@ -17,6 +17,7 @@ import {
   Clock,
   ArrowRight,
   Sparkles,
+  Languages,
 } from 'lucide-react';
 import { DubbingProject } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
@@ -25,7 +26,10 @@ import { ConfirmDialog } from './ConfirmDialog';
 interface ProjectsHistoryProps {
   projects: DubbingProject[];
   onOpenProject: (project: DubbingProject) => void;
-  onDeleteProject: (projectId: string) => void;
+  /** Dub a finished project into more languages without re-uploading it. */
+  onRedubProject?: (project: DubbingProject) => void;
+  /** Only passed for admins; editors cannot delete projects. */
+  onDeleteProject?: (projectId: string) => void;
   onNewDub: () => void;
   /** Pre-fills the search box — set when arriving here from the header's global search. */
   initialSearchTerm?: string;
@@ -34,6 +38,7 @@ interface ProjectsHistoryProps {
 export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
   projects,
   onOpenProject,
+  onRedubProject,
   onDeleteProject,
   onNewDub,
   initialSearchTerm,
@@ -254,14 +259,27 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                           >
                             <ExternalLink className="w-3.5 h-3.5" />
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => setPendingDeleteId(p.id)}
-                            className="p-1.5 rounded-lg text-[#94A3B8] hover:text-rose-600 hover:bg-[#F8FAFC] transition-colors"
-                            title="Delete Project"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
+                          {onRedubProject && p.transcriptSegments?.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => onRedubProject(p)}
+                              className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold text-[#D94B2E] hover:text-white hover:bg-[#F05637] transition-colors"
+                              title="Dub this video into more languages, without uploading it again"
+                            >
+                              <Languages className="w-3.5 h-3.5" />
+                              <span className="hidden xl:inline">More languages</span>
+                            </button>
+                          )}
+                          {onDeleteProject && (
+                            <button
+                              type="button"
+                              onClick={() => setPendingDeleteId(p.id)}
+                              className="p-1.5 rounded-lg text-[#94A3B8] hover:text-rose-600 hover:bg-[#F8FAFC] transition-colors"
+                              title="Delete Project"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -280,7 +298,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
         confirmLabel="Delete Project"
         onCancel={() => setPendingDeleteId(null)}
         onConfirm={() => {
-          if (pendingDeleteId) onDeleteProject(pendingDeleteId);
+          if (pendingDeleteId) onDeleteProject?.(pendingDeleteId);
           setPendingDeleteId(null);
         }}
       />

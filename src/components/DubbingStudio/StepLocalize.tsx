@@ -22,8 +22,11 @@ import {
 } from '../../types';
 import { LANGUAGES, VOICES } from '../../data/mockData';
 import { textToSpeechService } from '../../services/textToSpeechService';
+import { StickyActionBar } from './StickyActionBar';
 
 interface StepLocalizeProps {
+  /** Languages this project already has a finished dub for (when re-dubbing from History). */
+  alreadyDubbedCodes?: string[];
   sourceLanguageCode: string;
   /** Every language this project will be dubbed into. The first is the primary one. */
   targetLanguageCodes: string[];
@@ -49,6 +52,7 @@ interface StepLocalizeProps {
 }
 
 export const StepLocalize: React.FC<StepLocalizeProps> = ({
+  alreadyDubbedCodes = [],
   sourceLanguageCode,
   targetLanguageCodes,
   activeLanguageCode,
@@ -73,6 +77,12 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const [activeSpeechLocId, setActiveSpeechLocId] = useState<string | null>(null);
+  const [showPicker, setShowPicker] = useState(false);
+  const isPickerVisible = !hasGeneratedTranslation || showPicker;
+  // Collapse the picker again as soon as a (re)translation lands.
+  React.useEffect(() => {
+    if (hasGeneratedTranslation && !isTranslating) setShowPicker(false);
+  }, [hasGeneratedTranslation, isTranslating]);
 
   const sourceLang = LANGUAGES.find((l) => l.code === sourceLanguageCode) || LANGUAGES[10];
   const targetLang = LANGUAGES.find((l) => l.code === activeLanguageCode) || LANGUAGES[0];
@@ -129,6 +139,9 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // Lines with no speech (silent lead-ins) have nothing to review, so they are not shown as empty "" rows.
+  const visibleSegments = localizedSegments.filter((s) => (s.sourceText || s.translatedText).trim().length > 0);
+
   const totalWordsTranslated = localizedSegments.reduce(
     (sum, s) => sum + (s.translatedText.split(/\s+/).filter(Boolean).length || 1),
     0
@@ -136,7 +149,30 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
 
   return (
     <div className="space-y-8 animate-fade-in">
+      {/* Once translated, the picker collapses to one line so the translations sit right below it. */}
+      {!isPickerVisible && (
+        <div className="glass-panel p-4 sm:p-5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <span className="font-semibold text-[#0F172A]">Dubbing {sourceLang.name} into</span>
+            {selectedLangs.map((lang) => (
+              <span key={lang.code} className="px-2.5 py-1 rounded-lg bg-[#F05637]/10 border border-[#F05637]/30 text-[#D94B2E] font-semibold">
+                {lang.name}
+              </span>
+            ))}
+            <span className="text-[#94A3B8]">· {stylesList.find((s) => s.id === translationStyle)?.label} style</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowPicker(true)}
+            className="px-3 py-1.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs font-semibold text-[#64748B] hover:text-[#0F172A] hover:border-[#CBD5E1]"
+          >
+            Change languages or style
+          </button>
+        </div>
+      )}
+
       {/* Header & Language Selection Card */}
+      {isPickerVisible && (
       <div className="glass-panel p-6 sm:p-8 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#E2E8F0]">
           <div>
@@ -235,7 +271,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
         </div>
 
         {/* Language Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 max-h-56 overflow-y-auto custom-scrollbar pr-1">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
           {filteredLanguages.map((lang: Language) => {
             const isSelected = targetLanguageCodes.includes(lang.code);
             return (
@@ -254,7 +290,13 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
                 <div className="min-w-0 flex-1">
                   <div className="text-xs font-bold truncate flex items-center justify-between">
                     <span>{lang.name}</span>
-                    {isSelected && <CheckCircle2 className="w-3.5 h-3.5 text-[#D94B2E]" />}
+                    {isSelected ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#D94B2E]" />
+                    ) : (
+                      alreadyDubbedCodes.includes(lang.code) && (
+                        <span className="text-[9px] font-semibold uppercase tracking-wide text-emerald-600">Dubbed</span>
+                      )
+                    )}
                   </div>
                   <div className="text-[10px] text-[#64748B] truncate font-sans">
                     {lang.nativeName}
@@ -328,37 +370,8 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
           </div>
         </div>
 
-        {/* Generate Translation CTA Button */}
-        <div className="pt-2">
-          <button
-            type="button"
-            onClick={onGenerateTranslation}
-            disabled={isTranslating || selectedLangs.length === 0}
-            className="w-full flex items-center justify-center gap-2 py-3.5 px-6 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white font-semibold text-sm shadow-[0_0_25px_rgba(240,86,55,0.3)] transition-all duration-200 disabled:opacity-50"
-          >
-            {isTranslating ? (
-              <>
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                <span>
-                  {selectedLangs.length > 1
-                    ? `Translating into ${selectedLangs.length} languages...`
-                    : `Translating into ${targetLang.name}...`}
-                </span>
-              </>
-            ) : (
-              <>
-                <Sparkles className="w-4 h-4 text-[#D94B2E]" />
-                <span>
-                  {hasGeneratedTranslation ? 'Regenerate' : 'Generate'}{' '}
-                  {selectedLangs.length > 1
-                    ? `Translations (${selectedLangs.length} languages)`
-                    : `Translation (${selectedLangs[0]?.name ?? 'no language selected'})`}
-                </span>
-              </>
-            )}
-          </button>
-        </div>
       </div>
+      )}
 
       {/* Side-by-Side Translation Comparison */}
       {hasGeneratedTranslation && (
@@ -394,26 +407,6 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
             </div>
           )}
 
-          <div className="flex flex-wrap items-center justify-between gap-4 p-4 rounded-2xl glass-panel">
-            <div className="flex items-center gap-3">
-              <span className="px-2.5 py-1 rounded-full bg-[#F05637]/20 text-[#D94B2E] text-xs font-semibold border border-[#F05637]/30">
-                AI localized {totalWordsTranslated} words into {targetLang.name}
-              </span>
-              <span className="text-xs text-[#64748B]">
-                Aligned across {localizedSegments.length} timestamp segments
-                {selectedLangs.length > 1 && ` · ${selectedLangs.length} languages queued for dubbing`}
-              </span>
-            </div>
-
-            <button
-              type="button"
-              onClick={onContinueToVoice}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all"
-            >
-              <span>Continue to Voice</span>
-              <ArrowRight className="w-3.5 h-3.5" />
-            </button>
-          </div>
 
           {/* Dual Column Side-by-Side Table Header */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -437,8 +430,8 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
           </div>
 
           {/* Dual Column Rows */}
-          <div className="space-y-3 max-h-[580px] overflow-y-auto custom-scrollbar pr-1">
-            {localizedSegments.map((loc) => {
+          <div className="space-y-3">
+            {visibleSegments.map((loc) => {
               const orig = transcriptSegments.find((t) => t.id === loc.segmentId);
               const isEditing = editingLocId === loc.id;
               const isSpeakingThis = activeSpeechLocId === loc.id;
@@ -535,6 +528,54 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
           </div>
         </div>
       )}
+
+      <StickyActionBar
+        summary={
+          isTranslating ? (
+            <span>Translating — this usually takes a few seconds per language…</span>
+          ) : hasGeneratedTranslation && !isPickerVisible ? (
+            <span>
+              <strong className="text-[#0F172A]">{totalWordsTranslated} words</strong> in {targetLang.name} across{' '}
+              {visibleSegments.length} lines · click any line to edit it
+            </span>
+          ) : selectedLangs.length === 0 ? (
+            <span>Pick at least one language above to continue</span>
+          ) : (
+            <span>
+              <strong className="text-[#0F172A]">{selectedLangs.length}</strong> language{selectedLangs.length > 1 ? 's' : ''} selected:{' '}
+              {selectedLangs.map((l) => l.name).join(', ')}
+            </span>
+          )
+        }
+      >
+        {isPickerVisible && (
+          <button
+            type="button"
+            onClick={onGenerateTranslation}
+            disabled={isTranslating || selectedLangs.length === 0}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-sm font-semibold shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            {isTranslating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+            <span>
+              {isTranslating ? 'Translating…' : hasGeneratedTranslation ? 'Regenerate translation' : 'Translate'}
+            </span>
+          </button>
+        )}
+        {hasGeneratedTranslation && !isTranslating && (
+          <button
+            type="button"
+            onClick={onContinueToVoice}
+            className={`flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+              isPickerVisible
+                ? 'bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] hover:border-[#CBD5E1]'
+                : 'bg-[#F05637] hover:bg-[#D94B2E] text-white shadow-[0_0_20px_rgba(240,86,55,0.3)]'
+            }`}
+          >
+            <span>Continue to Voice</span>
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        )}
+      </StickyActionBar>
     </div>
   );
 };

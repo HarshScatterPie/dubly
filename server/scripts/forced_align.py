@@ -434,6 +434,18 @@ def main():
         if request.get("cmd") == "shutdown":
             break
 
+        # Loads a language's model ahead of time, so it is ready by the time the transcript arrives.
+        if request.get("cmd") == "warm":
+            try:
+                from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+
+                token = os.environ.get("HF_TOKEN") or None
+                model, _processor, repo, err = get_model(request.get("language", "en"), token, Wav2Vec2ForCTC, Wav2Vec2Processor)
+                respond({"ok": model is not None, "model": repo, "error": err})
+            except Exception as err:
+                respond({"ok": False, "error": str(err)})
+            continue
+
         if request.get("probe"):
             from importlib.util import find_spec
 

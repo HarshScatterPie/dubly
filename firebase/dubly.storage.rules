@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// REFERENCE FRAGMENT: not deployed from this repo (see firebase/dubly.firestore.rules and docs/FIREBASE-RULES.md).
+// All Dubly media is written and read by the backend (Admin SDK) and handed to browsers only as signed URLs, so no client
+// read or write is needed. Storage ORs matching rules together, like Firestore.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /workspaces/{allPaths=**} { allow read, write: if false; }
+    match /users/{uid}/voices/{allPaths=**} { allow read, write: if false; }
+    match /users/{uid}/projects/{allPaths=**} { allow read, write: if false; }
+  }
+}

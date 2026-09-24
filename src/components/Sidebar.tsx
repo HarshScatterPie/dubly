@@ -13,6 +13,7 @@ import {
   FolderKanban,
   History,
   BarChart3,
+  Users,
   Settings,
   ChevronLeft,
   ChevronRight,
@@ -43,6 +44,7 @@ const NAV = [
 ];
 
 const NAV_BOTTOM = [
+  { id: 'team' as NavigationTab, label: 'Team', Icon: Users },
   { id: 'usage' as NavigationTab, label: 'Usage & Limits', Icon: BarChart3 },
   { id: 'settings' as NavigationTab, label: 'Settings', Icon: Settings },
 ];
@@ -191,6 +193,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 style={{ width: `${Math.min(100, minutesPercent)}%` }}
               />
             </div>
+            {usage.resetsAt && (
+              <p className="mt-1.5 text-[10px] text-slate-500">
+                {usage.minutesDubbed >= usage.minutesLimit ? 'Limit reached · refreshes ' : 'Refreshes '}
+                {new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
+              </p>
+            )}
           </div>
         )}
 

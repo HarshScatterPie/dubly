@@ -31,8 +31,32 @@ export class ProjectService {
     return apiUpload<DubbingProject>(`/api/projects/${projectId}/upload`, file);
   }
 
-  public importSample(projectId: string, sourceUrl: string, fileName: string): Promise<DubbingProject> {
-    return apiPost<DubbingProject>(`/api/projects/${projectId}/import-sample`, { sourceUrl, fileName });
+  // Samples are named by id; the server looks up the URL itself and fetches nothing else.
+  public importSample(projectId: string, sampleId: string): Promise<DubbingProject> {
+    return apiPost<DubbingProject>(`/api/projects/${projectId}/import-sample`, { sampleId });
+  }
+
+  public getJob(projectId: string, jobId: string): Promise<JobView> {
+    return apiGet<JobView>(`/api/projects/${projectId}/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  public cancelJob(projectId: string, jobId: string): Promise<JobView> {
+    return apiPost<JobView>(`/api/projects/${projectId}/jobs/${encodeURIComponent(jobId)}/cancel`);
+  }
+
+  /** Polls a job until it settles. A few failed polls in a row (a network blip) are tolerated before giving up. */
+  private async waitForJob(projectId: string, jobId: string): Promise<JobView> {
+    let failures = 0;
+    for (;;) {
+      try {
+        const job = await this.getJob(projectId, jobId);
+        failures = 0;
+        if (job.settled) return job;
+      } catch (err) {
+        if (++failures >= 5) throw err;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
   }
 
   public async transcribe(
@@ -47,9 +71,12 @@ export class ProjectService {
     removedSegments: number;
     sanitizeNote: string;
   }> {
-    const result = await apiPost<
-      DubbingProject & { detectedLanguage: string; removedSegments?: number; sanitizeNote?: string }
-    >(`/api/projects/${projectId}/transcribe`);
+    // Runs as a background job on the server; this waits for it by polling instead of holding one request open for minutes.
+    const { jobId } = await apiPost<{ jobId: string }>(`/api/projects/${projectId}/transcribe`, undefined, { Prefer: 'respond-async' });
+    const job = await this.waitForJob(projectId, jobId);
+    if (job.status !== 'completed') throw new Error(job.message || 'Analysis failed. Please try again.');
+    const project = await this.get(projectId);
+    const result = { ...project, ...(job.result as { detectedLanguage: string; removedSegments?: number; sanitizeNote?: string }) };
     return {
       sourceLanguageCode: result.sourceLanguage,
       transcriptSegments: result.transcriptSegments,
@@ -99,6 +126,17 @@ export class ProjectService {
     return apiPost<{ url: string }>(`/api/projects/${projectId}/export-video`, { captions, languageCode });
   }
 
+  /** Creates a public watch link for one language's dub that stops working after 24 hours. */
+  public async createShareLink(projectId: string, languageCode: string): Promise<{ url: string; expiresAt: string; shareId: string }> {
+    const res = await apiPost<{ path: string; expiresAt: string; shareId: string }>(`/api/projects/${projectId}/share`, { languageCode });
+    return { url: `${window.location.origin}${res.path}`, expiresAt: res.expiresAt, shareId: res.shareId };
+  }
+
+  /** Turns a share link off before it expires; its video stops playing within two hours at most. */
+  public revokeShareLink(projectId: string, shareId: string): Promise<void> {
+    return apiDelete(`/api/projects/${projectId}/shares/${encodeURIComponent(shareId)}`);
+  }
+
   public startDub(
     projectId: string,
     opts: {
@@ -116,9 +154,22 @@ export class ProjectService {
       /** Render only these languages. Omit to render every language the project targets. */
       languages?: string[];
     }
-  ): Promise<{ status: string }> {
-    return apiPost<{ status: string }>(`/api/projects/${projectId}/dub`, opts);
+  ): Promise<{ status: string; jobId?: string }> {
+    // One key per start: if this request is retried the server hands back the same job instead of starting (and charging) a second one.
+    return apiPost<{ status: string; jobId?: string }>(`/api/projects/${projectId}/dub`, opts, { 'Idempotency-Key': crypto.randomUUID() });
   }
+}
+
+/** A server job (dub or transcription) as the API reports it. */
+export interface JobView {
+  id: string;
+  type: 'dub' | 'transcribe';
+  status: 'queued' | 'running' | 'completed' | 'partially_completed' | 'failed' | 'cancelled';
+  settled: boolean;
+  progress: number;
+  message: string | null;
+  errorCode: string | null;
+  result: Record<string, unknown> | null;
 }
 
 export const projectService = new ProjectService();

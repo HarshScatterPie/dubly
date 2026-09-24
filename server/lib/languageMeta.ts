@@ -8,6 +8,53 @@ export function getLanguageBcp47(appLangCode: string): string {
   return LANGUAGES.find((l) => l.code === appLangCode)?.bcp47 || 'en-US';
 }
 
+// Script each language must be written in; romanized output breaks the CTC aligner and TTS pronunciation.
+interface ScriptRule {
+  instruction: string;
+  pattern: RegExp;
+}
+
+const NATIVE = (script: string, name: string, extra = ''): string =>
+  `Write ONLY in the native ${script} script of ${name}. Never romanize or transliterate into Latin letters. English loanwords that were spoken must also be written in ${script} as they are pronounced; only brand names and acronyms may stay in Latin.${extra}`;
+
+const SCRIPT_RULES: Record<string, ScriptRule> = {
+  hi: {
+    instruction: NATIVE('Devanagari', 'Hindi', ' Use pure, natural spoken Hindi vocabulary — do not mix in English words where a common Hindi word exists.'),
+    pattern: /\p{Script=Devanagari}/u,
+  },
+  hinglish: {
+    instruction:
+      'Write Hinglish: natural urban conversational Hindi mixed with everyday English words, the way young Indians text and talk. Write the WHOLE line in Roman (Latin) script — Hindi words romanized phonetically (e.g. "Aap kaise ho? Yeh product bahut useful hai."). Never use Devanagari.',
+    pattern: /\p{Script=Latin}/u,
+  },
+  mr: { instruction: NATIVE('Devanagari', 'Marathi'), pattern: /\p{Script=Devanagari}/u },
+  ta: { instruction: NATIVE('Tamil', 'Tamil'), pattern: /\p{Script=Tamil}/u },
+  te: { instruction: NATIVE('Telugu', 'Telugu'), pattern: /\p{Script=Telugu}/u },
+  bn: { instruction: NATIVE('Bengali', 'Bengali'), pattern: /\p{Script=Bengali}/u },
+  gu: { instruction: NATIVE('Gujarati', 'Gujarati'), pattern: /\p{Script=Gujarati}/u },
+  kn: { instruction: NATIVE('Kannada', 'Kannada'), pattern: /\p{Script=Kannada}/u },
+  ml: { instruction: NATIVE('Malayalam', 'Malayalam'), pattern: /\p{Script=Malayalam}/u },
+  pa: { instruction: NATIVE('Gurmukhi', 'Punjabi'), pattern: /\p{Script=Gurmukhi}/u },
+  ja: { instruction: 'Write in natural Japanese script (kanji and kana). Never use romaji.', pattern: /[\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Han}]/u },
+  ko: { instruction: 'Write in Hangul. Never romanize.', pattern: /\p{Script=Hangul}/u },
+  ar: { instruction: 'Write in Arabic script. Never romanize.', pattern: /\p{Script=Arabic}/u },
+};
+
+export function getScriptInstruction(appLangCode: string): string {
+  return SCRIPT_RULES[appLangCode]?.instruction ?? '';
+}
+
+/** True when most of the letters in `text` are in the language's expected script. Languages without a rule (Latin-script European ones) always pass. */
+export function isInExpectedScript(text: string, appLangCode: string): boolean {
+  const rule = SCRIPT_RULES[appLangCode];
+  if (!rule) return true;
+  const letters = [...text].filter((ch) => /\p{L}/u.test(ch));
+  if (letters.length === 0) return true;
+  const matching = letters.filter((ch) => rule.pattern.test(ch)).length;
+  // Majority test, since brand names and acronyms legitimately stay in Latin.
+  return matching / letters.length >= 0.6;
+}
+
 /**
  * Gemini reports the detected source language as a plain name (e.g. "English" or
  * "Hindi"), not a code. Maps that onto our app's language codes so the *actually

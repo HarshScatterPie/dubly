@@ -7,14 +7,18 @@ import React, { Suspense, lazy, useEffect, useState } from 'react';
 import { DubbingProject, NavigationTab, ToastMessage, UserUsageStats } from './types';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
-import { WaveLoader } from './components/WaveLoader';
+import { BrandLoader, BrandSplash } from './components/BrandLoader';
 import { Dashboard } from './components/Dashboard';
 import { ToastContainer } from './components/Toast';
 import { Login } from './components/Login';
 import { useAuth } from './context/AuthContext';
 import { textToSpeechService } from './services/textToSpeechService';
 import { projectService } from './services/projectService';
-import { apiGet } from './lib/apiClient';
+import { apiGet, type ApiError } from './lib/apiClient';
+import { workspaceService, type WorkspaceInfo } from './services/workspaceService';
+import { InviteAcceptDialog, takeInviteTokenFromUrl } from './components/InviteAcceptDialog';
+
+takeInviteTokenFromUrl();
 
 // Code-split everything past the landing dashboard: the single bundle these used to share
 // with it was 600KB+ and loaded in full before a first paint, even for a user who only ever
@@ -33,6 +37,7 @@ const ProjectsHistory = lazy(() =>
   import('./components/ProjectsHistory').then((m) => ({ default: m.ProjectsHistory }))
 );
 const UsageView = lazy(() => import('./components/UsageView').then((m) => ({ default: m.UsageView })));
+const TeamView = lazy(() => import('./components/TeamView').then((m) => ({ default: m.TeamView })));
 const ProjectWorkspace = lazy(() =>
   import('./components/ProjectWorkspace').then((m) => ({ default: m.ProjectWorkspace }))
 );
@@ -52,12 +57,18 @@ const EMPTY_USAGE: UserUsageStats = {
 };
 
 export default function App() {
-  const { user, loading: authLoading } = useAuth();
+  const { user, loading: authLoading, signOut } = useAuth();
+  // The caller's team and role; `accessError` is set when they were removed from their workspace.
+  const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
+  const [workspaceAccessError, setWorkspaceAccessError] = useState<string | null>(null);
+  const isAdmin = workspace?.myRole === 'admin';
 
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
   const [projects, setProjects] = useState<DubbingProject[]>([]);
   const [activeWorkspaceProject, setActiveWorkspaceProject] = useState<DubbingProject | null>(null);
   const [initialDubSampleId, setInitialDubSampleId] = useState<string | null>(null);
+  // A finished project being dubbed into more languages, so the studio can reuse its upload and transcript.
+  const [redubProject, setRedubProject] = useState<DubbingProject | null>(null);
   const [usage, setUsage] = useState<UserUsageStats>(EMPTY_USAGE);
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
@@ -122,12 +133,52 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, user]);
 
+  useEffect(() => {
+    if (!user) {
+      setWorkspace(null);
+      setWorkspaceAccessError(null);
+      return;
+    }
+    workspaceService
+      .get()
+      .then((ws) => {
+        setWorkspace(ws);
+        setWorkspaceAccessError(null);
+      })
+      .catch((err) => {
+        if ((err as ApiError).status === 403) setWorkspaceAccessError((err as Error).message);
+        else showToast('Failed to Load Workspace', (err as Error).message, 'error');
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
+
+  // After joining a team through an invitation everything the app holds belongs to the old workspace, so it is all re-read.
+  const handleJoinedWorkspace = async (workspaceName: string) => {
+    try {
+      setWorkspace(await workspaceService.get());
+      setWorkspaceAccessError(null);
+    } catch (err) {
+      showToast('Failed to Load Workspace', (err as Error).message, 'error');
+    }
+    setActiveWorkspaceProject(null);
+    setActiveTab('dashboard');
+    await refreshProjectsAndUsage(true);
+    showToast('Joined Workspace', `You are now working in ${workspaceName}.`, 'success');
+  };
+
   const handleDismissToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   };
 
   const handleStartDubbing = (sampleId?: string) => {
     setInitialDubSampleId(sampleId || null);
+    setRedubProject(null);
+    setActiveTab('dubbing');
+  };
+
+  const handleRedubProject = (project: DubbingProject) => {
+    setRedubProject(project);
+    setInitialDubSampleId(null);
     setActiveTab('dubbing');
   };
 
@@ -187,21 +238,39 @@ export default function App() {
   };
 
   if (authLoading) {
-    return (
-      <div className="min-h-screen bg-background flex items-center justify-center">
-        <WaveLoader label="loading studio…" />
-      </div>
-    );
+    return <BrandSplash />;
   }
 
   if (!user) {
     return <Login />;
   }
 
+  // Removed from their workspace: nothing else in the app would work, so say so plainly instead of failing every request.
+  if (workspaceAccessError) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center px-4">
+        <div className="w-full max-w-sm glass-panel rounded-2xl p-8 text-center space-y-4 shadow-lg">
+          <h1 className="text-lg font-bold text-foreground">No workspace access</h1>
+          <p className="text-sm text-muted-foreground">{workspaceAccessError}</p>
+          <button
+            type="button"
+            onClick={() => void signOut()}
+            className="w-full py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white text-sm font-semibold"
+          >
+            Sign out
+          </button>
+        </div>
+        <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
+        <InviteAcceptDialog onJoined={handleJoinedWorkspace} onShowToast={showToast} />
+      </div>
+    );
+  }
+
   return (
     <div className="h-screen bg-background text-foreground flex flex-col antialiased selection:bg-coral-500 selection:text-white overflow-hidden">
       {/* Toast Notification Container */}
       <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
+      {workspace && <InviteAcceptDialog onJoined={handleJoinedWorkspace} onShowToast={showToast} />}
 
       {/* Main Layout Body */}
       <div className="flex-1 flex overflow-hidden">
@@ -238,7 +307,7 @@ export default function App() {
             <Suspense
               fallback={
                 <div className="flex items-center justify-center py-24">
-                  <WaveLoader label="loading…" />
+                  <BrandLoader label="Loading…" />
                 </div>
               }
             >
@@ -251,14 +320,15 @@ export default function App() {
                 }}
                 onOpenProject={handleOpenWorkspace}
                 onStartWithSample={(sampleId) => handleStartDubbing(sampleId)}
-                onDeleteProject={handleDeleteProject}
+                onDeleteProject={isAdmin ? handleDeleteProject : undefined}
               />
             )}
 
             {activeTab === 'dubbing' && (
               <DubbingStudio
-                key={initialDubSampleId || 'new'}
+                key={redubProject ? `redub-${redubProject.id}` : initialDubSampleId || 'new'}
                 initialSampleId={initialDubSampleId}
+                initialProject={redubProject}
                 onSaveProject={handleSaveProject}
                 onOpenWorkspace={handleOpenWorkspace}
                 onShowToast={showToast}
@@ -283,10 +353,15 @@ export default function App() {
                 key={historySearch.nonce}
                 projects={projects}
                 onOpenProject={handleOpenWorkspace}
-                onDeleteProject={handleDeleteProject}
+                onRedubProject={handleRedubProject}
+                onDeleteProject={isAdmin ? handleDeleteProject : undefined}
                 onNewDub={() => handleStartDubbing()}
                 initialSearchTerm={historySearch.term}
               />
+            )}
+
+            {activeTab === 'team' && workspace && (
+              <TeamView workspace={workspace} onChanged={setWorkspace} onShowToast={showToast} />
             )}
 
             {activeTab === 'usage' && (

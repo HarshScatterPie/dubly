@@ -25,6 +25,8 @@ import { LANGUAGES, VOICES } from '../../data/mockData';
 import { VideoPlayer } from '../VideoPlayer';
 import { renderService } from '../../services/renderService';
 import { projectService } from '../../services/projectService';
+import { DownloadMenu } from '../DownloadMenu';
+import { ShareDialog } from '../ShareDialog';
 
 interface StepExportProps {
   project: DubbingProject;
@@ -42,9 +44,8 @@ export const StepExport: React.FC<StepExportProps> = ({
   onShowToast,
 }) => {
   const [activeTrack, setActiveTrack] = useState<'dubbed' | 'original'>('dubbed');
-  const [selectedQuickLang, setSelectedQuickLang] = useState<string>('ta');
   const [burnCaptions, setBurnCaptions] = useState<boolean>(false);
-  const [isPreparingDownload, setIsPreparingDownload] = useState<boolean>(false);
+  const [showShare, setShowShare] = useState<boolean>(false);
   // Which language's render the player and the download buttons are pointed at. A project
   // can hold several, so every export action below is scoped to this one.
   const [viewLanguage, setViewLanguage] = useState<string>(project.targetLanguage);
@@ -93,34 +94,19 @@ export const StepExport: React.FC<StepExportProps> = ({
     }
   }, []);
 
-  /** Downloads one language's render — defaults to whichever is on screen. */
-  const handleDownloadVideo = async (languageCode = viewLanguage) => {
+  // Saves one language's render to disk, honouring the captions toggle; throws so callers can report per-language failures.
+  const downloadLanguageVideo = async (languageCode: string) => {
     const entry = dubbedLanguages.find((l) => l.code === languageCode);
     const languageName = entry?.language?.name || languageCode;
-    if (!entry?.videoUrl) {
-      onShowToast('Not Ready', `The ${languageName} dub has not finished rendering.`, 'error');
-      return;
+    if (!entry?.videoUrl) throw new Error(`The ${languageName} dub has not finished rendering.`);
+    let url = entry.videoUrl;
+    if (burnCaptions) {
+      if (entry.segments.length === 0) throw new Error(`There are no ${languageName} segments to burn in.`);
+      const result = await projectService.exportVideo(project.id, true, languageCode);
+      url = result.url;
     }
-    setIsPreparingDownload(true);
-    try {
-      const suffix = burnCaptions ? 'Dub_CC' : 'Dub';
-      let url = entry.videoUrl;
-      if (burnCaptions) {
-        if (entry.segments.length === 0) {
-          onShowToast('No Captions Available', `There are no ${languageName} segments to burn in.`, 'error');
-          return;
-        }
-        onShowToast('Preparing Captions', 'Burning captions into the video — this can take a moment on first download.', 'info');
-        const result = await projectService.exportVideo(project.id, true, languageCode);
-        url = result.url;
-      }
-      await renderService.downloadMedia(`${project.title.replace(/\s+/g, '_')}_${languageName}_${suffix}.mp4`, url);
-      onShowToast('Video Download Started', `${languageName} dubbed master download queued.`, 'success');
-    } catch (err) {
-      onShowToast('Download Failed', (err as Error).message, 'error');
-    } finally {
-      setIsPreparingDownload(false);
-    }
+    const suffix = burnCaptions ? 'Dub_CC' : 'Dub';
+    await renderService.downloadMedia(`${project.title.replace(/\s+/g, '_')}_${languageName}_${suffix}.mp4`, url);
   };
 
   const handleDownloadAudio = async () => {
@@ -151,123 +137,86 @@ export const StepExport: React.FC<StepExportProps> = ({
     onShowToast('Subtitles Exported', 'VTT subtitle file downloaded successfully.', 'success');
   };
 
-  const handleCopyShareLink = () => {
-    navigator.clipboard.writeText(window.location.href);
-    onShowToast('Link Copied', 'Shareable studio link copied to clipboard.', 'info');
-  };
-
   const formatDuration = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const quickLanguages = [
-    { code: 'hi', name: 'Hindi', flag: '🇮🇳' },
-    { code: 'ta', name: 'Tamil', flag: '🇮🇳' },
-    { code: 'te', name: 'Telugu', flag: '🇮🇳' },
-    { code: 'bn', name: 'Bengali', flag: '🇮🇳' },
-    { code: 'mr', name: 'Marathi', flag: '🇮🇳' },
-    { code: 'es', name: 'Spanish', flag: '🇪🇸' },
-    { code: 'fr', name: 'French', flag: '🇫🇷' },
-    { code: 'ja', name: 'Japanese', flag: '🇯🇵' },
-  ].filter((l) => !dubbedLanguages.some((d) => d.code === l.code));
+  // Every language not yet in this project, so another can be added without re-uploading.
+  const moreLanguages = LANGUAGES.filter((l) => !dubbedLanguages.some((d) => d.code === l.code) && l.code !== project.sourceLanguage);
+  const readyCount = dubbedLanguages.filter((l) => l.videoUrl).length;
 
   return (
-    <div className="space-y-8 animate-fade-in">
-      {/* Title & Success Banner */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-6 rounded-3xl bg-gradient-to-r from-[#F05637]/20 via-[#FFFFFF] to-[#FFFFFF] border border-[#F05637]/40 glass-panel">
-        <div className="flex items-center gap-3.5">
-          <div className="w-12 h-12 rounded-2xl bg-emerald-50/90 text-emerald-600 border border-emerald-200/60 flex items-center justify-center shadow-lg">
-            <CheckCircle2 className="w-6 h-6" />
+    <div className="space-y-6 animate-fade-in">
+      {/* Success banner */}
+      <div className="relative overflow-hidden rounded-3xl glass-panel p-6 sm:p-7">
+        <div aria-hidden className="pointer-events-none absolute -top-24 -left-16 w-72 h-72 rounded-full bg-[#F05637]/10 blur-3xl" />
+        <div className="relative flex flex-col sm:flex-row sm:items-center justify-between gap-5">
+          <div className="flex items-center gap-4">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-500 text-white flex items-center justify-center shadow-[0_8px_24px_rgba(16,185,129,0.35)]">
+              <CheckCircle2 className="w-6 h-6" />
+            </div>
+            <div>
+              <h3 className="text-xl sm:text-2xl font-bold text-[#0F172A] tracking-tight">Your dub is ready</h3>
+              <p className="text-xs text-[#64748B] mt-0.5">
+                {dubbedLanguages.length > 1
+                  ? `${readyCount} of ${dubbedLanguages.length} languages rendered from one upload · ${formatDuration(project.videoDuration)}`
+                  : `${sourceLang.name} → ${targetLang.name} · voiced by ${voice.name.replace(/\s*\(.*\)$/, '')} · ${formatDuration(project.videoDuration)}`}
+              </p>
+            </div>
           </div>
-          <div>
-            <h3 className="text-xl sm:text-2xl font-bold text-[#0F172A] tracking-tight">
-              Your dub is ready.
-            </h3>
-            <p className="text-xs text-[#64748B] mt-0.5">
-              {dubbedLanguages.length > 1
-                ? `High-definition video rendered in ${dubbedLanguages.length} languages from one upload`
-                : `High-definition video rendered with synchronized ${targetLang.name} voiceover`}
-            </p>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setShowShare(true)}
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-white hover:bg-[#F8FAFC] text-[#0F172A] text-xs font-semibold border border-[#E2E8F0] transition-colors"
+            >
+              <Share2 className="w-3.5 h-3.5 text-[#D94B2E]" />
+              <span>Share</span>
+            </button>
+            <button
+              type="button"
+              onClick={onOpenWorkspace}
+              className="flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-[#0F172A] hover:bg-[#1E293B] text-white text-xs font-semibold transition-colors"
+            >
+              <span>Open in Timeline</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </button>
           </div>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={handleCopyShareLink}
-            className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#0F172A] text-xs font-semibold border border-[#E2E8F0] transition-colors"
-          >
-            <Share2 className="w-3.5 h-3.5" />
-            <span>Share</span>
-          </button>
-          <button
-            type="button"
-            onClick={onOpenWorkspace}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-md shadow-[0_0_15px_rgba(240,86,55,0.3)] transition-all"
-          >
-            <span>Open in Timeline</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </button>
         </div>
       </div>
 
-      {/* Main Grid: Video Player + Export Actions */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Left: Video Player */}
-        <div className="lg:col-span-7 space-y-4">
-          {/* One row per rendered language: switches the player and every export action
-              below onto that language, and downloads it directly. */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* Player */}
+        <div className="lg:col-span-7 space-y-3">
           {dubbedLanguages.length > 1 && (
-            <div className="p-2 rounded-2xl glass-panel space-y-1.5">
+            <div className="flex items-center gap-1.5 overflow-x-auto custom-scrollbar pb-1">
               {dubbedLanguages.map((entry) => {
                 const isActive = entry.code === viewLanguage;
-                const isReady = entry.status === 'completed' && Boolean(entry.videoUrl);
+                const isReady = Boolean(entry.videoUrl);
                 return (
-                  <div
+                  <button
                     key={entry.code}
-                    className={`flex items-center gap-2 p-2 rounded-xl transition-colors ${
-                      isActive ? 'bg-[#F05637]/10 ring-1 ring-[#F05637]' : 'hover:bg-[#F8FAFC]'
+                    type="button"
+                    onClick={() => isReady && setViewLanguage(entry.code)}
+                    disabled={!isReady}
+                    title={isReady ? `Preview the ${entry.language!.name} dub` : entry.message || 'Did not render'}
+                    className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                      isActive
+                        ? 'bg-[#F05637] border-[#F05637] text-white shadow-[0_0_15px_rgba(240,86,55,0.3)]'
+                        : 'bg-white border-[#E2E8F0] text-[#64748B] hover:text-[#0F172A] hover:border-[#CBD5E1]'
                     }`}
                   >
-                    <button
-                      type="button"
-                      onClick={() => isReady && setViewLanguage(entry.code)}
-                      disabled={!isReady}
-                      className="flex items-center gap-2.5 flex-1 min-w-0 text-left disabled:cursor-not-allowed"
-                    >
-                      <span className="text-lg shrink-0">{entry.language!.flag}</span>
-                      <span className="min-w-0">
-                        <span className="text-xs font-bold text-[#0F172A] block truncate">
-                          {entry.language!.name}
-                        </span>
-                        <span className="text-[10px] text-[#64748B] block truncate">
-                          {isReady
-                            ? isActive
-                              ? 'Now previewing'
-                              : 'Ready to preview'
-                            : entry.message || 'Did not render'}
-                        </span>
-                      </span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleDownloadVideo(entry.code)}
-                      disabled={!isReady || isPreparingDownload}
-                      title={`Download the ${entry.language!.name} dub`}
-                      className="flex items-center gap-1.5 shrink-0 px-3 py-1.5 rounded-lg bg-[#F8FAFC] hover:bg-[#E2E8F0] border border-[#E2E8F0] text-[11px] font-semibold text-[#0F172A] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <Download className="w-3 h-3 text-[#D94B2E]" />
-                      <span>MP4</span>
-                    </button>
-                  </div>
+                    <span>{entry.language!.name}</span>
+                    {!isReady && <span className="text-[10px] font-normal">· failed</span>}
+                  </button>
                 );
               })}
             </div>
           )}
 
-          <div className="relative rounded-2xl overflow-hidden border border-[#E2E8F0] shadow-2xl bg-[#FFFFFF]">
+          <div className="relative rounded-2xl overflow-hidden border border-[#E2E8F0] shadow-[0_24px_60px_rgba(15,23,42,0.12)] bg-[#0F172A]">
             <VideoPlayer
               src={active?.videoUrl || project.videoUrl}
               originalSrc={project.videoUrl}
@@ -280,54 +229,54 @@ export const StepExport: React.FC<StepExportProps> = ({
             />
           </div>
 
-          {/* Video Metadata Breakdown */}
-          <div className="p-4 rounded-2xl glass-panel grid grid-cols-3 gap-3 text-xs">
-            <div>
-              <span className="text-[#94A3B8] block text-[10px]">Translation</span>
-              <span className="font-bold text-[#0F172A] mt-0.5 flex items-center gap-1.5">
-                <span>{sourceLang.name}</span>
-                <span className="text-[#D94B2E]">↓</span>
-                <span className="text-[#D94B2E]">{targetLang.name}</span>
-              </span>
-            </div>
-
-            <div>
-              <span className="text-[#94A3B8] block text-[10px]">Audio Voice</span>
-              <span className="font-bold text-[#0F172A] mt-0.5 block truncate">
-                {voice.name} · {voice.accent.split(' ')[0]}
-              </span>
-            </div>
-
-            <div>
-              <span className="text-[#94A3B8] block text-[10px]">Duration</span>
-              <span className="font-mono font-bold text-[#0F172A] mt-0.5 block">
-                {formatDuration(project.videoDuration)}
-              </span>
-            </div>
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: 'Language', value: `${sourceLang.name} → ${targetLang.name}` },
+              { label: 'Voice', value: voice.name.replace(/\s*\(.*\)$/, '') },
+              { label: 'Duration', value: formatDuration(project.videoDuration) },
+            ].map((item) => (
+              <div key={item.label} className="p-3 rounded-2xl glass-panel">
+                <span className="text-[10px] uppercase tracking-wider text-[#94A3B8] block">{item.label}</span>
+                <span className="text-xs font-bold text-[#0F172A] mt-0.5 block truncate">{item.value}</span>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Right: Export Downloads & Multilingual Version Creator */}
-        <div className="lg:col-span-5 space-y-6">
-          {/* Main Download Options */}
-          <div className="rounded-3xl glass-panel p-6 space-y-5">
-            <h4 className="text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
-              Export Outputs
-            </h4>
+        {/* Exports */}
+        <div className="lg:col-span-5 space-y-4">
+          {/* Raised so the language dropdown opens over the cards below instead of under them. */}
+          <div className="relative z-20 rounded-3xl glass-panel p-5 space-y-4">
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-bold text-[#0F172A]">Download</h4>
+              <span className="text-[11px] text-[#94A3B8]">MP4 · 1080p</span>
+            </div>
 
-            {/* Burn-in Captions Toggle */}
+            <DownloadMenu
+              languages={dubbedLanguages.map((entry) => ({
+                code: entry.code,
+                name: entry.language!.name,
+                nativeName: entry.language!.nativeName,
+                ready: Boolean(entry.videoUrl),
+                statusLabel: entry.status === 'failed' ? entry.message || 'Dubbing failed' : 'Still rendering',
+              }))}
+              onDownload={downloadLanguageVideo}
+              onShowToast={onShowToast}
+              sublabel={`Synced dub${burnCaptions ? ' + captions' : ''}`}
+            />
+
             <button
               type="button"
+              role="switch"
+              aria-checked={burnCaptions}
               onClick={() => setBurnCaptions((v) => !v)}
-              className="w-full flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] transition-colors"
+              className="w-full flex items-center justify-between gap-3 px-1"
             >
-              <div className="flex items-center gap-2 text-xs font-semibold text-[#0F172A]">
+              <span className="flex items-center gap-2 text-xs text-[#0F172A]">
                 <FileText className="w-3.5 h-3.5 text-[#F05637]" />
-                <span>Burn in captions (CC)</span>
-              </div>
-              <span
-                className={`relative w-9 h-5 rounded-full transition-colors ${burnCaptions ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}
-              >
+                <span>Burn captions into the video</span>
+              </span>
+              <span className={`relative w-9 h-5 rounded-full transition-colors ${burnCaptions ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
                 <span
                   className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
                     burnCaptions ? 'translate-x-4' : 'translate-x-0.5'
@@ -336,99 +285,86 @@ export const StepExport: React.FC<StepExportProps> = ({
               </span>
             </button>
 
-            {/* Download Video Button */}
-            <button
-              type="button"
-              // Wrapped, not passed directly: React would hand the click event in as the
-              // languageCode argument, and the default only applies to `undefined`.
-              onClick={() => handleDownloadVideo()}
-              disabled={isPreparingDownload || !active?.videoUrl}
-              className="w-full flex items-center justify-between p-3.5 rounded-2xl bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white shadow-[0_0_25px_rgba(240,86,55,0.3)] transition-all group disabled:opacity-60"
-            >
-              <div className="flex items-center gap-3 text-left">
-                <div className="w-10 h-10 rounded-xl bg-white/20 flex items-center justify-center">
-                  <Video className="w-5 h-5" />
-                </div>
-                <div>
-                  <span className="text-sm font-bold block">
-                    {isPreparingDownload ? 'Preparing...' : 'Download Video'}
-                  </span>
-                  <span className="text-[11px] text-coral-700 block font-mono">
-                    1080p MP4 · Synced Dub{burnCaptions ? ' + Captions' : ''}
-                  </span>
-                </div>
-              </div>
-              <Download className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
-            </button>
-
-            {/* Subtitle Downloads (SRT / VTT) */}
-            <div className="grid grid-cols-2 gap-3">
-              <button
-                type="button"
-                onClick={handleDownloadSRT}
-                className="flex items-center justify-center gap-2 p-3 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] border border-[#E2E8F0] text-[#0F172A] text-xs font-semibold transition-colors"
-              >
-                <FileText className="w-4 h-4 text-[#D94B2E]" />
-                <span>Download SRT</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={handleDownloadVTT}
-                className="flex items-center justify-center gap-2 p-3 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] border border-[#E2E8F0] text-[#0F172A] text-xs font-semibold transition-colors"
-              >
-                <FileText className="w-4 h-4 text-teal-600" />
-                <span>Download VTT</span>
-              </button>
-            </div>
-
-            {/* Audio-Only Mode Card */}
-            <div className="pt-4 border-t border-[#E2E8F0] space-y-3">
-              <span className="text-xs font-bold text-[#0F172A] flex items-center gap-1.5">
-                <Music className="w-3.5 h-3.5 text-[#F05637]" />
-                <span>Audio-Only Mode</span>
+            <div className="pt-4 border-t border-[#E2E8F0]">
+              <span className="text-[11px] font-bold uppercase tracking-wider text-[#94A3B8] block mb-2">
+                Other formats{dubbedLanguages.length > 1 ? ` · ${targetLang.name}` : ''}
               </span>
-
-              <button
-                type="button"
-                onClick={handleDownloadAudio}
-                disabled={!active?.audioUrl}
-                className="w-full flex items-center justify-center gap-2 py-2.5 px-4 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] border border-[#E2E8F0] text-[#0F172A] text-xs font-semibold transition-colors disabled:opacity-50"
-              >
-                <Volume2 className="w-3.5 h-3.5 text-[#D94B2E]" />
-                <span>Export WAV Audio</span>
-              </button>
+              <div className="grid grid-cols-3 gap-2">
+                {[
+                  { label: 'SRT', hint: 'Subtitles', icon: FileText, onClick: handleDownloadSRT, disabled: false },
+                  { label: 'VTT', hint: 'Web subtitles', icon: FileText, onClick: handleDownloadVTT, disabled: false },
+                  { label: 'WAV', hint: 'Voice track', icon: Volume2, onClick: handleDownloadAudio, disabled: !active?.audioUrl },
+                ].map(({ label, hint, icon: Icon, onClick, disabled }) => (
+                  <button
+                    key={label}
+                    type="button"
+                    onClick={onClick}
+                    disabled={disabled}
+                    className="flex flex-col items-center gap-1 py-3 rounded-xl bg-[#F8FAFC] hover:bg-[#FFF4F1] border border-[#E2E8F0] hover:border-[#F05637]/40 transition-colors disabled:opacity-50"
+                  >
+                    <Icon className="w-4 h-4 text-[#D94B2E]" />
+                    <span className="text-xs font-bold text-[#0F172A]">{label}</span>
+                    <span className="text-[10px] text-[#94A3B8]">{hint}</span>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
 
-          {/* Create Another Language Strip (Without Re-uploading!) */}
-          <div className="rounded-3xl glass-panel border-[#F05637]/30 p-6 space-y-4">
-            <div>
-              <h4 className="text-sm font-bold text-[#0F172A] flex items-center gap-2">
-                <Languages className="w-4 h-4 text-[#F05637]" />
-                <span>Create another language</span>
-              </h4>
-              <p className="text-xs text-[#64748B] mt-0.5">
-                Localize this exact video into more languages without uploading again.
-              </p>
+          <button
+            type="button"
+            onClick={() => setShowShare(true)}
+            className="w-full flex items-center justify-between gap-3 p-5 rounded-3xl glass-panel hover:border-[#F05637]/40 text-left transition-colors group"
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-[#FFF4F1] text-[#D94B2E] flex items-center justify-center">
+                <Share2 className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-sm font-bold text-[#0F172A] block">Share a watch link</span>
+                <span className="text-xs text-[#64748B]">Anyone can watch it — expires in 24 hours</span>
+              </div>
             </div>
+            <ArrowRight className="w-4 h-4 text-[#94A3B8] group-hover:text-[#D94B2E] group-hover:translate-x-0.5 transition-all" />
+          </button>
 
-            <div className="flex flex-wrap gap-2">
-              {quickLanguages.map((qlang) => (
-                <button
-                  key={qlang.code}
-                  type="button"
-                  onClick={() => onDubAnotherLanguage(qlang.code)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F8FAFC] hover:bg-[#F05637]/20 border border-[#E2E8F0] hover:border-[#F05637]/60 text-xs font-medium text-[#0F172A] transition-all"
-                >
-                  <span>{qlang.flag}</span>
-                  <span>{qlang.name}</span>
-                </button>
-              ))}
+          {moreLanguages.length > 0 && (
+            <div className="rounded-3xl glass-panel p-5 space-y-3">
+              <div>
+                <h4 className="text-sm font-bold text-[#0F172A] flex items-center gap-2">
+                  <Languages className="w-4 h-4 text-[#F05637]" />
+                  <span>Dub into another language</span>
+                </h4>
+                <p className="text-xs text-[#64748B] mt-0.5">Same video, no re-upload.</p>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {moreLanguages.map((lang) => (
+                  <button
+                    key={lang.code}
+                    type="button"
+                    onClick={() => onDubAnotherLanguage(lang.code)}
+                    className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-[#F8FAFC] hover:bg-[#FFF4F1] border border-[#E2E8F0] hover:border-[#F05637]/50 text-xs font-medium text-[#0F172A] transition-colors"
+                  >
+                    <Plus className="w-3 h-3 text-[#D94B2E]" />
+                    <span>{lang.name}</span>
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
         </div>
       </div>
+
+      {showShare && (
+        <ShareDialog
+          projectId={project.id}
+          projectTitle={project.title}
+          languages={dubbedLanguages.map((entry) => ({ code: entry.code, name: entry.language!.name, ready: Boolean(entry.videoUrl) }))}
+          initialLanguage={viewLanguage}
+          onClose={() => setShowShare(false)}
+          onShowToast={onShowToast}
+        />
+      )}
     </div>
   );
 };

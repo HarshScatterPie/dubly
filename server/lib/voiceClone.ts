@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import ffmpegInstaller from '@ffmpeg-installer/ffmpeg';
+import { ffmpegDir } from './mediaTools';
 import { lipsyncDir, serverRoot, tmpDir } from './paths';
 
 /**
@@ -160,7 +160,7 @@ function getWorker(): ChildProcessWithoutNullStreams {
     // The engines shell out to ffmpeg for decoding the reference clip.
     env: {
       ...process.env,
-      PATH: `${path.dirname(ffmpegInstaller.path)}${path.delimiter}${process.env.PATH || ''}`,
+      PATH: `${ffmpegDir}${path.delimiter}${process.env.PATH || ''}`,
       PYTHONIOENCODING: 'utf-8',
     },
   });

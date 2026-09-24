@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router } from '../lib/router';
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
@@ -9,6 +9,9 @@ import { applyPitchSpeed } from '../lib/ffmpeg';
 import { getWavDurationSeconds } from '../lib/audioUtils';
 import { getSettings } from '../lib/projectRepo';
 import { tmpDir } from '../lib/paths';
+import { rateLimit } from '../lib/rateLimit';
+import { rateRules } from '../lib/limits';
+import { schemas, validateBody } from '../lib/validation';
 
 export const ttsRouter = Router();
 
@@ -17,7 +20,7 @@ export const ttsRouter = Router();
  * action and by voice-catalog sample-quote previews. Full per-project dubbing (segment
  * timed, muxed into video) goes through POST /api/projects/:id/dub instead.
  */
-ttsRouter.post('/generate', async (req, res) => {
+ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), validateBody(schemas.tts), async (req, res) => {
   const { text, voiceId, languageCode, speed, pitch } = req.body || {};
   if (!text || typeof text !== 'string' || !text.trim()) {
     res.status(400).json({ error: 'text is required' });

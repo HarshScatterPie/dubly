@@ -37,6 +37,15 @@ export function isCtcAlignAvailable(languageCode?: string): boolean {
   return languageCode === undefined || ALIGNABLE_LANGUAGES.has(languageCode);
 }
 
+// Starts loading a language's model in the background, so it overlaps the speech-to-text call instead of following it.
+export function warmCtcModel(languageCode: string): void {
+  if (!isCtcAlignAvailable(languageCode)) return;
+  const language = languageCode === 'hinglish' ? 'hi' : languageCode;
+  runWorker({ cmd: 'warm', language })
+    .then((r) => console.log(r.ok ? `[ctcAlign] warmed ${r.model}` : `[ctcAlign] warm failed: ${r.error}`))
+    .catch((err) => console.warn('[ctcAlign] warm failed', err));
+}
+
 /** First run downloads the model; after that it is cached by huggingface_hub. */
 const ALIGN_TIMEOUT_MS = 15 * 60 * 1000;
 

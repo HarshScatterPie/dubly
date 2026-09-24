@@ -24,7 +24,10 @@ async function handle<T>(res: Response): Promise<T> {
     let message = res.statusText;
     try {
       const body = await res.json();
-      if (body?.error) message = body.error;
+      // Errors arrive as { error: { code, message, request_id } }; older servers sent { error: 'message' }.
+      const error = body?.error;
+      if (typeof error === 'string') message = error;
+      else if (error?.message) message = error.request_id && res.status >= 500 ? `${error.message} (ref ${String(error.request_id).slice(0, 8)})` : error.message;
     } catch {
       // response body wasn't JSON — keep statusText
     }
@@ -39,10 +42,10 @@ export async function apiGet<T>(path: string): Promise<T> {
   return handle<T>(res);
 }
 
-export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
+export async function apiPost<T>(path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
-    headers: { ...(await authHeader()), 'Content-Type': 'application/json' },
+    headers: { ...(await authHeader()), 'Content-Type': 'application/json', ...extraHeaders },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   return handle<T>(res);

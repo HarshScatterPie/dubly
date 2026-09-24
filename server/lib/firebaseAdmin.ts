@@ -1,13 +1,25 @@
 import admin from 'firebase-admin';
-import { loadServiceAccount } from './credentials';
+import { loadServiceAccount, useAdc } from './credentials';
 import { env } from './env';
 
-const serviceAccount = loadServiceAccount('firebase-service-account.json') as admin.ServiceAccount;
+// Under the Firebase emulators (tests) no credential is loaded and a `demo-` project is forced, so a test can never reach production.
+export const usingEmulators = Boolean(process.env.FIRESTORE_EMULATOR_HOST);
 
-const app = admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-  storageBucket: env.firebaseStorageBucket,
-});
+const app = usingEmulators
+  ? admin.initializeApp({ projectId: process.env.GCLOUD_PROJECT || 'demo-dubly', storageBucket: 'demo-dubly.appspot.com' })
+  : useAdc
+    ? admin.initializeApp({
+        credential: admin.credential.applicationDefault(),
+        projectId: env.firebaseProjectId || undefined,
+        storageBucket: env.firebaseStorageBucket,
+      })
+    : admin.initializeApp({
+        credential: admin.credential.cert(loadServiceAccount('firebase-service-account.json') as admin.ServiceAccount),
+        storageBucket: env.firebaseStorageBucket,
+      });
+if (usingEmulators && !app.options.projectId?.startsWith('demo-')) {
+  throw new Error('Emulator mode requires a demo- project id');
+}
 
 export const db = admin.firestore();
 // Several call sites merge partial updates that may legitimately include `undefined`
@@ -29,17 +41,22 @@ export { app as firebaseAdminApp };
  * re-download of the video/audio on every single page load. Reusing the same URL for a
  * bounded window lets the browser actually cache the media across visits, which is the
  * real fix for slow repeat loads (GCS signing itself is fast local RSA signing, not the
- * bottleneck). The reuse window is intentionally shorter than the signed URL's own 6-day
+ * bottleneck). The reuse window is intentionally shorter than the signed URL's own 3-hour
  * validity, matched to the response Cache-Control below, so a re-dub that overwrites a
  * mutable path (e.g. dubbed.mp4) is only stale for at most that window.
  */
 const SIGNED_URL_CACHE_MS = 1000 * 60 * 55; // under an hour, matched to the Cache-Control max-age below
 const signedUrlCache = new Map<string, { url: string; cachedAt: number }>();
 
-export async function getSignedDownloadUrl(
-  storagePath: string,
-  expiresInMs = 1000 * 60 * 60 * 24 * 6
-): Promise<string> {
+// Media links are short-lived so that someone removed from a workspace, or a leaked link, loses access within hours rather
+// than days. A URL is reused for at most SIGNED_URL_CACHE_MS, so every URL handed out is still valid for 2+ hours.
+export const SIGNED_URL_TTL_MS = 1000 * 60 * 60 * 3;
+
+export async function getSignedDownloadUrl(storagePath: string, expiresInMs = SIGNED_URL_TTL_MS): Promise<string> {
+  // The emulator cannot sign (no credential is loaded under it), and serves objects directly instead.
+  if (usingEmulators) {
+    return `http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}/v0/b/${bucket.name}/o/${encodeURIComponent(storagePath)}?alt=media`;
+  }
   const cached = signedUrlCache.get(storagePath);
   if (cached && Date.now() - cached.cachedAt < SIGNED_URL_CACHE_MS) {
     return cached.url;
@@ -52,6 +69,19 @@ export async function getSignedDownloadUrl(
     queryParams: { 'response-cache-control': 'private, max-age=3300' },
   });
   signedUrlCache.set(storagePath, { url, cachedAt: Date.now() });
+  return url;
+}
+
+// An uncached read URL with an explicit expiry (and optional download filename), for share pages.
+export async function signReadUrl(storagePath: string, expires: number, downloadName?: string): Promise<string> {
+  if (usingEmulators) {
+    return `http://${process.env.FIREBASE_STORAGE_EMULATOR_HOST}/v0/b/${bucket.name}/o/${encodeURIComponent(storagePath)}?alt=media`;
+  }
+  const [url] = await bucket.file(storagePath).getSignedUrl({
+    action: 'read',
+    expires,
+    ...(downloadName ? { responseDisposition: `attachment; filename="${downloadName}"` } : {}),
+  });
   return url;
 }
 

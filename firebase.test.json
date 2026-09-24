@@ -1,0 +1,10 @@
+{
+  "emulators": {
+    "singleProjectMode": true,
+    "firestore": { "port": 8181 },
+    "auth": { "port": 9199 },
+    "storage": { "port": 9299 },
+    "ui": { "enabled": false }
+  },
+  "storage": { "rules": "firebase/emulator-only.storage.rules" }
+}

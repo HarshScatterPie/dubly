@@ -1,7 +1,7 @@
 {
-  "name": "react-example",
+  "name": "dubly",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n web,api -c blue,green \"npm:web\" \"npm:server\"",
@@ -10,10 +10,12 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "test": "firebase emulators:exec --config firebase.test.json --only firestore,auth,storage --project demo-dubly \"vitest run\"",
+    "typecheck": "tsc --noEmit",
+    "start": "tsx server/index.ts"
   },
   "dependencies": {
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@ffprobe-installer/ffprobe": "^2.1.2",
     "@google-cloud/text-to-speech": "^7.0.0",
     "@google/genai": "^2.4.0",
@@ -24,6 +26,7 @@
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
+    "ffmpeg-static": "^5.3.0",
     "firebase": "^11.6.0",
     "firebase-admin": "^13.2.0",
     "fluent-ffmpeg": "^2.1.3",
@@ -33,7 +36,9 @@
     "onnxruntime-node": "^1.27.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "vite": "^6.2.3"
+    "tsx": "^4.21.0",
+    "vite": "^6.2.3",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",
@@ -44,9 +49,13 @@
     "autoprefixer": "^10.4.21",
     "concurrently": "^9.1.2",
     "esbuild": "^0.25.0",
+    "firebase-tools": "^13.35.1",
     "tailwindcss": "^4.1.14",
-    "tsx": "^4.21.0",
     "typescript": "~5.8.2",
-    "vite": "^6.2.3"
+    "vite": "^6.2.3",
+    "vitest": "^3.2.7"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

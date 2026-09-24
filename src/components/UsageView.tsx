@@ -66,7 +66,9 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onUpgrade }) => {
               <span className="text-sm text-[#94A3B8] font-mono">/ {usage.minutesLimit} mins</span>
             </div>
             <p className="text-[11px] text-[#64748B]">
-              Resets automatically on the 1st of every month
+              {usage.resetsAt
+                ? `Refreshes on ${new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long' })} · ${Math.max(0, Math.round((usage.minutesLimit - usage.minutesDubbed) * 10) / 10)} min left this month`
+                : 'Resets automatically on the 1st of every month'}
             </p>
           </div>
 

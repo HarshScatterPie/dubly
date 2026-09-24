@@ -20,6 +20,7 @@ import {
 import { TranscriptSegment, Voice, VoiceCategory, VoiceEmotion } from '../../types';
 import { VOICES, LANGUAGES } from '../../data/mockData';
 import { textToSpeechService } from '../../services/textToSpeechService';
+import { StickyActionBar } from './StickyActionBar';
 import { VoiceProviderBadge } from '../VoiceProviderBadge';
 
 interface StepVoiceProps {
@@ -117,9 +118,12 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   // for, and there are only ever a handful of them against a catalog of thousands.
   const availableVoices = [...customVoices, ...VOICES];
 
-  const filteredVoices = availableVoices.filter(
-    (voice) => selectedCategory === 'all' || voice.category === selectedCategory
-  );
+  // The user's own voices first, then voices native to the language being set, so the likely pick is at the top.
+  const nativeRank = (voice: Voice) => (voice.provider === 'clone' ? 0 : voice.languageCode === activeLanguageCode ? 1 : 2);
+  const filteredVoices = availableVoices
+    .filter((voice) => selectedCategory === 'all' || voice.category === selectedCategory)
+    .sort((a, b) => nativeRank(a) - nativeRank(b));
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   const handlePlayVoicePreview = async (e: React.MouseEvent, voice: Voice) => {
     e.stopPropagation();
@@ -348,18 +352,24 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
       </div>
 
       {/* Voice Tuning Controls (Speed, Pitch, Emotion) */}
-      <div className="rounded-3xl glass-panel p-6 sm:p-7 space-y-6">
-        <div className="flex items-center justify-between pb-4 border-b border-[#E2E8F0]">
+      <div className="rounded-3xl glass-panel p-5 sm:p-6 space-y-6">
+        {/* Optional tuning stays folded away; the defaults are right for most dubs. */}
+        <button
+          type="button"
+          onClick={() => setShowAdvanced((open) => !open)}
+          aria-expanded={showAdvanced}
+          className="w-full flex items-center justify-between text-left"
+        >
           <div className="flex items-center gap-2.5">
             <Sliders className="w-4 h-4 text-[#F05637]" />
-            <h4 className="text-sm font-bold text-[#0F172A]">Voice Performance Tuning</h4>
+            <h4 className="text-sm font-bold text-[#0F172A]">Advanced: speed, pitch, emotion &amp; render options</h4>
           </div>
-          <span className="text-xs text-[#64748B]">
-            Selected: <strong className="text-[#D94B2E]">{selectedVoice.name}</strong> ({selectedVoice.accent})
-          </span>
-        </div>
+          <span className="text-xs font-semibold text-[#64748B]">{showAdvanced ? 'Hide' : 'Show'}</span>
+        </button>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {showAdvanced && (
+        <>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 pt-4 border-t border-[#E2E8F0]">
           {/* Speed */}
           <div className="space-y-2">
             <div className="flex items-center justify-between text-xs font-medium">
@@ -481,23 +491,34 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           </button>
         )}
 
-        {/* Generate Dub Primary CTA */}
-        <div className="pt-2">
-          <button
-            type="button"
-            onClick={onGenerateDub}
-            className="w-full flex items-center justify-center gap-2.5 py-4 px-6 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white font-bold text-sm shadow-[0_0_25px_rgba(240,86,55,0.3)] transition-all duration-200"
-          >
-            <Sparkles className="w-4 h-4 text-[#D94B2E]" />
-            <span>
-              Generate Dub (
-              {allTargetLangs.length > 1 ? `${allTargetLangs.length} languages` : targetLang.name} ·{' '}
-              {selectedVoice.name})
-            </span>
-            <ArrowRight className="w-4 h-4" />
-          </button>
-        </div>
+        </>
+        )}
       </div>
+
+      <StickyActionBar
+        summary={
+          <span className="flex flex-wrap gap-x-3 gap-y-1">
+            {allTargetLangs.map((lang) => (
+              <span key={lang.code}>
+                {lang.name}:{' '}
+                <strong className="text-[#0F172A]">
+                  {availableVoices.find((v) => v.id === voiceForLanguage(lang.code))?.name.replace(/\s*\(.*\)$/, '') || '—'}
+                </strong>
+              </span>
+            ))}
+          </span>
+        }
+      >
+        <button
+          type="button"
+          onClick={onGenerateDub}
+          className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white font-semibold text-sm shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all"
+        >
+          <Sparkles className="w-4 h-4" />
+          <span>Generate Dub{allTargetLangs.length > 1 ? ` (${allTargetLangs.length} languages)` : ''}</span>
+          <ArrowRight className="w-4 h-4" />
+        </button>
+      </StickyActionBar>
     </div>
   );
 };

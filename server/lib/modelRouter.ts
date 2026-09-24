@@ -1,10 +1,13 @@
 import type { TranscriptSegment, Voice } from '../../src/types';
 import { getLanguageBcp47, getLanguageName } from './languageMeta';
 import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult } from './vertexClient';
+import type { TranslatableSegment } from './translatePrompt';
 import { googleSynthesizeSpeech, isGoogleTtsConfigured } from './googleTtsClient';
 import { readTtsCache, ttsCacheKey, writeTtsCache } from './ttsCache';
+import { getWavDurationSeconds, trimSilence } from './audioUtils';
 import { canCloneInLanguage, isVoiceCloneAvailable, synthesizeClonedSpeech } from './voiceClone';
 import { canSpaceCloneLanguage, isSpaceCloneConfigured, synthesizeViaSpace } from './spaceClone';
+import { log } from './log';
 
 // Every provider here is Google's own (Vertex AI / Gemini for STT + translation, Google
 // Cloud TTS for synthesis). 'auto' and 'vertex' are equivalent today — the type keeps the
@@ -69,17 +72,18 @@ function toTranscriptSegments(raw: RawSttResult['segments']): TranscriptSegment[
 export async function routeTranscribe(
   filePath: string,
   targetLanguageCode: string,
-  override: SttProvider
+  override: SttProvider,
+  onChunkDone?: (done: number, total: number, language: string) => void | Promise<void>
 ): Promise<{ provider: 'vertex'; language: string; segments: TranscriptSegment[] }> {
   if (!isVertexConfigured()) {
     throw new Error('No speech-to-text provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
   }
-  const result = await vertexTranscribe(filePath);
+  const result = await vertexTranscribe(filePath, onChunkDone);
   return { provider: 'vertex', language: result.language, segments: toTranscriptSegments(result.segments) };
 }
 
 export async function routeTranslateSegments(
-  segments: { id: string; text: string }[],
+  segments: TranslatableSegment[],
   targetLanguageCode: string,
   style: string,
   adaptExpressions: boolean,
@@ -89,12 +93,51 @@ export async function routeTranslateSegments(
     throw new Error('No translation provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
   }
   const targetLanguageName = getLanguageName(targetLanguageCode);
-  const translations = await vertexTranslateSegments(segments, targetLanguageName, style, adaptExpressions);
+  const translations = await vertexTranslateSegments(segments, targetLanguageCode, targetLanguageName, style, adaptExpressions);
   return { provider: 'vertex', translations };
 }
 
+const CLONE_MAX_ATTEMPTS = 3;
+// Rough speaking-rate bounds in seconds per character, loose enough to cover every supported script.
+const MIN_SECONDS_PER_CHAR = 0.025;
+const MAX_SECONDS_PER_CHAR = 0.2;
+
+function expectedSpeechRange(text: string): [number, number] {
+  const chars = text.replace(/\s+/g, '').length;
+  return [chars * MIN_SECONDS_PER_CHAR, chars * MAX_SECONDS_PER_CHAR + 1];
+}
+
+function isPlausibleSpeechLength(audio: Buffer, text: string): boolean {
+  const duration = getWavDurationSeconds(audio);
+  if (duration <= 0) return true;
+  const [min, max] = expectedSpeechRange(text);
+  return duration >= min && duration <= max;
+}
+
+function lengthError(audio: Buffer, text: string): number {
+  const duration = getWavDurationSeconds(audio);
+  const [min, max] = expectedSpeechRange(text);
+  return duration < min ? min - duration : duration > max ? duration - max : 0;
+}
+
+// Cleans text the voice would otherwise read literally or stumble on: stage directions, stray quotes, missing final punctuation.
+export function normalizeTextForSpeech(raw: string): string {
+  let text = raw
+    .replace(/\[[^\]]*\]|\([^)]*(music|laugh|applause|noise|inaudible|silence)[^)]*\)/gi, ' ')
+    .replace(/[“”„"«»]/g, '')
+    .replace(/^['‘’]+|['‘’]+$/g, '')
+    .replace(/[*_#~`|<>{}]/g, ' ')
+    .replace(/([!?.,।])\1+/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (text && !/[.!?।॥。！？…,:;]$/.test(text)) {
+    text += /[ऀ-ॿ]/.test(text) ? '।' : '.';
+  }
+  return text;
+}
+
 export async function routeSynthesizeSpeech(
-  text: string,
+  rawText: string,
   voice: Voice,
   targetLanguageCode: string,
   override: TtsProvider,
@@ -104,6 +147,7 @@ export async function routeSynthesizeSpeech(
    */
   cloneReference?: { audioPath: string; transcript?: string }
 ): Promise<{ provider: 'vertex' | 'clone'; audio: Buffer; fromCache: boolean }> {
+  const text = normalizeTextForSpeech(rawText) || rawText.trim();
   // A cloned voice is the user's own voice: substituting a stock voice for it would be
   // silently wrong in a way they would only notice after the render. So this path either
   // produces their voice or fails loudly, with no provider fallback.
@@ -124,36 +168,38 @@ export async function routeSynthesizeSpeech(
 
     const cloneCacheKey = ttsCacheKey(['clone', voice.id, targetLanguageCode, text]);
     const cachedClone = await readTtsCache(cloneCacheKey);
-    if (cachedClone) return { provider: 'clone', audio: cachedClone, fromCache: true };
+    if (cachedClone) return { provider: 'clone', audio: trimSilence(cachedClone), fromCache: true };
 
-    let audio: Buffer;
-    if (viaSpace) {
-      try {
-        audio = await synthesizeViaSpace({
-          text,
-          referenceAudioPath: cloneReference.audioPath,
-          languageCode: targetLanguageCode,
-        });
-      } catch (err) {
-        // A Space can be asleep, queued behind other users, or out of daily quota. Those
-        // are all transient and local synthesis still produces the right voice, just
-        // slowly — so fall back rather than failing the render.
-        if (!viaLocal) throw err;
-        console.warn('[modelRouter] cloning Space unavailable, falling back to local', err);
-        audio = await synthesizeClonedSpeech({
-          text,
-          referenceAudioPath: cloneReference.audioPath,
-          referenceText: cloneReference.transcript,
-          languageCode: targetLanguageCode,
-        });
+    const synthesizeOnce = async (): Promise<Buffer> => {
+      if (viaSpace) {
+        try {
+          return await synthesizeViaSpace({
+            text,
+            referenceAudioPath: cloneReference.audioPath,
+            languageCode: targetLanguageCode,
+          });
+        } catch (err) {
+          // A Space can be asleep, queued behind other users, or out of daily quota. Those
+          // are all transient and local synthesis still produces the right voice, just
+          // slowly — so fall back rather than failing the render.
+          if (!viaLocal) throw err;
+          console.warn('[modelRouter] cloning Space unavailable, falling back to local', err);
+        }
       }
-    } else {
-      audio = await synthesizeClonedSpeech({
+      return synthesizeClonedSpeech({
         text,
         referenceAudioPath: cloneReference.audioPath,
         referenceText: cloneReference.transcript,
         languageCode: targetLanguageCode,
       });
+    };
+
+    // Generative cloning models sometimes babble past the text or cut off early; re-roll those takes.
+    let audio = trimSilence(await synthesizeOnce());
+    for (let attempt = 1; attempt < CLONE_MAX_ATTEMPTS && !isPlausibleSpeechLength(audio, text); attempt++) {
+      console.warn(`[modelRouter] cloned take ${attempt} has implausible length for its text, re-synthesizing`);
+      const retake = trimSilence(await synthesizeOnce());
+      if (isPlausibleSpeechLength(retake, text) || lengthError(retake, text) < lengthError(audio, text)) audio = retake;
     }
 
     await writeTtsCache(cloneCacheKey, audio);
@@ -170,7 +216,7 @@ export async function routeSynthesizeSpeech(
   const cacheKey = ttsCacheKey([override, voice.id, targetLanguageCode, text]);
   const cached = await readTtsCache(cacheKey);
   if (cached) {
-    return { provider: 'vertex', audio: cached, fromCache: true };
+    return { provider: 'vertex', audio: trimSilence(cached), fromCache: true };
   }
 
   for (let retry = 0; ; retry++) {
@@ -178,7 +224,7 @@ export async function routeSynthesizeSpeech(
       // Google Cloud TTS rather than Gemini's preview TTS model — same GCP project and
       // credits, but production quotas instead of a per-minute cap that a multi-segment
       // dub exhausts, plus real per-language voices instead of one language-agnostic timbre.
-      const audio = await googleSynthesizeSpeech(text, getLanguageBcp47(targetLanguageCode), voice.providerVoice.vertex, voice.gender);
+      const audio = trimSilence(await googleSynthesizeSpeech(text, getLanguageBcp47(targetLanguageCode), voice.providerVoice.vertex, voice.gender));
       await writeTtsCache(cacheKey, audio);
       return { provider: 'vertex', audio, fromCache: false };
     } catch (err) {
@@ -187,10 +233,11 @@ export async function routeSynthesizeSpeech(
       // any more. Wait transient failures out rather than failing the whole render.
       if (isTransientTtsError(err) && retry < TTS_RETRY_BACKOFF_MS.length) {
         const waitMs = TTS_RETRY_BACKOFF_MS[retry];
-        console.warn(`[modelRouter] TTS failed (attempt ${retry + 1}/${TTS_RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms`, err);
+        log.warn('provider_retry', { provider: 'google-tts', operation: 'synthesize', attempt: retry + 1, waitMs }, `[modelRouter] TTS failed (attempt ${retry + 1}/${TTS_RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms: ${(err as Error)?.message}`);
         await new Promise((resolve) => setTimeout(resolve, waitMs));
         continue;
       }
+      log.error('provider_error', err, { provider: 'google-tts', operation: 'synthesize', attempts: retry + 1 });
       throw err;
     }
   }

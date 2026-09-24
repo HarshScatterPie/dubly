@@ -1,15 +1,14 @@
-import { Router } from 'express';
+import { Router } from '../lib/router';
 import multer from 'multer';
 import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { bucket, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { uploadFileToStorage } from '../lib/firebaseAdmin';
 import {
   CLONED_VOICE_PREFIX,
   createCustomVoice,
   newCustomVoiceId,
   deleteCustomVoice,
-  getCustomVoice,
   listCustomVoices,
   toClientCustomVoice,
 } from '../lib/customVoices';
@@ -20,6 +19,12 @@ import { mapDetectedLanguageToAppCode } from '../lib/languageMeta';
 import { installedCloneEngines, isVoiceCloneAvailable } from '../lib/voiceClone';
 import { isSpaceCloneConfigured } from '../lib/spaceClone';
 import { tmpDir } from '../lib/paths';
+import { HttpError } from '../lib/httpError';
+import { validateMedia } from '../lib/mediaValidation';
+import { rateLimit } from '../lib/rateLimit';
+import { rateRules } from '../lib/limits';
+import { refuseWhenDraining } from '../lib/lifecycle';
+import { schemas } from '../lib/validation';
 
 export const voicesRouter = Router();
 
@@ -50,7 +55,7 @@ const upload = multer({
   limits: { fileSize: 25 * 1024 * 1024 },
   fileFilter: (_req, file, cb) => {
     if (!/^audio\/|^video\/webm/.test(file.mimetype) && !/\.(wav|mp3|m4a|ogg|webm|flac)$/i.test(file.originalname)) {
-      cb(new Error('Upload an audio recording (wav/mp3/m4a/ogg/webm)'));
+      cb(new HttpError(400, 'UNSUPPORTED_FILE', 'Upload an audio recording (wav/mp3/m4a/ogg/webm)'));
       return;
     }
     cb(null, true);
@@ -75,7 +80,7 @@ voicesRouter.get('/', async (req, res) => {
  * needs the reference transcript to align against, and making someone type out what they
  * just said would be a pointless step when the STT pipeline is already sitting right here.
  */
-voicesRouter.post('/', upload.single('sample'), async (req, res) => {
+voicesRouter.post('/', refuseWhenDraining, rateLimit('voice-clone', [['user', rateRules.voiceClonePerUser]]), upload.single('sample'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No recording uploaded' });
 
   const jobDir = path.join(tmpDir, 'voice-jobs', randomUUID());
@@ -88,6 +93,11 @@ voicesRouter.post('/', upload.single('sample'), async (req, res) => {
       });
     }
 
+    // Checked here rather than as middleware so the uploaded file is still cleaned up by the finally below.
+    const fields = schemas.voiceSample.safeParse(req.body ?? {});
+    if (!fields.success) throw new HttpError(400, 'VALIDATION_FAILED', 'Invalid voice details: check the name, gender and language.');
+    req.body = fields.data;
+    await validateMedia(req.file.path, 'audio');
     await mkdir(jobDir, { recursive: true });
     // Normalized to the same 16kHz mono WAV the STT path uses — browsers record webm/opus,
     // which neither cloning engine reads directly.
@@ -137,6 +147,10 @@ voicesRouter.post('/', upload.single('sample'), async (req, res) => {
 
     res.status(201).json(await toClientCustomVoice(stored));
   } catch (err) {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ error: err.message, code: err.code });
+      return;
+    }
     res.status(500).json({ error: (err as Error).message });
   } finally {
     await rm(req.file.path, { force: true }).catch(() => undefined);
@@ -144,12 +158,8 @@ voicesRouter.post('/', upload.single('sample'), async (req, res) => {
   }
 });
 
+// Also removes voice documents that fail validation (so they can be cleaned up), without touching any file they point at.
 voicesRouter.delete('/:id', async (req, res) => {
-  const voice = await getCustomVoice(req.uid!, req.params.id);
-  if (!voice) return res.status(404).json({ error: 'Voice not found' });
-
-  await bucket.file(voice.sampleStoragePath).delete({ ignoreNotFound: true });
-  invalidateSignedUrlCache(voice.sampleStoragePath);
-  await deleteCustomVoice(req.uid!, req.params.id);
+  if (!(await deleteCustomVoice(req.uid!, req.params.id))) return res.status(404).json({ error: 'Voice not found' });
   res.status(204).send();
 });

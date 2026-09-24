@@ -50,7 +50,7 @@ export class VoiceCloneService {
     });
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      throw new Error(body?.error || `Could not save the voice (${res.status})`);
+      throw new Error((typeof body?.error === 'string' ? body.error : body?.error?.message) || `Could not save the voice (${res.status})`);
     }
     return res.json();
   }

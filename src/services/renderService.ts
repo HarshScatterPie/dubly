@@ -4,6 +4,7 @@
  */
 
 import { LocalizedSegment } from '../types';
+import { stripPerformanceTags } from '../lib/performanceTags';
 
 export class RenderService {
   /**
@@ -14,7 +15,7 @@ export class RenderService {
       .map((seg, index) => {
         const start = this.formatSRTTimestamp(seg.startTime);
         const end = this.formatSRTTimestamp(seg.endTime);
-        return `${index + 1}\n${start} --> ${end}\n${seg.translatedText}\n`;
+        return `${index + 1}\n${start} --> ${end}\n${stripPerformanceTags(seg.translatedText)}\n`;
       })
       .join('\n');
   }
@@ -27,7 +28,7 @@ export class RenderService {
       .map((seg) => {
         const start = this.formatVTTTimestamp(seg.startTime);
         const end = this.formatVTTTimestamp(seg.endTime);
-        return `${start} --> ${end}\n${seg.translatedText}\n`;
+        return `${start} --> ${end}\n${stripPerformanceTags(seg.translatedText)}\n`;
       })
       .join('\n');
     return `WEBVTT - Dubly Localized Subtitles\n\n${body}`;

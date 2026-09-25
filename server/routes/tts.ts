@@ -55,6 +55,7 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
         // Same direction a dub gives the line, so a preview sounds like the render.
         style: buildStylePrompt(emotion, delivery),
         expressive: settings.preferences.expressiveVoices,
+        premium: settings.preferences.premiumVoices,
       }
     );
     const shaped = await applyPitchSpeed(audio, pitch ?? 1, speed ?? 1, jobDir);

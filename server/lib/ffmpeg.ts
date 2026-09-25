@@ -3,7 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { getWavDurationSeconds } from './audioUtils';
-import { ffmpeg, ffprobePath } from './mediaTools';
+import { ffmpeg, ffmpegPath, ffprobePath } from './mediaTools';
 
 // Inputs may only be read from local files: a crafted file (e.g. a playlist) cannot make ffmpeg fetch URLs or other protocols.
 const SAFE_INPUT_OPTIONS = ['-protocol_whitelist', 'file,pipe'];
@@ -149,6 +149,8 @@ export interface TimedAudioSegment {
   startTime: number;
   endTime: number;
   audio: Buffer;
+  // Level change for this line so it keeps the original's dynamics (levelMatch.ts); 0 or absent leaves it as synthesized.
+  gainDb?: number;
 }
 
 /**
@@ -290,9 +292,10 @@ export async function stitchDubbedAudio(params: {
     }
     const atempoChain = buildAtempoChain(tempo);
 
+    const gain = seg.gainDb ? `,volume=${seg.gainDb.toFixed(1)}dB` : '';
     // The trailing `apad` is what keeps the mix levels honest — see the amix note below.
     filterParts.push(
-      `[${i + 1}:a]aformat=sample_rates=${sampleRate}:channel_layouts=mono,asetrate=${newRate},aresample=${sampleRate},${atempoChain},adelay=${delayMs}|${delayMs},apad[${label}]`
+      `[${i + 1}:a]aformat=sample_rates=${sampleRate}:channel_layouts=mono,asetrate=${newRate},aresample=${sampleRate},${atempoChain}${gain},adelay=${delayMs}|${delayMs},apad[${label}]`
     );
     mixLabels.push(label);
   });
@@ -434,4 +437,86 @@ export function extractAudioOnly(videoPath: string, outputMp3Path: string): Prom
       .on('end', () => resolve())
       .save(outputMp3Path);
   });
+}
+
+export interface LoudnessMeasurement {
+  integrated: number;
+  truePeak: number;
+  range: number;
+  threshold: number;
+  offset: number;
+}
+
+// Where a dub may be levelled to; a near-silent or clipped-loud source is not a level worth copying.
+export const LOUDNESS_FLOOR_LUFS = -24;
+export const LOUDNESS_CEILING_LUFS = -12;
+export const DEFAULT_LOUDNESS_LUFS = -16;
+const TRUE_PEAK_DBTP = -1.5;
+const LOUDNESS_RANGE_LU = 11;
+
+// loudnorm prints its measurement as the last JSON object on stderr.
+export function parseLoudnormOutput(stderr: string): LoudnessMeasurement | null {
+  const start = stderr.lastIndexOf('{');
+  const end = stderr.lastIndexOf('}');
+  if (start < 0 || end < start) return null;
+  try {
+    const raw = JSON.parse(stderr.slice(start, end + 1)) as Record<string, string>;
+    const m = {
+      integrated: Number(raw.input_i),
+      truePeak: Number(raw.input_tp),
+      range: Number(raw.input_lra),
+      threshold: Number(raw.input_thresh),
+      offset: Number(raw.target_offset),
+    };
+    return Object.values(m).every(Number.isFinite) ? m : null;
+  } catch {
+    return null;
+  }
+}
+
+function runFfmpeg(args: string[], timeoutSeconds: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      ffmpegPath,
+      ['-hide_banner', '-nostats', ...args],
+      { timeout: timeoutSeconds * 1000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (err, _stdout, stderr) => (err ? reject(new Error(`ffmpeg failed: ${String(stderr).slice(-400)}`)) : resolve(String(stderr)))
+    );
+  });
+}
+
+// EBU R128 loudness of a file's audio (the measure streaming platforms normalise by); null when it cannot be measured.
+export async function measureLoudness(filePath: string): Promise<LoudnessMeasurement | null> {
+  try {
+    const stderr = await runFfmpeg(
+      [...SAFE_INPUT_OPTIONS, '-i', filePath, '-vn', '-af', `loudnorm=I=${DEFAULT_LOUDNESS_LUFS}:TP=${TRUE_PEAK_DBTP}:LRA=${LOUDNESS_RANGE_LU}:print_format=json`, '-f', 'null', '-'],
+      TIMEOUT.render
+    );
+    return parseLoudnormOutput(stderr);
+  } catch {
+    return null;
+  }
+}
+
+// The loudness a dub should be levelled to: the original's own, kept inside sane bounds.
+export function loudnessTarget(source: LoudnessMeasurement | null): number {
+  if (!source || source.integrated < -60) return DEFAULT_LOUDNESS_LUFS;
+  return Math.max(LOUDNESS_FLOOR_LUFS, Math.min(LOUDNESS_CEILING_LUFS, source.integrated));
+}
+
+// Second loudnorm pass: levels a WAV to `targetLufs` from its own measurement, linearly (one gain, no pumping) wherever the peaks allow.
+export async function normalizeLoudness(inputPath: string, outputPath: string, targetLufs: number): Promise<boolean> {
+  const measured = await measureLoudness(inputPath);
+  if (!measured || measured.integrated < -60) return false;
+  const filter = [
+    `loudnorm=I=${targetLufs}:TP=${TRUE_PEAK_DBTP}:LRA=${LOUDNESS_RANGE_LU}`,
+    `measured_I=${measured.integrated}:measured_TP=${measured.truePeak}:measured_LRA=${measured.range}`,
+    `measured_thresh=${measured.threshold}:offset=${measured.offset}:linear=true:print_format=summary`,
+  ].join(':');
+  try {
+    await runFfmpeg([...SAFE_INPUT_OPTIONS, '-i', inputPath, '-af', filter, '-ar', '48000', '-ac', '1', '-c:a', 'pcm_s16le', '-y', outputPath], TIMEOUT.render);
+    return true;
+  } catch {
+    return false;
+  }
 }

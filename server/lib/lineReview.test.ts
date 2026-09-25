@@ -62,6 +62,23 @@ describe('saving edited lines', () => {
     expect(edited.qaFlags).toEqual(['glossary']);
   });
 
+  it('keeps the AI reviewer’s note with its flag, never takes one from the client, and drops it after an edit', () => {
+    const reviewed = [line({ renderKey: 'server-key', qaFlags: ['director'], directorNote: "mispronounces 'ScatterPie'" })];
+    const [kept] = reconcileSavedSegments([line({ directorNote: 'forged' })], reviewed, hi);
+    expect(kept.qaFlags).toEqual(['director']);
+    expect(kept.directorNote).toBe("mispronounces 'ScatterPie'");
+    const [edited] = reconcileSavedSegments([line({ translatedText: 'ScatterPie में स्वागत है' })], reviewed, hi);
+    expect(edited.qaFlags).toBeUndefined();
+    expect(edited.directorNote).toBeUndefined();
+    const [forged] = reconcileSavedSegments([line({ directorNote: 'forged' })], stored, hi);
+    expect(forged.directorNote).toBeUndefined();
+  });
+
+  it('does not count performance tags as untranslated or wrong-script text', () => {
+    expect(textQaFlags(line({ translatedText: '[laughing] ScatterPie में आपका स्वागत है [sigh]' }), hi)).toEqual([]);
+    expect(textQaFlags(line({ translatedText: '[laughing] Welcome to ScatterPie' }), hi)).toEqual(['untranslated']);
+  });
+
   it('cleans the delivery note and drops an empty one', () => {
     expect(reconcileSavedSegments([line({ delivery: '  calm\n and   warm ' })], stored, hi)[0].delivery).toBe('calm and warm');
     expect('delivery' in reconcileSavedSegments([line({ delivery: '   ' })], stored, hi)[0]).toBe(false);

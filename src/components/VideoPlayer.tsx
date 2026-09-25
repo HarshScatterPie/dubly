@@ -16,6 +16,7 @@ import {
   RotateCcw,
 } from 'lucide-react';
 import { LocalizedSegment, TranscriptSegment } from '../types';
+import { stripPerformanceTags } from '../lib/performanceTags';
 
 interface VideoPlayerProps {
   src: string;
@@ -200,7 +201,8 @@ export const VideoPlayer: React.FC<VideoPlayerProps> = ({
       transcriptSegments.find((s) => currentTime >= s.startTime && currentTime <= s.endTime + 0.3);
     if (!active) return null;
 
-    const text = 'translatedText' in active ? active.translatedText : active.text;
+    // Performance tags are acted by the voice, never captioned.
+    const text = stripPerformanceTags('translatedText' in active ? active.translatedText : active.text);
     const words = text.split(/\s+/).filter(Boolean);
     if (words.length === 0) return null;
 

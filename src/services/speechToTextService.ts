@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { TranscriptSegment } from '../types';
+import { SpeakerProfile, TranscriptSegment } from '../types';
 import { projectService } from './projectService';
 
 export interface TranscriptionResult {
@@ -12,6 +12,8 @@ export interface TranscriptionResult {
   segments: TranscriptSegment[];
   speakersCount: number;
   speakerVoiceMap: Record<string, string>;
+  /** Who each speaker is, as heard; empty for projects analyzed before profiles existed. */
+  speakerProfiles: Record<string, SpeakerProfile>;
   wordsCount: number;
   /** How many segments were dropped as speech-model repetition on non-speech audio. */
   removedSegments: number;
@@ -41,6 +43,7 @@ export class SpeechToTextService {
       sourceLanguageCode,
       speakersCount,
       speakerVoiceMap,
+      speakerProfiles,
       removedSegments,
       sanitizeNote,
     } = raw;
@@ -50,6 +53,7 @@ export class SpeechToTextService {
       segments: transcriptSegments,
       speakersCount,
       speakerVoiceMap,
+      speakerProfiles,
       wordsCount,
       removedSegments,
       sanitizeNote,

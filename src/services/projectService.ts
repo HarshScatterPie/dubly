@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DubbingProject, LocalizedSegment, TranscriptSegment, TranslationStyle, VoiceEmotion } from '../types';
+import { DubbingProject, LocalizedSegment, SpeakerProfile, TranscriptSegment, TranslationStyle, VoiceEmotion } from '../types';
 import { apiDelete, apiGet, apiPatch, apiPost, apiUpload } from '../lib/apiClient';
 import { randomId } from '../lib/randomId';
 
@@ -69,6 +69,7 @@ export class ProjectService {
     sourceLanguageCode: string;
     speakersCount: number;
     speakerVoiceMap: Record<string, string>;
+    speakerProfiles: Record<string, SpeakerProfile>;
     removedSegments: number;
     sanitizeNote: string;
   }> {
@@ -90,6 +91,7 @@ export class ProjectService {
       detectedLanguage: result.detectedLanguage,
       speakersCount: result.speakersCount,
       speakerVoiceMap: result.speakerVoiceMap || {},
+      speakerProfiles: result.speakerProfiles || {},
       removedSegments: result.removedSegments || 0,
       sanitizeNote: result.sanitizeNote || '',
     };

@@ -18,6 +18,7 @@ import {
   Users,
   BarChart3,
   Clapperboard,
+  Sparkles,
 } from 'lucide-react';
 import type { NavigationTab, TranslationStyle, UserPreferences, UserUsageStats, Voice, VoiceEmotion } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
@@ -45,6 +46,7 @@ const SECTIONS = [
   { id: 'dubbing', label: 'Dubbing defaults', Icon: Languages },
   { id: 'voice', label: 'Voice', Icon: Mic },
   { id: 'render', label: 'Rendering & export', Icon: Clapperboard },
+  { id: 'extras', label: 'Paid extras', Icon: Sparkles },
   { id: 'notifications', label: 'Notifications', Icon: Bell },
   { id: 'workspace', label: 'Workspace', Icon: Users },
 ] as const;
@@ -489,6 +491,36 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
             </Row>
             <Row title="Burn captions into downloads" hint="Downloads start with word-by-word captions on the video. You can still switch it per download.">
               <Toggle label="Burn captions" checked={draft.burnCaptions} onChange={(v) => update({ burnCaptions: v })} />
+            </Row>
+          </Section>
+
+          {/* Paid extras: each adds to the provider bill, so each is off until the user wants it */}
+          <Section id="extras" title="Paid extras" subtitle="Higher quality that adds to the AI cost of every dub. All off until you switch them on." Icon={Sparkles}>
+            <Row
+              title="AI review (Gemini supervision)"
+              hint="An AI reviewer listens to every dubbed line next to the original and re-records the ones with a garbled take, missing words, a mispronounced word, the wrong language or the wrong feeling. About ₹0.3–0.4 more per dubbed minute, per language, and a little more time."
+            >
+              <Toggle label="AI review" checked={draft.aiReview} onChange={(v) => update({ aiReview: v })} />
+            </Row>
+            <Row
+              title="Premium voices"
+              hint={
+                draft.expressiveVoices
+                  ? 'Voices lines with Google’s newer Gemini voice model: richer delivery, and it performs sighs as well as laughs. About ₹1 more per dubbed minute, per language (twice the standard voice cost).'
+                  : 'Needs Expressive voices, under Voice.'
+              }
+            >
+              <Toggle label="Premium voices" checked={draft.premiumVoices} disabled={!draft.expressiveVoices} onChange={(v) => update({ premiumVoices: v })} />
+            </Row>
+            <Row
+              title="Natural-timing re-takes"
+              hint={
+                draft.expressiveVoices
+                  ? 'When a line does not fit its gap, the voice records it again faster or slower instead of the audio being stretched. About ₹0.4–0.6 more per dubbed minute, per language.'
+                  : 'Needs Expressive voices, under Voice.'
+              }
+            >
+              <Toggle label="Natural-timing re-takes" checked={draft.paceRetakes} disabled={!draft.expressiveVoices} onChange={(v) => update({ paceRetakes: v })} />
             </Row>
           </Section>
 

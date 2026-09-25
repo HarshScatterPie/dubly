@@ -1,8 +1,32 @@
+import type { SpeakerProfile } from '../../src/types';
+import { performanceTagsIn } from './performance';
+
 export interface TranslatableSegment {
   id: string;
   text: string;
   /** How long the original line occupies on screen. Given to the model as a budget so the translation is written to be speakable in that time. */
   durationSeconds?: number;
+  /** Who says the line, so gendered grammar and forms of address come out right. */
+  speaker?: string;
+}
+
+export interface TranslationContext {
+  /** Speaker label -> gender and age as heard in the original. */
+  speakers?: Record<string, SpeakerProfile>;
+}
+
+// One line per speaker the model needs to know about; empty for a lone speaker nobody could place.
+export function describeSpeakers(segments: TranslatableSegment[], speakers: Record<string, SpeakerProfile> = {}): string {
+  const labels = [...new Set(segments.map((s) => s.speaker).filter((s): s is string => Boolean(s)))];
+  const known = labels.filter((label) => speakers[label] && speakers[label].gender !== 'unknown');
+  if (labels.length < 2 && known.length === 0) return '';
+  return labels
+    .map((label) => {
+      const p = speakers[label];
+      if (!p || p.gender === 'unknown') return `- ${label}: gender unknown`;
+      return `- ${label}: ${p.gender}${p.age ? `, ${p.age}` : ''}`;
+    })
+    .join('\n');
 }
 
 export function buildTranslationPrompt(
@@ -12,14 +36,19 @@ export function buildTranslationPrompt(
   adaptExpressions: boolean,
   scriptInstruction = '',
   // Workspace glossary lines for the terms in these segments (glossary.glossaryInstruction).
-  glossaryText = ''
+  glossaryText = '',
+  context: TranslationContext = {}
 ): string {
+  const speakerText = describeSpeakers(segments, context.speakers);
+  const hasTags = segments.some((s) => performanceTagsIn(s.text).length > 0);
   const list = segments
-    .map((s) =>
-      s.durationSeconds
-        ? `{"id": ${JSON.stringify(s.id)}, "seconds": ${s.durationSeconds.toFixed(1)}, "text": ${JSON.stringify(s.text)}}`
-        : `{"id": ${JSON.stringify(s.id)}, "text": ${JSON.stringify(s.text)}}`
-    )
+    .map((s) => {
+      const fields = [`"id": ${JSON.stringify(s.id)}`];
+      if (speakerText && s.speaker) fields.push(`"speaker": ${JSON.stringify(s.speaker)}`);
+      if (s.durationSeconds) fields.push(`"seconds": ${s.durationSeconds.toFixed(1)}`);
+      fields.push(`"text": ${JSON.stringify(s.text)}`);
+      return `{${fields.join(', ')}}`;
+    })
     .join(',\n  ');
 
   return `You are a professional video dubbing translator. Translate each dialogue segment below into ${targetLanguageName}.
@@ -35,7 +64,19 @@ ${
 }
 CRITICAL — timing. Each segment gives "seconds": the exact time that line occupies on screen. Your translation must be comfortably speakable aloud within that time at an unhurried, natural pace. This constraint outranks completeness: if a faithful translation would run long, tighten it — drop filler, choose shorter synonyms, and cut anything redundant — rather than producing a line that has to be rushed to fit. A line that must be sped up to fit sounds robotic and breaks the performance, so prefer a slightly leaner translation that breathes.
 Match the register and emotional tone of the original (excitement, hesitation, emphasis, humour) so the delivery carries the same feeling, and keep it natural to say out loud rather than literary.
-
+${
+  speakerText
+    ? `SPEAKERS (heard in the original audio):
+${speakerText}
+Each segment names its speaker. Wherever ${targetLanguageName} marks gender (verb endings, adjectives, first-person forms, how "you" is said to a man or a woman), make it agree with the real speaker and the person they address. Pick one register for how each pair of speakers addresses each other and how they address the audience (formal or informal "you"), and keep it for the whole video.
+`
+    : ''
+}${
+  hasTags
+    ? `PERFORMANCE TAGS: some segments contain bracketed tags such as [laughing] or [sigh]. They are sounds the voice performs, not words. Keep each one exactly as written, in English, at the matching point of your translation, and never add a tag the segment does not have.
+`
+    : ''
+}
 Return ONLY a JSON object of the exact form:
 {"translations": [{"id": "<same id as input>", "translatedText": "<translation>"}]}
 One entry per input segment, preserving the exact "id" values given. No commentary, no markdown fences.

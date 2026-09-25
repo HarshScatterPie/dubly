@@ -47,7 +47,7 @@ describe('Gemini-TTS with Chirp3-HD fallback', () => {
   it('voices a line with Gemini, passing the persona and the style direction', async () => {
     respond(() => [{ audioContent: Buffer.from('gemini') }]);
     const result = await googleSynthesizeSpeech('नमस्ते', 'hi-IN', 'Kore', 'female', 'Speak in a warm voice.');
-    expect(result).toEqual({ audio: Buffer.from('gemini'), engine: 'gemini' });
+    expect(result).toEqual({ audio: Buffer.from('gemini'), engine: 'gemini', model: 'gemini-2.5-flash-tts' });
     const [request] = mocks.synthesize.mock.calls[0];
     expect(request.voice).toEqual({ languageCode: 'hi-IN', name: 'Kore', modelName: 'gemini-2.5-flash-tts' });
     expect(request.input).toEqual({ text: 'नमस्ते', prompt: 'Speak in a warm voice.' });

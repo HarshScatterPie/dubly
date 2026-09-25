@@ -4,14 +4,16 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { env } from './env';
 import { gcpServiceAccountPath, hasGoogleCredentials, useAdc } from './credentials';
-import { buildTranslationPrompt, parseTranslationResponse, type TranslatableSegment } from './translatePrompt';
+import { buildTranslationPrompt, parseTranslationResponse, type TranslatableSegment, type TranslationContext } from './translatePrompt';
 import { probeMedia, splitAudioIntoChunks, extractAudioClip } from './ffmpeg';
 import { logGeminiCallCost } from './costMeter';
 import { getScriptInstruction, isInExpectedScript, mapDetectedLanguageToAppCode } from './languageMeta';
 import { log } from './log';
 import { cleanDelivery } from './speechStyle';
 import { glossaryInstruction, glossaryMisses, relevantEntries, withoutKeptTerms } from './glossary';
-import type { GlossaryEntry } from '../../src/types';
+import type { GlossaryEntry, SpeakerProfile } from '../../src/types';
+import { acceptHeardPerformance, sanitizePerformanceTags, stripPerformanceTags } from './performance';
+import { mergeSpeakerProfiles } from './speakerProfiles';
 
 export interface RawSttWord {
   text: string;
@@ -29,12 +31,16 @@ export interface RawSttSegment {
   speaker?: string;
   // How the line is said (e.g. "excited and fast"), heard in the same pass; steers the dubbed voice.
   delivery?: string;
+  // The same words with heard laughs and sighs marked inline, when there were any.
+  performance?: string;
 }
 
 export interface RawSttResult {
   text: string;
   language: string;
   segments: RawSttSegment[];
+  // Speaker label -> gender and age as heard, merged across chunks.
+  speakers?: Record<string, SpeakerProfile>;
 }
 
 let client: GoogleGenAI | null = null;
@@ -123,10 +129,11 @@ async function requestTranslations(
   style: string,
   adaptExpressions: boolean,
   scriptInstruction: string,
-  glossaryText: string
+  glossaryText: string,
+  context: TranslationContext
 ): Promise<Record<string, string>> {
   const ai = getClient();
-  const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText);
+  const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText, context);
 
   const response = await withRetry('translation', () =>
     ai.models.generateContent({
@@ -151,26 +158,33 @@ export async function vertexTranslateSegments(
   targetLanguageName: string,
   style: string,
   adaptExpressions: boolean,
-  glossary: GlossaryEntry[] = []
+  glossary: GlossaryEntry[] = [],
+  context: TranslationContext = {}
 ): Promise<Record<string, string>> {
   const scriptInstruction = getScriptInstruction(targetLanguageCode);
   // Only the terms these lines actually use, so a large glossary does not bloat every prompt.
   const terms = relevantEntries(glossary, segments.map((s) => s.text));
   const glossaryText = glossaryInstruction(terms, targetLanguageCode);
-  const result = await requestTranslations(segments, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText);
+  const ask = async (lines: TranslatableSegment[]) => {
+    const raw = await requestTranslations(lines, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText, context);
+    // A translation keeps the source's laughs and sighs but may not invent any.
+    for (const s of lines) if (raw[s.id] !== undefined) raw[s.id] = sanitizePerformanceTags(raw[s.id], s.text);
+    return raw;
+  };
+  const result = await ask(segments);
 
   // Lower is better: a wrong script outweighs any number of missed glossary terms.
   const problems = (source: string, text: string | undefined) =>
     !text?.trim()
       ? Infinity
-      : (isInExpectedScript(withoutKeptTerms(text, terms), targetLanguageCode) ? 0 : 100) + glossaryMisses(source, text, terms, targetLanguageCode).length;
+      : (isInExpectedScript(withoutKeptTerms(stripPerformanceTags(text), terms), targetLanguageCode) ? 0 : 100) + glossaryMisses(source, text, terms, targetLanguageCode).length;
 
   // One targeted re-ask for lines that went missing, came back in the wrong script (e.g. romanized Hindi) or broke the glossary.
   const bad = segments.filter((s) => problems(s.text, result[s.id]) > 0);
   if (bad.length > 0) {
     console.warn(`[vertexClient] ${bad.length}/${segments.length} ${targetLanguageName} lines missing, in the wrong script or off-glossary, retrying them`);
     try {
-      const retried = await requestTranslations(bad, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText);
+      const retried = await ask(bad);
       for (const s of bad) {
         const candidate = retried[s.id]?.trim();
         if (candidate && problems(s.text, candidate) < problems(s.text, result[s.id])) result[s.id] = candidate;
@@ -186,7 +200,7 @@ export async function vertexTranslateSegments(
 export async function vertexHinglishToSpeechScript(lines: { id: string; text: string }[]): Promise<Record<string, string>> {
   if (lines.length === 0) return {};
   const ai = getClient();
-  const prompt = `Convert each romanized Hinglish line below into the form a Hindi text-to-speech voice reads best: write the Hindi words in Devanagari, keep genuine English words in Latin letters, and keep punctuation. Do not translate, add, drop or reorder any words — only change the script.
+  const prompt = `Convert each romanized Hinglish line below into the form a Hindi text-to-speech voice reads best: write the Hindi words in Devanagari, keep genuine English words in Latin letters, and keep punctuation and bracketed tags such as [laughing] exactly as they are. Do not translate, add, drop or reorder any words — only change the script.
 Return ONLY {"translations": [{"id": "<same id>", "translatedText": "<converted line>"}]}.
 
 Lines:
@@ -199,7 +213,9 @@ ${JSON.stringify(lines)}`;
     })
   );
   logGeminiCallCost('hinglish-speech-script', env.geminiTranslateModel, response.usageMetadata);
-  return response.text ? parseTranslationResponse(response.text) : {};
+  const converted = response.text ? parseTranslationResponse(response.text) : {};
+  for (const line of lines) if (converted[line.id] !== undefined) converted[line.id] = sanitizePerformanceTags(converted[line.id], line.text);
+  return converted;
 }
 
 // Shortens one dubbed line so it can be spoken inside its on-screen slot without being rushed.
@@ -217,7 +233,7 @@ export async function vertexCondenseLine(
   const scriptInstruction = getScriptInstruction(targetLanguageCode);
   const mustKeep = protectedTerms.filter((term) => text.toLocaleLowerCase().includes(term.toLocaleLowerCase()));
   const prompt = `This ${targetLanguageName} dubbing line takes ${currentSeconds.toFixed(1)}s to speak but must fit in ${targetSeconds.toFixed(1)}s.
-Rewrite it to about ${Math.round(keepRatio * 100)}% of its current length while keeping the core meaning and tone. Drop filler and redundancy; do not add anything new.
+Rewrite it to about ${Math.round(keepRatio * 100)}% of its current length while keeping the core meaning and tone. Drop filler and redundancy; do not add anything new. Keep bracketed tags such as [laughing] or [sigh] exactly as written.
 ${scriptInstruction}${mustKeep.length ? `
 Keep these terms exactly as written: ${mustKeep.map((t) => JSON.stringify(t)).join(', ')}.` : ''}
 Return ONLY {"text": "<shortened line>"}.
@@ -233,13 +249,29 @@ Line: ${JSON.stringify(text)}`;
   logGeminiCallCost('condense', env.geminiTranslateModel, response.usageMetadata);
   try {
     const parsed = JSON.parse((response.text || '').trim().replace(/^```json\s*/i, '').replace(/```\s*$/i, ''));
-    const shortened = typeof parsed?.text === 'string' ? parsed.text.trim() : '';
-    if (!shortened || shortened.length >= text.length || !isInExpectedScript(shortened, targetLanguageCode)) return null;
+    const shortened = typeof parsed?.text === 'string' ? sanitizePerformanceTags(parsed.text.trim(), text) : '';
+    if (!shortened || shortened.length >= text.length || !isInExpectedScript(stripPerformanceTags(shortened), targetLanguageCode)) return null;
     if (mustKeep.some((term) => !shortened.toLocaleLowerCase().includes(term.toLocaleLowerCase()))) return null;
     return shortened;
   } catch {
     return null;
   }
+}
+
+export type VertexPart = { text: string } | { inlineData: { mimeType: string; data: string } };
+
+// One multimodal request answered as JSON text, with the shared retries and cost logging; callers own the prompt and the parsing.
+export async function vertexGenerateJson(model: string, parts: VertexPart[], operation: string, maxOutputTokens = 4096): Promise<string> {
+  const ai = getClient();
+  const response = await withRetry(operation, () =>
+    ai.models.generateContent({
+      model,
+      contents: [{ role: 'user', parts }],
+      config: { responseMimeType: 'application/json', temperature: 0, maxOutputTokens },
+    })
+  );
+  logGeminiCallCost(operation, model, response.usageMetadata);
+  return (response.text || '').trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
 }
 
 export interface SpeakerReference {
@@ -281,9 +313,11 @@ async function vertexTranscribeSingle(
 ${languageLine}
 SCRIPT RULE (critical): write the transcript in the NATIVE writing system of the spoken language — Telugu in Telugu script (తెలుగు), Hindi in Devanagari (हिन्दी), Tamil in Tamil script (தமிழ்), Bengali in Bengali script, Kannada in Kannada script, Malayalam in Malayalam script, Gujarati in Gujarati script, Punjabi in Gurmukhi, Marathi in Devanagari, Japanese in kanji/kana, and so on. NEVER romanize or transliterate a non-Latin-script language into English letters. English words spoken inside such a language are written in that language's script as pronounced; only brand names and acronyms may stay in Latin letters. Do NOT translate anything — write exactly what was said.
 Also identify how many distinct speakers are talking, using differences in voice (pitch, timbre, tone), and label every segment with who said it ("Speaker 1", "Speaker 2", ...). If only one person speaks throughout, label everything "Speaker 1".
+Describe every speaker once in "speakers": the gender their voice sounds ("male", "female", or "unknown" if you cannot tell) and their apparent age ("child", "young", "adult" or "senior"). The dub is voiced and translated from this, so do not guess: say "unknown" when unsure.
 For every segment also describe its delivery in English, 2 to 6 words: the emotion, energy and pace you hear (e.g. "excited and fast", "calm and warm", "sarcastic", "whispering", "angry, shouting", "sad and slow"). Describe how it is said, not what is said.
+If the speaker audibly laughs or sighs within a segment, also give "performance": exactly the same verbatim text with [laughing] or [sigh] inserted where it happens (e.g. "[laughing] That was brilliant!"). Use only those two tags, never change the words, and leave "performance" out when there is no laugh or sigh.
 Return ONLY a JSON object of the exact form:
-{"language": "<detected spoken language as its English name, e.g. Telugu, Hindi, English>", "segments": [{"start": <seconds, number>, "end": <seconds, number>, "text": "<verbatim text>", "speaker": "Speaker 1", "delivery": "<2-6 words>"}]}
+{"language": "<detected spoken language as its English name, e.g. Telugu, Hindi, English>", "speakers": [{"label": "Speaker 1", "gender": "male|female|unknown", "age": "child|young|adult|senior"}], "segments": [{"start": <seconds, number>, "end": <seconds, number>, "text": "<verbatim text>", "speaker": "Speaker 1", "delivery": "<2-6 words>", "performance": "<optional, only with a laugh or sigh>"}]}
 Transcribe ONLY audible speech. Silence, music, breathing, applause and background noise must produce no segment at all — do not fill them with filler words.
 Never repeat the same short phrase across consecutive segments; if you find yourself about to emit the same text again, emit nothing instead. Segments must advance through the audio: each start must be greater than or equal to the previous segment's end.
 No commentary, no markdown fences. If there is no speech, return {"language": "unknown", "segments": []}.`;
@@ -327,22 +361,32 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
     .replace(/^```\s*/i, '')
     .replace(/```\s*$/i, '');
 
-  let parsed: { language?: string; segments?: Array<{ start: number; end: number; text: string; speaker?: string; delivery?: string }> };
+  let parsed: {
+    language?: string;
+    speakers?: unknown;
+    segments?: Array<{ start: number; end: number; text: string; speaker?: string; delivery?: string; performance?: unknown }>;
+  };
   try {
     parsed = JSON.parse(cleaned);
   } catch (err) {
     throw new Error(`Vertex AI (Gemini) returned non-JSON transcription response: ${(err as Error).message}`);
   }
 
-  const segments: RawSttSegment[] = (parsed.segments || []).map((s) => ({
-    start: Number(s.start) || 0,
-    end: Number(s.end) || 0,
-    text: String(s.text || '').trim(),
-    confidence: 0.9,
-    speaker: typeof s.speaker === 'string' && s.speaker.trim() ? s.speaker.trim() : undefined,
-    delivery: cleanDelivery(s.delivery),
-    words: estimateWordTimings(String(s.text || '').trim(), Number(s.start) || 0, Number(s.end) || 0),
-  }));
+  const segments: RawSttSegment[] = (parsed.segments || []).map((s) => {
+    const text = String(s.text || '').trim();
+    const performance = acceptHeardPerformance(text, s.performance);
+    return {
+      start: Number(s.start) || 0,
+      end: Number(s.end) || 0,
+      text,
+      confidence: 0.9,
+      speaker: typeof s.speaker === 'string' && s.speaker.trim() ? s.speaker.trim() : undefined,
+      delivery: cleanDelivery(s.delivery),
+      ...(performance ? { performance } : {}),
+      words: estimateWordTimings(text, Number(s.start) || 0, Number(s.end) || 0),
+    };
+  });
+  const speakers = mergeSpeakerProfiles({}, parsed.speakers);
 
   const language = parsed.language || 'unknown';
   const joined = segments.map((s) => s.text).join(' ');
@@ -353,7 +397,7 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
     if (isInExpectedScript(retry.text, languageCode)) return retry;
   }
 
-  return { text: joined, language, segments };
+  return { text: joined, language, segments, speakers };
 }
 
 // Gemini's inline-audio transcription silently truncates to only the first several
@@ -483,10 +527,13 @@ export async function vertexTranscribe(
 
     const allSegments: RawSttSegment[] = [];
     const allText: string[] = [];
+    // Chunk order, so a speaker's first confident description wins whichever request finished first.
+    const speakers: Record<string, SpeakerProfile> = {};
     results.forEach((result, i) => {
       if (!result) return;
       const offset = offsets[i];
       if (result.text) allText.push(result.text);
+      mergeSpeakerProfiles(speakers, Object.entries(result.speakers ?? {}).map(([label, profile]) => ({ label, ...profile })));
       for (const seg of result.segments) {
         allSegments.push({
           start: seg.start + offset,
@@ -495,11 +542,12 @@ export async function vertexTranscribe(
           confidence: seg.confidence,
           speaker: seg.speaker,
           delivery: seg.delivery,
+          ...(seg.performance ? { performance: seg.performance } : {}),
           words: seg.words?.map((w) => ({ text: w.text, start: w.start + offset, end: w.end + offset })),
         });
       }
     });
-    return { text: allText.join(' '), language: detectedLanguage, segments: allSegments };
+    return { text: allText.join(' '), language: detectedLanguage, segments: allSegments, speakers };
   } finally {
     await rm(chunkDir, { recursive: true, force: true }).catch(() => undefined);
   }

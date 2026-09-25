@@ -21,6 +21,10 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   separateBackground: false,
   autoLipSync: false,
   burnCaptions: false,
+  // Features that add to the provider bill start off; users switch on the ones they want.
+  aiReview: false,
+  premiumVoices: false,
+  paceRetakes: false,
 };
 
 export function withPreferenceDefaults(saved: Partial<UserPreferences> | undefined | null): UserPreferences {

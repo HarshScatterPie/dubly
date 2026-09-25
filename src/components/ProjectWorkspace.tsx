@@ -33,7 +33,7 @@ import { textToSpeechService } from '../services/textToSpeechService';
 import { renderService } from '../services/renderService';
 import { DownloadMenu } from './DownloadMenu';
 import { resolveVoice } from '../lib/voiceResolution';
-import { DeliveryInput, DeliveryTag, needsReview, QaFlagBadges, ReviewFilterToggle } from './LineReview';
+import { DeliveryInput, DeliveryTag, insertTagAtCursor, needsReview, PerformanceTagPicker, QaFlagBadges, ReviewFilterToggle } from './LineReview';
 import { notifyWorkDone } from '../lib/devicePrefs';
 import { projectProgress } from '../lib/projectProgress';
 import { ProjectStatusBadge } from './ProjectStatusBadge';
@@ -57,6 +57,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const [activeTab, setActiveTab] = useState<'overview' | 'transcript' | 'translation' | 'voice' | 'export'>('overview');
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const translationEditorRef = React.useRef<HTMLTextAreaElement>(null);
   // Which language's translation the Translation tab is showing — a project can hold
   // several, but only ever displayed the primary one regardless of what the tab's own
   // label ("Translation (Tamil +1)") implied was there to look at.
@@ -666,7 +667,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                         </span>
                       )}
                       <DeliveryTag delivery={loc.delivery} />
-                      <QaFlagBadges flags={loc.qaFlags} />
+                      <QaFlagBadges flags={loc.qaFlags} directorNote={loc.directorNote} />
                     </span>
                     <div className="flex items-center gap-2 shrink-0">
                       <button
@@ -698,11 +699,13 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                   {isEditing ? (
                     <div className="space-y-2 pt-1">
                       <textarea
+                        ref={translationEditorRef}
                         value={editText}
                         onChange={(e) => setEditText(e.target.value)}
                         rows={2}
                         className="w-full p-2.5 rounded-xl bg-[#FFFFFF] border border-[#F05637] text-[#0F172A] text-xs focus:outline-none focus:ring-1 focus:ring-[#F05637]"
                       />
+                      <PerformanceTagPicker onInsert={(tag) => setEditText((text) => insertTagAtCursor(text, tag, translationEditorRef.current))} />
                       <DeliveryInput value={editDelivery} onChange={setEditDelivery} />
                       <div className="flex justify-end gap-2">
                         <button

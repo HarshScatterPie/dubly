@@ -3,6 +3,7 @@ import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser }
 import { setDubPipelineForTests, type PipelineResult } from './dub';
 import { getJob, type DubJob } from '../lib/jobs';
 import { currentLineKey } from '../lib/retake';
+import { setWorkspacePlan } from '../lib/plans';
 import type { StoredProject } from '../lib/projectRepo';
 import type { LocalizedSegment } from '../../src/types';
 
@@ -36,6 +37,7 @@ const workspaceOf = async (user: TestUser) => (await api.call('GET', '/api/works
 async function addEditor(admin: TestUser, email: string): Promise<TestUser> {
   const editor = await createUser(email);
   await workspaceOf(editor);
+  await setWorkspacePlan(await workspaceOf(admin), 'enterprise');
   const invite = await api.call('POST', '/api/workspace/invites', { token: admin.token, body: { email, role: 'editor' } });
   const accepted = await api.call('POST', '/api/invites/accept', { token: editor.token, body: { token: invite.body.token } });
   expect(accepted.status).toBe(200);

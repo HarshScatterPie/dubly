@@ -1,11 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import type { DubbingProject, LanguageOutput, UserPreferences, UserUsageStats } from '../../src/types';
+import type { DubbingProject, LanguageOutput, Plan, UserPreferences, UserUsageStats } from '../../src/types';
 import { DEFAULT_VOICE_ID, withPreferenceDefaults } from '../../src/data/preferences';
 import { db, getSignedDownloadUrl } from './firebaseAdmin';
 import { DEFAULT_PROVIDER_SETTINGS, type ProviderSettings } from './modelRouter';
 import { applyPlan, loadProject, planProjectWrite } from './projectStorage';
 import { bytesToMb, invalidateStorageUsage, workspaceStorageBytes } from './storageUsage';
 import { limits } from './limits';
+import { DEFAULT_PLANS, planForWorkspace } from './plans';
 
 /** A language output as stored: paths, not the signed URLs the client gets. */
 export interface StoredLanguageOutput extends Omit<LanguageOutput, 'dubbedAudioUrl' | 'finalDubbedVideoUrl'> {
@@ -205,14 +206,21 @@ export async function deleteStoredProject(workspaceId: string, id: string): Prom
 
 const DEFAULT_USAGE: UserUsageStats = {
   minutesDubbed: 0,
-  minutesLimit: 120,
+  minutesLimit: DEFAULT_PLANS.starter.minutesPerMonth,
   totalProjects: 0,
   storageUsedMb: 0,
   storageLimitMb: 2048,
   languagesUsed: 0,
   wordsTranslated: 0,
-  activePlan: 'Starter',
+  activePlan: DEFAULT_PLANS.starter.name,
+  planId: 'starter',
+  paidExtrasAllowed: false,
+  extraRates: DEFAULT_PLANS.starter.extraRates,
+  teamInvites: false,
 };
+
+// Taken from the workspace's plan on every read, never trusted from (or written to) the usage document.
+const PLAN_FIELDS = ['minutesLimit', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites'] as const;
 
 // Minutes reset on the 1st of every month, India time, since that is where the team and its users are.
 const USAGE_TIME_ZONE = 'Asia/Kolkata';
@@ -232,26 +240,39 @@ function nextResetIso(date = new Date()): string {
 
 type StoredUsage = UserUsageStats & { usagePeriod?: string };
 
-// A stored ledger from an earlier month starts this month at zero minutes; lifetime counters carry over.
-function rollUsage(stored: StoredUsage | undefined): StoredUsage {
+// A stored ledger from an earlier month starts this month at zero minutes; lifetime counters carry over, and the limit comes from the plan.
+function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
   const current = { ...DEFAULT_USAGE, ...stored };
   const period = monthKey();
   if (current.usagePeriod !== period) {
     current.minutesDubbed = 0;
     current.usagePeriod = period;
   }
-  // The limit is fixed by plan, not by whatever an old document happens to say.
-  current.minutesLimit = DEFAULT_USAGE.minutesLimit;
-  return current;
+  return {
+    ...current,
+    minutesLimit: plan.minutesPerMonth,
+    activePlan: plan.name,
+    planId: plan.id,
+    paidExtrasAllowed: plan.paidExtras,
+    extraRates: plan.extraRates,
+    teamInvites: plan.teamInvites,
+  };
+}
+
+// The ledger as stored: the month's minutes and lifetime counters, without anything the plan decides.
+function ledgerOf(usage: StoredUsage): Partial<StoredUsage> {
+  const ledger: Partial<StoredUsage> = { ...usage };
+  for (const field of PLAN_FIELDS) delete ledger[field];
+  return ledger;
 }
 
 export async function getUsage(workspaceId: string): Promise<UserUsageStats> {
   const ref = usageDoc(workspaceId);
-  const snap = await ref.get();
+  const [snap, plan] = await Promise.all([ref.get(), planForWorkspace(workspaceId)]);
   const stored = snap.exists ? (snap.data() as StoredUsage) : undefined;
-  const usage = rollUsage(stored);
-  if (!stored || stored.usagePeriod !== usage.usagePeriod || stored.minutesLimit !== usage.minutesLimit) {
-    await ref.set(usage, { merge: true });
+  const usage = rollUsage(stored, plan);
+  if (!stored || stored.usagePeriod !== usage.usagePeriod) {
+    await ref.set(ledgerOf(usage), { merge: true });
   }
   // Storage is measured from the bucket rather than trusted from the old counter; the counter is only a fallback if listing fails.
   const storageUsedMb = await workspaceStorageBytes(workspaceId).then(bytesToMb, () => usage.storageUsedMb);
@@ -280,8 +301,9 @@ export async function prepareReservation(
   minutes: number
 ): Promise<{ period: string; commit: () => void }> {
   const ref = usageDoc(workspaceId);
+  const plan = await planForWorkspace(workspaceId);
   const snap = await tx.get(ref);
-  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined);
+  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
   const remaining = roundMinutes(usage.minutesLimit - usage.minutesDubbed);
   if (minutes > remaining + 0.001) {
     const resetDate = new Date(nextResetIso()).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: USAGE_TIME_ZONE });
@@ -293,7 +315,7 @@ export async function prepareReservation(
   }
   return {
     period: usage.usagePeriod!,
-    commit: () => tx.set(ref, { ...usage, minutesDubbed: roundMinutes(usage.minutesDubbed + minutes) }, { merge: true }),
+    commit: () => tx.set(ref, { ...ledgerOf(usage), minutesDubbed: roundMinutes(usage.minutesDubbed + minutes) }, { merge: true }),
   };
 }
 
@@ -313,13 +335,14 @@ export async function prepareRefund(
 ): Promise<{ refunded: number; commit: () => void }> {
   if (minutes <= 0) return { refunded: 0, commit: () => undefined };
   const ref = usageDoc(workspaceId);
+  const plan = await planForWorkspace(workspaceId);
   const snap = await tx.get(ref);
-  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined);
+  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
   if (usage.usagePeriod !== period) return { refunded: 0, commit: () => undefined };
   const refunded = Math.min(roundMinutes(minutes), usage.minutesDubbed);
   return {
     refunded,
-    commit: () => tx.set(ref, { ...usage, minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - minutes)) }, { merge: true }),
+    commit: () => tx.set(ref, { ...ledgerOf(usage), minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - minutes)) }, { merge: true }),
   };
 }
 
@@ -337,13 +360,14 @@ export async function recordCompletedDub(
   opts: { wordsAdded: number; targetLanguageCode: string; fileSizeMb: number }
 ): Promise<void> {
   const ref = usageDoc(workspaceId);
+  const plan = await planForWorkspace(workspaceId);
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
-    const current = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined);
+    const current = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
     tx.set(
       ref,
       {
-        ...current,
+        ...ledgerOf(current),
         totalProjects: current.totalProjects + 1,
         wordsTranslated: current.wordsTranslated + opts.wordsAdded,
         languagesUsed: current.languagesUsed + 1,

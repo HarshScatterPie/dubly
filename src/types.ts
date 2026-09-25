@@ -297,5 +297,27 @@ export interface UserUsageStats {
   storageLimitMb: number;
   languagesUsed: number;
   wordsTranslated: number;
-  activePlan: 'Starter' | 'Pro Studio' | 'Enterprise';
+  /** The workspace plan's display name (Starter, Enterprise), read from the plan in the database. */
+  activePlan: string;
+  planId: PlanId;
+  /** Whether this plan lets its users switch on the paid extras. */
+  paidExtrasAllowed: boolean;
+  /** Extra allowance used per dubbed minute by each paid extra that is on (0.5 = a dubbed minute uses 1.5 min). */
+  extraRates: Record<PaidExtra, number>;
+  /** Whether this plan lets the workspace invite teammates. */
+  teamInvites: boolean;
+}
+
+export type PlanId = 'starter' | 'enterprise';
+export type PaidExtra = 'aiReview' | 'premiumVoices' | 'paceRetakes';
+
+/** A workspace plan, stored in Firestore (`dublyPlans/{id}`) so its limits change without a deploy. */
+export interface Plan {
+  id: PlanId;
+  name: string;
+  minutesPerMonth: number;
+  paidExtras: boolean;
+  extraRates: Record<PaidExtra, number>;
+  /** Whether workspace admins can invite teammates; without it the workspace is its owner alone. */
+  teamInvites: boolean;
 }

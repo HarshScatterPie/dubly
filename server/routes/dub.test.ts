@@ -16,6 +16,7 @@ import {
 } from '../lib/jobs';
 import { startDraining } from '../lib/lifecycle';
 import { currentUsagePeriod } from '../lib/projectRepo';
+import { clearPlanCaches, setWorkspacePlan } from '../lib/plans';
 
 let api: TestApi;
 
@@ -335,5 +336,65 @@ describe('dub jobs: crash recovery', () => {
     await expect(writeProjectForJob(job, { progressPercent: 50 })).rejects.toBeInstanceOf(JobSupersededError);
     await runDubJob(job, async () => success(['hi']));
     expect((await getJob(job.id))?.status).toBe('cancelled');
+  });
+});
+
+describe('plans and paid extras', () => {
+  const turnOnExtras = (f: Fixture) =>
+    api.call('PUT', '/api/settings', { token: f.user.token, body: { preferences: { aiReview: true, premiumVoices: true } } });
+
+  it('charges an Enterprise dub faster for the extras switched on, records them on the job, and refunds at the same rate', async () => {
+    const f = await seedProject();
+    await setWorkspacePlan(f.workspaceId, 'enterprise');
+    expect((await turnOnExtras(f)).status).toBe(200);
+    setDubPipelineForTests(async () => success(['hi']));
+
+    const res = await startDub(f);
+    expect(res.status).toBe(202);
+    const job = await settledJob(res.body.jobId);
+    // 2 languages x 2 minutes x (1 + 0.25 AI review + 0.5 premium voices).
+    expect(job?.minutesReserved).toBe(7);
+    expect(job?.extras).toEqual({ aiReview: true, premiumVoices: true, paceRetakes: false });
+    // Tamil failed, so its share of the higher charge comes back.
+    expect(job?.minutesRefunded).toBe(3.5);
+    expect(await minutesUsed(f)).toBe(3.5);
+  });
+
+  it('never charges a Starter workspace for extras, and never runs them', async () => {
+    const f = await seedProject();
+    expect((await turnOnExtras(f)).status).toBe(200);
+    setDubPipelineForTests(async () => success(['hi', 'ta']));
+
+    const res = await startDub(f);
+    const job = await settledJob(res.body.jobId);
+    expect(job?.minutesReserved).toBe(4);
+    expect(job?.extras).toEqual({ aiReview: false, premiumVoices: false, paceRetakes: false });
+  });
+
+  it('holds a workspace to its plan’s monthly limit, and says when extras are why a dub does not fit', async () => {
+    const f = await seedProject();
+    const usage = async () => (await api.call('GET', '/api/usage', { token: f.user.token })).body;
+    expect(await usage()).toMatchObject({ activePlan: 'Starter', planId: 'starter', minutesLimit: 50, paidExtrasAllowed: false, teamInvites: false });
+
+    await setWorkspacePlan(f.workspaceId, 'enterprise');
+    expect(await usage()).toMatchObject({ activePlan: 'Enterprise', minutesLimit: 120, paidExtrasAllowed: true, teamInvites: true });
+
+    await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').set({ minutesDubbed: 115, usagePeriod: currentUsagePeriod() }, { merge: true });
+    await turnOnExtras(f);
+    const refused = await startDub(f);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error.code).toBe('QUOTA_EXCEEDED');
+    expect(refused.body.error.message).toContain('each dubbed minute uses 1.75 min');
+  });
+
+  it('keeps plans in the database, where an operator’s change wins over the built-in values', async () => {
+    const f = await seedProject();
+    await api.call('GET', '/api/usage', { token: f.user.token });
+    expect((await db.collection('dublyPlans').doc('starter').get()).get('minutesPerMonth')).toBe(50);
+
+    await db.collection('dublyPlans').doc('starter').set({ minutesPerMonth: 30, name: 'Starter Lite' }, { merge: true });
+    clearPlanCaches();
+    const usage = (await api.call('GET', '/api/usage', { token: f.user.token })).body;
+    expect(usage).toMatchObject({ activePlan: 'Starter Lite', minutesLimit: 30 });
   });
 });

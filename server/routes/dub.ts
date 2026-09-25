@@ -57,6 +57,8 @@ import { getWavDurationSeconds, openWavSlicer, speechLevelDb, type WavSlicer } f
 import { describeVerdict, retakeStyle, reviewDubbedLines, type LineVerdict } from '../lib/dubDirector';
 import { lineGainsDb } from '../lib/levelMatch';
 import { stripPerformanceTags } from '../lib/performance';
+import { planForWorkspace } from '../lib/plans';
+import { allowanceRate, effectiveExtras, NO_EXTRAS, type PaidExtrasChoice } from '../../src/lib/planMath';
 import { isVertexConfigured, vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
 import { buildKaraokeAss } from '../lib/captions';
 import { isLipSyncAvailable, runLipSync } from '../lib/lipSync';
@@ -162,16 +164,23 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     res.status(400).json({ error: 'Translate the video before dubbing' });
     return;
   }
-  const minutesPerLanguage = stored.videoDuration / 60;
+  // Paid extras the starter switched on (and their plan allows) make each dubbed minute use more of the allowance.
+  const { extras, rate } = await chargedExtras(workspaceId, uid);
+  const minutesPerLanguage = (stored.videoDuration / 60) * rate;
 
-  const started = await startJobOrRefuse(res, {
-    workspaceId,
-    projectId,
-    userId: uid,
-    languages: languagesToRender,
-    minutes: minutesPerLanguage * languagesToRender.length,
-    idempotencyKey: req.get('Idempotency-Key') || undefined,
-  });
+  const started = await startJobOrRefuse(
+    res,
+    {
+      workspaceId,
+      projectId,
+      userId: uid,
+      languages: languagesToRender,
+      minutes: minutesPerLanguage * languagesToRender.length,
+      idempotencyKey: req.get('Idempotency-Key') || undefined,
+      extras,
+    },
+    rate
+  );
   if (!started) return;
   res.status(202).json({ status: 'processing', jobId: started.job.id });
 
@@ -181,13 +190,21 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
   enqueueDubJob(started.job);
 });
 
+// The extras a dub started now gets under the workspace plan, and how fast they make it use the allowance.
+async function chargedExtras(workspaceId: string, uid: string): Promise<{ extras: PaidExtrasChoice; rate: number }> {
+  const [plan, settings] = await Promise.all([planForWorkspace(workspaceId), getSettings(uid)]);
+  const extras = effectiveExtras(plan.paidExtras, settings.preferences);
+  return { extras, rate: allowanceRate(plan.extraRates, extras) };
+}
+
 // Job, project ownership and minute reservation are one transaction: a double click or a second teammate gets a 409, never a second charge.
-async function startJobOrRefuse(res: Response, input: Parameters<typeof startDubJob>[0]): Promise<{ job: DubJob; replayed: boolean } | null> {
+async function startJobOrRefuse(res: Response, input: Parameters<typeof startDubJob>[0], rate = 1): Promise<{ job: DubJob; replayed: boolean } | null> {
   try {
     return await startDubJob(input);
   } catch (err) {
     if (err instanceof QuotaExceededError) {
-      res.status(403).json({ error: err.message, code: 'QUOTA_EXCEEDED' });
+      const extrasHint = rate > 1 ? ` Paid extras are on, so each dubbed minute uses ${rate} min; turning them off in Settings uses less.` : '';
+      res.status(403).json({ error: `${err.message}${extrasHint}`, code: 'QUOTA_EXCEEDED' });
       return null;
     }
     if (err instanceof JobConflictError) {
@@ -226,16 +243,23 @@ dubRouter.post('/:id/languages/:code/retake', refuseWhenDraining, dubLimit, asyn
     return;
   }
 
-  const started = await startJobOrRefuse(res, {
-    workspaceId,
-    projectId,
-    userId: req.uid!,
-    languages: [languageCode],
-    minutes: plan.minutes,
-    idempotencyKey: req.get('Idempotency-Key') || undefined,
-  });
+  const { extras, rate } = await chargedExtras(workspaceId, req.uid!);
+  const minutes = Math.round(plan.minutes * rate * 10) / 10;
+  const started = await startJobOrRefuse(
+    res,
+    {
+      workspaceId,
+      projectId,
+      userId: req.uid!,
+      languages: [languageCode],
+      minutes,
+      idempotencyKey: req.get('Idempotency-Key') || undefined,
+      extras,
+    },
+    rate
+  );
   if (!started) return;
-  res.status(202).json({ status: 'processing', jobId: started.job.id, changedLines: plan.changedLineIds.length, minutes: plan.minutes });
+  res.status(202).json({ status: 'processing', jobId: started.job.id, changedLines: plan.changedLineIds.length, minutes });
   if (started.replayed) return;
   enqueueDubJob(started.job);
 });
@@ -774,8 +798,10 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     const background = await prepareBackgroundBed(videoLocalPath, jobDir, job, Boolean(stored.separateBackground));
 
     // Shared by every language: the original's speech (per-line levels, AI review) and its loudness. Both are refinements, so failures are logged, not fatal.
-    const aiReview = settings.preferences.aiReview && isVertexConfigured();
-    const { premiumVoices, paceRetakes } = settings.preferences;
+    // Exactly the extras this dub was charged for when it started; jobs from before plans had none.
+    const extras = job.extras ?? NO_EXTRAS;
+    const aiReview = extras.aiReview && isVertexConfigured();
+    const { premiumVoices, paceRetakes } = extras;
     const sourceSpeechPath = path.join(jobDir, 'source_speech.wav');
     sourceSpeech = await extractAudioForStt(videoLocalPath, sourceSpeechPath)
       .then(() => openWavSlicer(sourceSpeechPath))

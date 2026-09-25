@@ -22,6 +22,8 @@ import { StudioMiniPlayer } from './components/StudioMiniPlayer';
 import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type StudioStatus } from './lib/studioSession';
 import { projectProgress } from './lib/projectProgress';
 import { randomId } from './lib/randomId';
+import { allowanceRate, effectiveExtras } from './lib/planMath';
+import { DEFAULT_PREFERENCES } from './data/preferences';
 
 takeInviteTokenFromUrl();
 
@@ -67,13 +69,17 @@ const newStudioSession = (spec: Partial<Omit<StudioSession, 'key'>> = {}): Studi
 
 const EMPTY_USAGE: UserUsageStats = {
   minutesDubbed: 0,
-  minutesLimit: 120,
+  minutesLimit: 50,
   totalProjects: 0,
   storageUsedMb: 0,
   storageLimitMb: 2048,
   languagesUsed: 0,
   wordsTranslated: 0,
   activePlan: 'Starter',
+  planId: 'starter',
+  paidExtrasAllowed: false,
+  extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
+  teamInvites: false,
 };
 
 export default function App() {
@@ -94,6 +100,10 @@ export default function App() {
   // The user's saved defaults; null until loaded, when every consumer falls back to the built-in defaults.
   const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [usage, setUsage] = useState<UserUsageStats>(EMPTY_USAGE);
+  // Plan-gated screens wait for the real plan instead of treating the placeholder as Starter.
+  const usageLoaded = usage !== EMPTY_USAGE;
+  // How much allowance a dubbed minute uses with this user's paid extras, as the server will charge it.
+  const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(usageLoaded && usage.paidExtrasAllowed, preferences ?? DEFAULT_PREFERENCES));
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -464,6 +474,7 @@ export default function App() {
                 onPreferencesSaved={setPreferences}
                 workspace={workspace}
                 usage={usage}
+                usageLoaded={usageLoaded}
                 onNavigate={setActiveTab}
                 onShowToast={showToast}
               />
@@ -495,7 +506,12 @@ export default function App() {
             )}
 
             {activeTab === 'team' && workspace && (
-              <TeamView workspace={workspace} onChanged={setWorkspace} onShowToast={showToast} />
+              <TeamView
+                workspace={workspace}
+                onChanged={setWorkspace}
+                onShowToast={showToast}
+                plan={usageLoaded ? { name: usage.activePlan, teamInvites: usage.teamInvites } : undefined}
+              />
             )}
 
             {activeTab === 'glossary' && <GlossaryView onShowToast={showToast} />}
@@ -521,6 +537,7 @@ export default function App() {
                   onUpdateProject={handleUpdateProject}
                   onProjectRefreshed={handleProjectRefreshed}
                   onShowToast={showToast}
+                  allowanceRate={extrasRate}
                 />
               ) : (
                 <div className="max-w-4xl mx-auto px-4 py-16 text-center space-y-4">

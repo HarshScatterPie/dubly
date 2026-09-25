@@ -155,6 +155,10 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onUpgrade }) => {
             <p className="text-xs text-[#64748B] mt-0.5">
               You are currently on the <strong className="text-[#D94B2E]">{usage.activePlan}</strong> plan
             </p>
+            <p className="text-xs text-[#64748B] mt-1">
+              {usage.minutesLimit} dubbing minutes a month · {usage.paidExtrasAllowed ? 'Paid extras included' : 'No paid extras'} ·{' '}
+              {usage.teamInvites ? 'Invite your team' : 'Just you, no teammates'}
+            </p>
           </div>
 
           <div className="flex items-center gap-2">

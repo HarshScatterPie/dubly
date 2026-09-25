@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { authAdmin, db } from './firebaseAdmin';
+import { planForWorkspace } from './plans';
 
 // A Dubly workspace is a team: projects and the monthly minute allowance belong to it, and each member is an admin or an editor.
 export type WorkspaceRole = 'admin' | 'editor';
@@ -178,6 +179,7 @@ export async function createInvite(
   actorUid: string,
   input: { email: string; role: WorkspaceRole }
 ): Promise<{ invite: InviteSummary; token: string }> {
+  await assertPlanAllowsTeam(workspaceId);
   const email = String(input.email ?? '').trim().toLowerCase();
   if (!EMAIL_RE.test(email) || email.length > 254) throw new WorkspaceRequestError('Enter a valid email address');
   if (input.role !== 'admin' && input.role !== 'editor') throw new WorkspaceRequestError('Role must be admin or editor');
@@ -235,6 +237,19 @@ export async function revokeInvite(workspaceId: string, inviteId: string): Promi
   });
 }
 
+// Refuses when the workspace's plan is for one person; `joining` words it for the invitee rather than the admin.
+async function assertPlanAllowsTeam(workspaceId: string, joining = false): Promise<void> {
+  const plan = await planForWorkspace(workspaceId);
+  if (plan.teamInvites) return;
+  throw new InviteError(
+    403,
+    'PLAN_NO_TEAM',
+    joining
+      ? `This workspace is on the ${plan.name} plan, which does not include teammates, so the invitation can't be used. Ask its admin about the Enterprise plan.`
+      : `The ${plan.name} plan is for one person. Move to the Enterprise plan to add teammates.`
+  );
+}
+
 export class InviteError extends Error {
   constructor(
     public status: number,
@@ -287,6 +302,8 @@ export async function acceptInvite(token: string, uid: string, callerEmail: stri
     if (new Date(invite.expiresAt).getTime() <= Date.now()) {
       throw new InviteError(410, 'INVITE_EXPIRED', 'This invitation has expired. Ask the workspace admin for a new link.');
     }
+    // A link made before the workspace moved to a plan without teammates must not let anyone in.
+    await assertPlanAllowsTeam(invite.workspaceId, true);
 
     const pointer = await tx.get(pointerDoc(uid));
     const current = pointer.exists ? (pointer.get('workspaceId') as string | null) : null;

@@ -26,7 +26,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | GET | `/api/profile` | Name, role and workspace from the shared ScatterStudio profile (whitelisted fields only) |
 | GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews with Chirp3-HD |
 | POST | `/api/profile/sign-out-everywhere` | Revokes every session of the caller's account, this one included (`204`); their tokens are refused from then on |
-| GET | `/api/usage` | Monthly minutes (used, limit, reset time) and storage measured from the bucket |
+| GET | `/api/usage` | Monthly minutes (used, limit, reset time), storage measured from the bucket, and the workspace plan: `activePlan`, `planId`, `paidExtrasAllowed`, `extraRates`, `teamInvites` |
 
 ### Workspace and invitations
 | Method | Path | Who | Notes |

@@ -6,6 +6,7 @@ import { db } from './firebaseAdmin';
 import { prepareRefund, prepareReservation, projectRef, type StoredProject } from './projectRepo';
 import { tmpDir } from './paths';
 import { applyPlan, planProjectWrite } from './projectStorage';
+import type { PaidExtrasChoice } from '../../src/lib/planMath';
 
 // A job is the persisted record of one dub or transcription: project ownership, heartbeat, cancellation and exactly-once minute settlement.
 export type JobStatus = 'queued' | 'running' | 'completed' | 'partially_completed' | 'failed' | 'cancelled';
@@ -42,6 +43,8 @@ export interface DubJob {
   cancelRequested?: 'user' | 'timeout' | null;
   // Outcome details the client needs after completion (e.g. a transcription's detected language).
   result?: Record<string, unknown> | null;
+  // The paid extras this dub was charged for; the render uses exactly these, whatever the settings say later.
+  extras?: PaidExtrasChoice;
 }
 
 export const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -106,6 +109,7 @@ export interface StartDubJobInput {
   languages: string[];
   minutes: number;
   idempotencyKey?: string;
+  extras?: PaidExtrasChoice;
 }
 
 // Creates the job, takes the project and reserves minutes in one transaction; a repeated Idempotency-Key returns the earlier job.
@@ -179,6 +183,7 @@ async function startDubJobOnce(input: StartDubJobInput): Promise<{ job: DubJob; 
       finishedAt: null,
       errorCode: null,
       errorMessage: null,
+      ...(input.extras ? { extras: input.extras } : {}),
     };
     reservation.commit();
     tx.set(jobsCol().doc(job.id), job);

@@ -18,6 +18,11 @@ export function takeInviteTokenFromUrl(): void {
   }
 }
 
+// Whether this visit came through an invitation link that has not been used yet.
+export function hasPendingInvite(): boolean {
+  return Boolean(readToken());
+}
+
 function readToken(): string | null {
   try {
     return sessionStorage.getItem(STORAGE_KEY);

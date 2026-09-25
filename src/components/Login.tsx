@@ -4,15 +4,32 @@
  */
 
 import React, { useState } from 'react';
-import { Languages, Loader2, Mail, Lock } from 'lucide-react';
+import { Languages, Loader2, Mail, Lock, UserPlus, MailCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
+import { hasPendingInvite } from './InviteAcceptDialog';
 import scatterPieLogo from '../assets/scatterpie-logo.png';
 
 export const Login: React.FC = () => {
-  const { signInWithEmail, error } = useAuth();
+  const { signInWithEmail, sendPasswordReset, error } = useAuth();
   const [isSigningIn, setIsSigningIn] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [invited] = useState(hasPendingInvite);
+  const [resetState, setResetState] = useState<'idle' | 'sending' | 'sent' | 'needs-email'>('idle');
+
+  const handleForgotPassword = async () => {
+    if (!email.trim()) {
+      setResetState('needs-email');
+      return;
+    }
+    setResetState('sending');
+    try {
+      await sendPasswordReset(email);
+      setResetState('sent');
+    } catch {
+      setResetState('idle');
+    }
+  };
 
   const handleEmailSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -51,6 +68,16 @@ export const Login: React.FC = () => {
             </div>
           </div>
 
+          {invited && (
+            <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
+              <UserPlus className="w-4 h-4 shrink-0 mt-0.5" />
+              <p>
+                You have been invited to a Dubly workspace. Sign in with the <strong>email the invitation was sent to</strong>, using that
+                account&apos;s existing password (the same as ScatterStudio). Don&apos;t know it? Use <strong>Forgot password?</strong> below.
+              </p>
+            </div>
+          )}
+
           <form onSubmit={handleEmailSubmit} className="space-y-3">
             <div className="relative">
               <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -78,6 +105,17 @@ export const Login: React.FC = () => {
               />
             </div>
 
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                disabled={resetState === 'sending'}
+                className="text-xs font-semibold text-coral-600 hover:text-coral-700 disabled:opacity-60"
+              >
+                {resetState === 'sending' ? 'Sending reset link…' : 'Forgot password?'}
+              </button>
+            </div>
+
             <button
               type="submit"
               disabled={isSigningIn}
@@ -92,6 +130,19 @@ export const Login: React.FC = () => {
           <p className="text-center text-xs text-muted-foreground">
             Don&apos;t have an account? Contact <span className="font-semibold text-foreground">ScatterPie</span> to get access.
           </p>
+
+          {resetState === 'needs-email' && (
+            <p className="text-xs text-center text-muted-foreground">Enter your email above first, then press Forgot password? again.</p>
+          )}
+          {resetState === 'sent' && (
+            <p className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-3">
+              <MailCheck className="w-4 h-4 shrink-0" />
+              <span>
+                If a ScatterPie account exists for <strong>{email.trim()}</strong>, a link to set a new password is on its way. Check the inbox and the
+                spam folder, then sign in here with the new password.
+              </span>
+            </p>
+          )}
 
           {error && (
             <p className="text-xs text-danger text-center bg-red-50 border border-red-200 rounded-md p-3">

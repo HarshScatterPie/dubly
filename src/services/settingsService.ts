@@ -24,6 +24,15 @@ function takeLegacyPreferences(): Partial<UserPreferences> | null {
   }
 }
 
+// Whether this browser still holds pre-account preferences that getPreferences would move to the account.
+export function hasLegacyPreferences(): boolean {
+  try {
+    return localStorage.getItem(LEGACY_PREFS_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export const settingsService = {
   async getPreferences(): Promise<UserPreferences> {
     const legacy = takeLegacyPreferences();

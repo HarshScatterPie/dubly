@@ -178,7 +178,7 @@ export async function createInvite(
   workspaceId: string,
   actorUid: string,
   input: { email: string; role: WorkspaceRole }
-): Promise<{ invite: InviteSummary; token: string }> {
+): Promise<{ invite: InviteSummary; token: string; workspaceName: string }> {
   await assertPlanAllowsTeam(workspaceId);
   const email = String(input.email ?? '').trim().toLowerCase();
   if (!EMAIL_RE.test(email) || email.length > 254) throw new WorkspaceRequestError('Enter a valid email address');
@@ -212,7 +212,7 @@ export async function createInvite(
     earlier.docs.forEach((d) => tx.update(d.ref, { status: 'revoked', revokedAt: invite.createdAt }));
     tx.set(invitesCol().doc(invite.id), invite);
   });
-  return { invite: toSummary(invite), token };
+  return { invite: toSummary(invite), token, workspaceName: invite.workspaceName };
 }
 
 export async function listPendingInvites(workspaceId: string): Promise<InviteSummary[]> {

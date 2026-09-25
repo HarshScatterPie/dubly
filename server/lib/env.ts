@@ -24,6 +24,12 @@ export const env = {
   // Needed only with CREDENTIALS_MODE=adc, where it cannot be read from a key file.
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',
   webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
+  // Outgoing mail (invitations). Empty SMTP_HOST or MAIL_FROM turns email off and invitations are shared by link only.
+  smtpHost: process.env.SMTP_HOST || '',
+  smtpPort: Number(process.env.SMTP_PORT) || 587,
+  smtpUser: process.env.SMTP_USER || '',
+  smtpPass: process.env.SMTP_PASS || '',
+  mailFrom: process.env.MAIL_FROM || '',
   // Optional voice-cloning worker on a Hugging Face ZeroGPU Space. Set both and
   // cloning runs there instead of on this machine's CPU.
   hfSpaceUrl: process.env.HF_SPACE_URL || '',

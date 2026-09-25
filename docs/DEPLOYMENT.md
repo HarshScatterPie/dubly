@@ -80,6 +80,7 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `CREDENTIALS_MODE` / `FIREBASE_PROJECT_ID` | keyfile / — | `adc` = no key files |
 | `CREDENTIALS_DIR`, `DUBLY_ENV_FILE` | server/credentials, server/.env | Secret locations |
 | `HF_SPACE_URL`, `HF_TOKEN` | — | Optional GPU voice cloning |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | —, 587, —, —, — | Emails invitations. Any SMTP account works, including the one set as Firebase Auth's custom SMTP. Port 465 uses TLS, and 587 uses STARTTLS. `MAIL_FROM` is the sender, e.g. `Dubly <no-reply@scatterpie.io>`. With `SMTP_HOST` or `MAIL_FROM` empty, invitations are shared by link only. Invite links use `WEB_ORIGIN`, so it must be the address people open Dubly at |
 | `NODE_ENV`, `LOG_FORMAT` | —, json when production | Logging format |
 | `TRUST_PROXY` | unset | Proxy hops |
 | `SHUTDOWN_GRACE_MS` | 25000 | Drain window on SIGTERM |
@@ -104,6 +105,7 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `RATE_EXPORT_PER_HOUR` | 30 | Export and captioned-render requests |
 | `RATE_IMPORT_SAMPLE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | 20 / 30 | |
 | `RATE_INVITE_ACCEPT_PER_HOUR` | 30 | Invite preview and accept |
+| `RATE_INVITE_PER_HOUR` / `RATE_INVITE_PER_WORKSPACE_DAY` | 20 / 100 | Invitations created (each may send an email), per admin and per workspace |
 | `RATE_SHARE_VIEW_PER_MINUTE` | 60 | Public share page, per IP |
 
 The monthly minute allowance is 120 minutes per workspace, set in `server/lib/projectRepo.ts`.

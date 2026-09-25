@@ -8,6 +8,7 @@ import { resetLifecycleForTests } from '../lib/lifecycle';
 import { clearRateLimits } from '../lib/rateLimit';
 import { resetQueueForTests } from '../lib/dubQueue';
 import { clearPlanCaches } from '../lib/plans';
+import { clearUserCaches } from '../lib/projectRepo';
 
 const projectId = () => process.env.GCLOUD_PROJECT || 'demo-dubly';
 
@@ -25,6 +26,7 @@ export async function resetEmulators(): Promise<void> {
   clearRateLimits();
   resetQueueForTests();
   clearPlanCaches();
+  clearUserCaches();
 }
 
 export interface TestUser {

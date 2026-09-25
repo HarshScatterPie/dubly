@@ -26,6 +26,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | GET | `/api/profile` | Name, role and workspace from the shared ScatterStudio profile (whitelisted fields only) |
 | GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews with Chirp3-HD |
 | POST | `/api/profile/sign-out-everywhere` | Revokes every session of the caller's account, this one included (`204`); their tokens are refused from then on |
+| GET | `/api/bootstrap` | Everything the app opens with, in one response: `{ workspace, preferences, usage, projects, profile }` (same shapes as the separate endpoints). The client caches it per account in the browser and refreshes it on every visit |
 | GET | `/api/usage` | Monthly minutes (used, limit, reset time), storage measured from the bucket, and the workspace plan: `activePlan`, `planId`, `paidExtrasAllowed`, `extraRates`, `teamInvites` |
 
 ### Workspace and invitations
@@ -35,7 +36,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | PATCH | `/api/workspace` | admin | `{ name }` |
 | POST | `/api/workspace/members` | admin | **Retired: `410 USE_INVITES`** |
 | GET | `/api/workspace/invites` | admin | Pending, unexpired invitations |
-| POST | `/api/workspace/invites` | admin | `{ email, role }` → `201 { invite, token }`. Same response whether or not the email has an account. Re-inviting replaces the earlier link. The link is `/?invite=<token>`, valid 7 days |
+| POST | `/api/workspace/invites` | admin | `{ email, role }` → `201 { invite, token, emailed }`. Same response whether or not the email has an account. Re-inviting replaces the earlier link. The link is `/?invite=<token>`, valid 7 days. `emailed` is true when SMTP is configured and the server accepted the email to the invitee; the link is returned either way. `403 PLAN_NO_TEAM` on a plan without teammates. Rate-limited per admin and per workspace |
 | DELETE | `/api/workspace/invites/:inviteId` | admin | Withdraw an invitation |
 | PATCH | `/api/workspace/members/:uid` | admin | `{ role }`. The last admin can't be demoted |
 | DELETE | `/api/workspace/members/:uid` | admin | Removes the member, who returns to their own workspace if they had one |

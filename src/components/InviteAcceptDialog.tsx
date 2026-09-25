@@ -40,12 +40,15 @@ function clearToken(): void {
 }
 
 interface InviteAcceptDialogProps {
+  // Called as the join starts, so the app can cover everything with a joining screen until the new workspace is loaded.
+  onJoining?: (workspaceName: string) => void;
+  onJoinFailed?: () => void;
   onJoined: (workspaceName: string) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
 }
 
 // Shown after sign-in when the user arrived through an invitation link; nothing changes until they press Join.
-export const InviteAcceptDialog: React.FC<InviteAcceptDialogProps> = ({ onJoined, onShowToast }) => {
+export const InviteAcceptDialog: React.FC<InviteAcceptDialogProps> = ({ onJoining, onJoinFailed, onJoined, onShowToast }) => {
   const [token] = useState(readToken);
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [isJoining, setIsJoining] = useState(false);
@@ -76,13 +79,16 @@ export const InviteAcceptDialog: React.FC<InviteAcceptDialogProps> = ({ onJoined
   };
 
   const join = async () => {
+    const workspaceName = preview.workspaceName;
     setIsJoining(true);
+    onJoining?.(workspaceName);
     try {
       await workspaceService.acceptInvite(token);
       clearToken();
       setPreview(null);
-      onJoined(preview.workspaceName);
+      onJoined(workspaceName);
     } catch (err) {
+      onJoinFailed?.();
       onShowToast('Could Not Join', (err as Error).message, 'error');
     } finally {
       setIsJoining(false);

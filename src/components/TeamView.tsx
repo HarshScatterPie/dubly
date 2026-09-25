@@ -32,7 +32,7 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
   const isAdmin = workspace.myRole === 'admin';
   const [form, setForm] = useState({ email: '', role: 'editor' as WorkspaceRole });
   const [isAdding, setIsAdding] = useState(false);
-  const [newLink, setNewLink] = useState<{ email: string; link: string } | null>(null);
+  const [newLink, setNewLink] = useState<{ email: string; link: string; emailed?: boolean } | null>(null);
   const [invites, setInvites] = useState<WorkspaceInvite[]>([]);
   const [busyInviteId, setBusyInviteId] = useState<string | null>(null);
   const [busyUid, setBusyUid] = useState<string | null>(null);
@@ -59,9 +59,15 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
     e.preventDefault();
     setIsAdding(true);
     try {
-      const { invite, token } = await workspaceService.invite({ email: form.email, role: form.role });
-      setNewLink({ email: invite.email, link: inviteLink(token) });
-      onShowToast('Invitation Created', `Send the link to ${invite.email}. They join once they open it and accept.`, 'success');
+      const { invite, token, emailed } = await workspaceService.invite({ email: form.email, role: form.role });
+      setNewLink({ email: invite.email, link: inviteLink(token), emailed });
+      onShowToast(
+        emailed ? 'Invitation Emailed' : 'Invitation Created',
+        emailed
+          ? `We emailed the invitation to ${invite.email}. They join once they open it and accept. The link is below too.`
+          : `Send the link to ${invite.email}. They join once they open it and accept.`,
+        'success'
+      );
       setForm({ email: '', role: 'editor' });
       await loadInvites();
     } catch (err) {
@@ -274,9 +280,15 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
 
           {newLink && (
             <div className="rounded-3xl border border-emerald-200 bg-emerald-50/60 p-5 space-y-3">
-              <h3 className="text-sm font-bold text-emerald-800">Invitation link for {newLink.email}</h3>
+              <h3 className="text-sm font-bold text-emerald-800">
+                {newLink.emailed ? `Invitation emailed to ${newLink.email}` : `Invitation link for ${newLink.email}`}
+              </h3>
               <p className="text-xs font-mono text-[#0F172A] break-all">{newLink.link}</p>
-              <p className="text-[11px] text-emerald-800/80">This link is shown once. Send it privately; nobody signed in with a different email can use it.</p>
+              <p className="text-[11px] text-emerald-800/80">
+                {newLink.emailed
+                  ? 'It is in their inbox (ask them to check spam too). You can also send this link yourself; nobody signed in with a different email can use it.'
+                  : 'This link is shown once. Send it privately; nobody signed in with a different email can use it.'}
+              </p>
               <div className="flex gap-2">
                 <button type="button" onClick={copyLink} className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded-xl bg-white border border-emerald-200 text-xs font-semibold text-emerald-800">
                   <Copy className="w-3.5 h-3.5" /> Copy invitation link

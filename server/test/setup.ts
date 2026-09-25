@@ -8,3 +8,5 @@ process.env.GCLOUD_PROJECT = process.env.GCLOUD_PROJECT || 'demo-dubly';
 if (!process.env.GCLOUD_PROJECT.startsWith('demo-')) {
   throw new Error('Tests require a demo- project id');
 }
+// Set before server/.env is read (dotenv never overrides a variable that exists), so no test can send real email through a developer's SMTP.
+for (const name of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM']) process.env[name] = '';

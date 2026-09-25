@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authAdmin, createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { setWorkspacePlan } from '../lib/plans';
 
 let api: TestApi;
 
@@ -26,7 +27,9 @@ async function createProject(user: TestUser, title: string) {
   return res.body as { id: string };
 }
 
+// Teammates need a plan that includes them, so the inviter's workspace is put on Enterprise first.
 async function invite(admin: TestUser, email: string, role = 'editor') {
+  await setWorkspacePlan((await workspaceOf(admin)).id, 'enterprise');
   return api.call('POST', '/api/workspace/invites', { token: admin.token, body: { email, role } });
 }
 
@@ -264,5 +267,31 @@ describe('workspace invitations', () => {
   it('requires a signed-in caller for every invite endpoint', async () => {
     expect((await api.call('POST', '/api/invites/accept', { body: { token: 'x' } })).status).toBe(401);
     expect((await api.call('POST', '/api/workspace/invites', { body: { email: 'a@b.co', role: 'editor' } })).status).toBe(401);
+  });
+});
+
+describe('plans and teammates', () => {
+  it('keeps a Starter workspace to one person', async () => {
+    const admin = await createUser('solo@team.test');
+    await workspaceOf(admin);
+    const res = await api.call('POST', '/api/workspace/invites', { token: admin.token, body: { email: 'friend@team.test', role: 'editor' } });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('PLAN_NO_TEAM');
+    expect((await db.collection('invites').get()).size).toBe(0);
+  });
+
+  it('stops a link made on Enterprise from working once the workspace is back on Starter', async () => {
+    const admin = await createUser('admin@team.test');
+    const invitee = await createUser('invitee@team.test');
+    const teamWs = await workspaceOf(admin);
+    await workspaceOf(invitee);
+    const created = await invite(admin, invitee.email);
+    expect(created.status).toBe(201);
+
+    await setWorkspacePlan(teamWs.id, 'starter');
+    const res = await accept(invitee, created.body.token);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('PLAN_NO_TEAM');
+    expect((await workspaceOf(admin)).members).toHaveLength(1);
   });
 });

@@ -19,8 +19,10 @@ import {
   BarChart3,
   Clapperboard,
   Sparkles,
+  Gauge,
 } from 'lucide-react';
-import type { NavigationTab, TranslationStyle, UserPreferences, UserUsageStats, Voice, VoiceEmotion } from '../types';
+import type { NavigationTab, PaidExtra, TranslationStyle, UserPreferences, UserUsageStats, Voice, VoiceEmotion } from '../types';
+import { allowanceRate, effectiveExtras } from '../lib/planMath';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { DEFAULT_PREFERENCES } from '../data/preferences';
 import { useAuth } from '../context/AuthContext';
@@ -37,6 +39,8 @@ interface SettingsViewProps {
   onPreferencesSaved: (preferences: UserPreferences) => void;
   workspace: WorkspaceInfo | null;
   usage: UserUsageStats;
+  // False while `usage` is still the placeholder, so plan-gated settings are not shown as locked by mistake.
+  usageLoaded: boolean;
   onNavigate: (tab: NavigationTab) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
 }
@@ -126,9 +130,17 @@ const initials = (name: string) =>
   name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('') || '?';
 
 // Everything a user can change about how Dubly works for them: account security, the defaults every new dub starts from, and this device's alerts.
-export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPreferencesSaved, workspace, usage, onNavigate, onShowToast }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPreferencesSaved, workspace, usage, usageLoaded, onNavigate, onShowToast }) => {
   const { user, profile, signOut } = useAuth();
   const [draft, setDraft] = useState<UserPreferences>(preferences ?? DEFAULT_PREFERENCES);
+  const extrasAllowed = usageLoaded && usage.paidExtrasAllowed;
+  // The same rate the server charges a dub at, from the plan's rates and what is switched on right now.
+  const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(extrasAllowed, draft));
+  const extraHint = (extra: PaidExtra, what: string) => {
+    const rate = usage.extraRates[extra] ?? 0;
+    if (!extrasAllowed || rate <= 0) return what;
+    return `${what} Uses your monthly limit faster: each dubbed minute counts as ${Math.round((1 + rate) * 100) / 100} min while it is on.`;
+  };
   const [saving, setSaving] = useState(false);
   const [customVoices, setCustomVoices] = useState<Voice[]>([]);
   const [engines, setEngines] = useState<{ lipSyncAvailable: boolean; separationAvailable: boolean } | null>(null);
@@ -494,33 +506,66 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
             </Row>
           </Section>
 
-          {/* Paid extras: each adds to the provider bill, so each is off until the user wants it */}
-          <Section id="extras" title="Paid extras" subtitle="Higher quality that adds to the AI cost of every dub. All off until you switch them on." Icon={Sparkles}>
+          {/* Paid extras: Enterprise only, each off until the user wants it, and each makes a dubbed minute use more of the monthly limit */}
+          <Section
+            id="extras"
+            title="Paid extras"
+            subtitle={
+              !usageLoaded
+                ? 'Checking your plan…'
+                : extrasAllowed
+                  ? `Higher quality on your ${usage.activePlan} plan. Each one you switch on uses your monthly limit faster.`
+                  : `Available on the Enterprise plan. You are on ${usage.activePlan} (${usage.minutesLimit} min a month).`
+            }
+            Icon={Sparkles}
+          >
+            {extrasAllowed && extrasRate > 1 && (
+              <div className="mx-5 sm:mx-6 my-4 flex items-start gap-2.5 p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800">
+                <Gauge className="w-4 h-4 mt-0.5 shrink-0" />
+                <p className="text-xs">
+                  <strong>Will consume your limit faster.</strong> With these on, each dubbed minute uses {extrasRate} min of your {usage.minutesLimit}-minute monthly
+                  limit, so it covers about {Math.floor(usage.minutesLimit / extrasRate)} dubbed minutes instead of {usage.minutesLimit}.
+                </p>
+              </div>
+            )}
             <Row
               title="AI review (Gemini supervision)"
-              hint="An AI reviewer listens to every dubbed line next to the original and re-records the ones with a garbled take, missing words, a mispronounced word, the wrong language or the wrong feeling. About ₹0.3–0.4 more per dubbed minute, per language, and a little more time."
+              hint={extraHint(
+                'aiReview',
+                'An AI reviewer listens to every dubbed line next to the original and re-records the ones with a garbled take, missing words, a mispronounced word, the wrong language or the wrong feeling. Adds a little time per language.'
+              )}
             >
-              <Toggle label="AI review" checked={draft.aiReview} onChange={(v) => update({ aiReview: v })} />
+              <Toggle label="AI review" checked={extrasAllowed && draft.aiReview} disabled={!extrasAllowed} onChange={(v) => update({ aiReview: v })} />
             </Row>
             <Row
               title="Premium voices"
               hint={
-                draft.expressiveVoices
-                  ? 'Voices lines with Google’s newer Gemini voice model: richer delivery, and it performs sighs as well as laughs. About ₹1 more per dubbed minute, per language (twice the standard voice cost).'
-                  : 'Needs Expressive voices, under Voice.'
+                extrasAllowed && !draft.expressiveVoices
+                  ? 'Needs Expressive voices, under Voice.'
+                  : extraHint('premiumVoices', 'Voices lines with Google’s newer Gemini voice model: richer delivery, and it performs sighs as well as laughs.')
               }
             >
-              <Toggle label="Premium voices" checked={draft.premiumVoices} disabled={!draft.expressiveVoices} onChange={(v) => update({ premiumVoices: v })} />
+              <Toggle
+                label="Premium voices"
+                checked={extrasAllowed && draft.premiumVoices}
+                disabled={!extrasAllowed || !draft.expressiveVoices}
+                onChange={(v) => update({ premiumVoices: v })}
+              />
             </Row>
             <Row
               title="Natural-timing re-takes"
               hint={
-                draft.expressiveVoices
-                  ? 'When a line does not fit its gap, the voice records it again faster or slower instead of the audio being stretched. About ₹0.4–0.6 more per dubbed minute, per language.'
-                  : 'Needs Expressive voices, under Voice.'
+                extrasAllowed && !draft.expressiveVoices
+                  ? 'Needs Expressive voices, under Voice.'
+                  : extraHint('paceRetakes', 'When a line does not fit its gap, the voice records it again faster or slower instead of the audio being stretched.')
               }
             >
-              <Toggle label="Natural-timing re-takes" checked={draft.paceRetakes} disabled={!draft.expressiveVoices} onChange={(v) => update({ paceRetakes: v })} />
+              <Toggle
+                label="Natural-timing re-takes"
+                checked={extrasAllowed && draft.paceRetakes}
+                disabled={!extrasAllowed || !draft.expressiveVoices}
+                onChange={(v) => update({ paceRetakes: v })}
+              />
             </Row>
           </Section>
 

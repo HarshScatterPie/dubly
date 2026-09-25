@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Clock, Copy, Loader2, Pencil, ShieldCheck, Trash2, UserPlus, Users, X } from 'lucide-react';
+import { Check, Clock, Copy, Loader2, Lock, Pencil, ShieldCheck, Trash2, UserPlus, Users, X } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import {
   inviteLink,
@@ -14,6 +14,8 @@ interface TeamViewProps {
   workspace: WorkspaceInfo;
   onChanged: (workspace: WorkspaceInfo) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
+  /** The workspace plan, once usage has loaded; a plan without teammates hides the invite form. */
+  plan?: { name: string; teamInvites: boolean };
 }
 
 const ROLE_INFO: Record<WorkspaceRole, { label: string; desc: string }> = {
@@ -26,7 +28,7 @@ function initials(name: string): string {
 }
 
 // The team screen: everyone sees who is in the workspace; admins invite people by link, change roles and remove them.
-export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShowToast }) => {
+export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShowToast, plan }) => {
   const isAdmin = workspace.myRole === 'admin';
   const [form, setForm] = useState({ email: '', role: 'editor' as WorkspaceRole });
   const [isAdding, setIsAdding] = useState(false);
@@ -221,7 +223,17 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
 
         {/* Add member (admins) / role explainer (editors) */}
         <div className="lg:col-span-2 space-y-4">
-          {isAdmin ? (
+          {isAdmin && plan && !plan.teamInvites ? (
+            <div className="rounded-3xl glass-panel p-5 space-y-2">
+              <div className="flex items-center gap-2">
+                <Lock className="w-4 h-4 text-[#F05637]" />
+                <h3 className="text-sm font-bold text-[#0F172A]">Teammates are on the Enterprise plan</h3>
+              </div>
+              <p className="text-xs text-[#64748B]">
+                This workspace is on the <strong>{plan.name}</strong> plan, which is for one person, so no one can be added to it. Contact ScatterPie to move to Enterprise and invite your team.
+              </p>
+            </div>
+          ) : isAdmin ? (
             <form onSubmit={handleInvite} className="rounded-3xl glass-panel p-5 space-y-3">
               <div className="flex items-center gap-2">
                 <UserPlus className="w-4 h-4 text-[#F05637]" />

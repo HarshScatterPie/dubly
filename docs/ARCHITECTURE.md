@@ -24,7 +24,7 @@ The whole deployment is **one process**. It keeps some state only in memory: mem
 
 ## Tenancy
 
-A **workspace** owns projects and the monthly minute allowance. Each user belongs to exactly one workspace at a time, as `admin` or `editor`, recorded in `workspaceMembership/{uid}`.
+A **workspace** owns projects and the monthly minute allowance. Its **plan** (`workspaces/{ws}.plan`, defined in `dublyPlans`) sets the allowance and what the workspace may use. **Starter** gives 50 min a month, no paid extras and no teammates. **Enterprise** gives 120 min, paid extras and invitations. Each paid extra a user switches on makes every dubbed minute use more of the allowance (Enterprise: AI review +0.25, premium voices +0.5, pace re-takes +0.25). The rate is fixed when the dub is charged and stored on the job; refunds use the same rate (`server/lib/plans.ts`, `src/lib/planMath.ts`). Each user belongs to exactly one workspace at a time, as `admin` or `editor`, recorded in `workspaceMembership/{uid}`.
 - On a user's first request, they get a personal workspace.
 - Teams form by **invitation**: an admin creates a link, and the invitee accepts it while signed in with the invited email (`server/lib/workspaces.ts`).
 - Every project read and write is addressed as `workspaces/{workspaceId}/projects/{id}`. The workspace ID always comes from the server-side membership lookup, never from the client.
@@ -58,7 +58,9 @@ What makes a line sound performed rather than read:
 - **Paid extras** are Settings toggles, **off by default**, because each adds to the provider bill: `aiReview`, `premiumVoices` and `paceRetakes`. The user who starts a dub decides for that dub.
 - **Pace first** (preference `paceRetakes`). A take that overruns its room, or is far shorter than the original line, is re-voiced once with a pace direction (`speechStyle.paceRequest`), before condensing the text or time-stretching the audio.
 - **AI review** (preference `aiReview`). `dubDirector.ts` sends each take with its original line to `GEMINI_REVIEW_MODEL` in batches of 8. The reviewer flags garbled speech, missing words, mispronunciation, the wrong language or the wrong emotion. A rejected Gemini or cloned take is re-recorded once with the reviewer's direction and kept only if the reviewer accepts it. Otherwise the line gets the `director` review flag and `directorNote`. A failed review batch never fails the dub.
-- **Levels.** Each line is set relative to the others as the original speaker spoke it: whispers stay low and shouts stay loud (`levelMatch.ts`, ±4 dB). The finished track is then levelled to the original's EBU R128 loudness, with two-pass `loudnorm` bounded to −24…−12 LUFS. After rendering, every line records a `renderKey` (a fingerprint of its text, delivery, voice and voice settings) and its review flags. A **retake** is an ordinary dub job for one language whose reserved minutes cover only the lines whose fingerprint no longer matches; the TTS cache makes the unchanged lines free to re-voice.
+- **Levels.** Each line is set relative to the others as the original speaker spoke it: whispers stay low and shouts stay loud (`levelMatch.ts`, ±4 dB). The finished track is then levelled to the original's EBU R128 loudness, with two-pass `loudnorm` bounded to −24…−12 LUFS.
+
+After rendering, every line records a `renderKey` (a fingerprint of its text, delivery, voice and voice settings) and its review flags. A **retake** is an ordinary dub job for one language whose reserved minutes cover only the lines whose fingerprint no longer matches; the TTS cache makes the unchanged lines free to re-voice.
 
 ### Transcription pipeline (per job)
 Wait for a heavy slot → download → extract 16 kHz audio → Gemini STT in chunks → remove hallucinated filler → VAD alignment → optional CTC word timing (time-boxed) → speakers → settle, with the transcript applied atomically.

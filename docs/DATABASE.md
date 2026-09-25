@@ -6,7 +6,8 @@ Firestore, in the Firebase project shared with ScatterStudio. The backend reache
 
 | Path | Contents | Written by |
 |---|---|---|
-| `workspaces/{ws}` | `name`, `createdAt`, `createdBy` | workspaces.ts |
+| `workspaces/{ws}` | `name`, `createdAt`, `createdBy`, `plan` (`starter` when absent), `planUpdatedAt` | workspaces.ts, plans.ts |
+| `dublyPlans/{planId}` | `starter` and `enterprise`: `name`, `minutesPerMonth`, `paidExtras`, `extraRates` (extra allowance per dubbed minute for each paid extra), `teamInvites`. Seeded with the built-in values on first read; after that, edits here win (the server rereads within a minute) | plans.ts |
 | `workspaces/{ws}/members/{uid}` | `uid, email, name, role (admin\|editor), addedAt, addedBy` | workspaces.ts |
 | `workspaceMembership/{uid}` | `workspaceId` (null = removed), `personalWorkspaceId` (their own workspace to return to) | workspaces.ts |
 | `workspaces/{ws}/projects/{id}` | Project metadata: title, languages, voice choices, status and progress, `languageOutputs` (per-language status + storage **paths**), `activeJobId`, `dubAttempts`, `segmentsStorage` | projectRepo.ts / projectStorage.ts |
@@ -14,7 +15,7 @@ Firestore, in the Firebase project shared with ScatterStudio. The backend reache
 | `…/projects/{id}/languages/{code}` | `{ segments: LocalizedSegment[] }` for one target language | projectStorage.ts |
 | `workspaces/{ws}/meta/glossary` | `{ entries: GlossaryEntry[], updatedAt, updatedBy }`: at most 300 terms, each `keep` (never translated) or `translate` (per-language rendering), with an optional `spokenAs` | glossaryStore.ts |
 | `workspaces/{ws}/meta/usage` | Monthly minutes (`minutesDubbed`, `usagePeriod`) + lifetime counters | projectRepo.ts |
-| `jobs/{jobId}` | Dub and transcription jobs (fields: [jobs.ts](../server/lib/jobs.ts) `DubJob`) | jobs.ts |
+| `jobs/{jobId}` | Dub and transcription jobs (fields: [jobs.ts](../server/lib/jobs.ts) `DubJob`; a dub records the paid `extras` it was charged for) | jobs.ts |
 | `jobIdempotency/{sha256(ws\|project\|key)}` | `{ jobId, createdAt }` | jobs.ts |
 | `invites/{sha256(token)}` | `workspaceId, invitedEmail, role, status (pending\|accepted\|revoked), expiresAt, acceptedBy …` | workspaces.ts |
 | `shares/{sha256(token)}` | `workspaceId, projectId, languageCode, storagePath, expiresAt, revokedAt?` (older links: keyed by the raw token) | share.ts |

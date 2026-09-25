@@ -45,9 +45,12 @@ interface ProjectWorkspaceProps {
   /** Shows a project the server just returned, without saving it back. */
   onProjectRefreshed: (fresh: DubbingProject) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
+  /** Allowance used per dubbed minute with the user's paid extras (1 with none), so estimates match what is charged. */
+  allowanceRate?: number;
 }
 
 export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
+  allowanceRate = 1,
   project,
   onBack,
   onUpdateProject,
@@ -617,7 +620,8 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                   </p>
                   {!retake && pendingRetake && (
                     <p className="text-[11px] text-[#64748B] mt-0.5">
-                      Only the changed lines are charged: about {Math.max(0.1, pendingRetake.minutes).toFixed(1)} min of your allowance.
+                      Only the changed lines are charged: about {Math.max(0.1, pendingRetake.minutes * allowanceRate).toFixed(1)} min of your allowance
+                      {allowanceRate > 1 ? ` (paid extras on: ${allowanceRate}× per minute)` : ''}.
                     </p>
                   )}
                 </div>

@@ -82,3 +82,5 @@
 - **Settle a specific job by hand** (it must no longer be running anywhere):
   `npx tsx -e "import('./server/lib/jobs.ts').then(m => m.settleInterruptedJob('job-…')).then(console.log)"`
 - **Roll back the project storage split:** `npx tsx server/scripts/unsplit_projects.ts` (dry run), then `--apply`.
+- **Move a workspace to another plan:** `npx tsx server/scripts/set_plan.ts <workspace id | member email> enterprise` (or `starter`). With no plan argument, it shows the current plan. The server picks up the change within a minute. Moving to Starter keeps existing teammates, but no new ones can join, including through links sent earlier.
+- **Change what a plan includes:** edit `dublyPlans/starter` or `dublyPlans/enterprise` in the Firestore console (`minutesPerMonth`, `paidExtras`, `extraRates`, `teamInvites`, `name`). Every workspace on that plan follows within a minute.

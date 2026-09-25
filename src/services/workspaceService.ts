@@ -45,7 +45,8 @@ export const workspaceService = {
   rename: (name: string) => apiPatch<WorkspaceInfo>('/api/workspace', { name }),
   listInvites: () => apiGet<{ invites: WorkspaceInvite[] }>('/api/workspace/invites').then((r) => r.invites),
   invite: (input: { email: string; role: WorkspaceRole }) =>
-    apiPost<{ invite: WorkspaceInvite; token: string }>('/api/workspace/invites', input),
+    // `emailed` says whether the server also emailed the link to the invitee.
+    apiPost<{ invite: WorkspaceInvite; token: string; emailed?: boolean }>('/api/workspace/invites', input),
   revokeInvite: (inviteId: string) => apiDelete(`/api/workspace/invites/${encodeURIComponent(inviteId)}`),
   previewInvite: (token: string) => apiPost<InvitePreview>('/api/invites/preview', { token }),
   acceptInvite: (token: string) => apiPost<{ workspaceId: string; role: WorkspaceRole }>('/api/invites/accept', { token }),

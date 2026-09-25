@@ -43,5 +43,8 @@ export const rateRules = {
   importSamplePerUser: rule('IMPORT_SAMPLE_PER_HOUR', 20, HOUR),
   uploadPerUser: rule('UPLOAD_PER_HOUR', 30, HOUR),
   inviteAcceptPerUser: rule('INVITE_ACCEPT_PER_HOUR', 30, HOUR),
+  // Invitations send email, so they are capped well below anything a real team needs.
+  invitePerUser: rule('INVITE_PER_HOUR', 20, HOUR),
+  invitePerWorkspace: rule('INVITE_PER_WORKSPACE_DAY', 100, 24 * HOUR),
   shareViewPerIp: rule('SHARE_VIEW_PER_MINUTE', 60, 60 * 1000),
 };

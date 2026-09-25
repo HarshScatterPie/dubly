@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { authAdmin, createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
 import { setWorkspacePlan } from '../lib/plans';
+import { isMailConfigured, setMailSenderForTests } from '../lib/mailer';
 
 let api: TestApi;
 
@@ -293,5 +294,50 @@ describe('plans and teammates', () => {
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('PLAN_NO_TEAM');
     expect((await workspaceOf(admin)).members).toHaveLength(1);
+  });
+});
+
+describe('invitation emails', () => {
+  type Sent = { to: string; subject: string; text: string; html: string; from: string };
+  let sent: Sent[] = [];
+  afterAll(() => setMailSenderForTests(null));
+
+  it('emails the invitee their link, with names escaped in the HTML', async () => {
+    sent = [];
+    setMailSenderForTests(async (message) => {
+      sent.push(message as Sent);
+    });
+    const admin = await createUser('admin@team.test');
+    await workspaceOf(admin);
+    expect((await api.call('PATCH', '/api/workspace', { token: admin.token, body: { name: '<b>Acme</b> Studio' } })).status).toBe(200);
+
+    const created = await invite(admin, 'new.person@team.test');
+    expect(created.status).toBe(201);
+    expect(created.body.emailed).toBe(true);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe('new.person@team.test');
+    expect(sent[0].subject).toContain('<b>Acme</b> Studio');
+    expect(sent[0].text).toContain(`?invite=${encodeURIComponent(created.body.token)}`);
+    expect(sent[0].html).toContain('&lt;b&gt;Acme&lt;/b&gt; Studio');
+    expect(sent[0].html).not.toContain('<b>Acme</b>');
+  });
+
+  it('still creates the invitation, with its link, when the email fails or is not set up', async () => {
+    setMailSenderForTests(async () => {
+      throw new Error('SMTP down');
+    });
+    const admin = await createUser('admin@team.test');
+    await workspaceOf(admin);
+    const failed = await invite(admin, 'one@team.test');
+    expect(failed.status).toBe(201);
+    expect(failed.body.emailed).toBe(false);
+    expect(failed.body.token).toBeTruthy();
+
+    setMailSenderForTests(null);
+    // Checked before inviting, so a leaked real SMTP setting fails here instead of sending mail.
+    expect(isMailConfigured()).toBe(false);
+    const unconfigured = await invite(admin, 'two@team.test');
+    expect(unconfigured.status).toBe(201);
+    expect(unconfigured.body.emailed).toBe(false);
   });
 });

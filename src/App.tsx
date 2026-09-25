@@ -15,9 +15,10 @@ import { useAuth } from './context/AuthContext';
 import { textToSpeechService } from './services/textToSpeechService';
 import { projectService } from './services/projectService';
 import { apiGet, type ApiError } from './lib/apiClient';
-import { workspaceService, type WorkspaceInfo } from './services/workspaceService';
-import { InviteAcceptDialog, takeInviteTokenFromUrl } from './components/InviteAcceptDialog';
-import { settingsService } from './services/settingsService';
+import type { WorkspaceInfo } from './services/workspaceService';
+import { hasPendingInvite, InviteAcceptDialog, takeInviteTokenFromUrl } from './components/InviteAcceptDialog';
+import { hasLegacyPreferences, settingsService } from './services/settingsService';
+import { loadBootData, readBootCache, updateBootCache, writeBootCache, type BootData } from './lib/bootCache';
 import { StudioMiniPlayer } from './components/StudioMiniPlayer';
 import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type StudioStatus } from './lib/studioSession';
 import { projectProgress } from './lib/projectProgress';
@@ -67,6 +68,9 @@ const newStudioSession = (spec: Partial<Omit<StudioSession, 'key'>> = {}): Studi
   ...spec,
 });
 
+// How long a first visit (nothing cached) keeps the loading screen up before opening the app and filling it in as data lands.
+const BOOT_WAIT_MS = 10_000;
+
 const EMPTY_USAGE: UserUsageStats = {
   minutesDubbed: 0,
   minutesLimit: 50,
@@ -83,7 +87,13 @@ const EMPTY_USAGE: UserUsageStats = {
 };
 
 export default function App() {
-  const { user, loading: authLoading, signOut } = useAuth();
+  const { user, loading: authLoading, signOut, primeProfile } = useAuth();
+  // True while a visit with nothing cached waits for its startup data behind the loading screen.
+  const [booting, setBooting] = useState(false);
+  // Set once startup data is in, so tab switches refresh lists only after that and never race it.
+  const bootedRef = useRef(false);
+  // The workspace an invitation is joining, shown full screen until the new workspace's data is loaded.
+  const [joiningWorkspace, setJoiningWorkspace] = useState<string | null>(null);
   // The caller's team and role; `accessError` is set when they were removed from their workspace.
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
   const [workspaceAccessError, setWorkspaceAccessError] = useState<string | null>(null);
@@ -149,6 +159,7 @@ export default function App() {
       const [proj, usg] = await Promise.all([projectService.list(), apiGet<UserUsageStats>('/api/usage')]);
       setProjects(proj);
       setUsage(usg);
+      if (user) updateBootCache(user.uid, { projects: proj, usage: usg });
     } catch (err) {
       showToast('Failed to Load Studio Data', (err as Error).message, 'error');
     }
@@ -159,29 +170,65 @@ export default function App() {
   // whenever the user looks at a view that's supposed to reflect it (including on first
   // load, since activeTab already defaults to 'dashboard').
   useEffect(() => {
-    if (!user) return;
+    if (!user || !bootedRef.current) return;
     if (activeTab === 'dashboard' || activeTab === 'history' || activeTab === 'settings') {
       void refreshProjectsAndUsage();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, user]);
 
+  // Startup data in one piece; lastFetchedAtRef keeps the tab-switch refresh from asking again straight away.
+  const applyBoot = (data: BootData) => {
+    setWorkspace(data.workspace);
+    setWorkspaceAccessError(null);
+    setPreferences(data.preferences);
+    setUsage(data.usage);
+    setProjects(data.projects);
+    primeProfile(data.profile);
+    lastFetchedAtRef.current = Date.now();
+    bootedRef.current = true;
+  };
+
+  // Opens from this browser's copy when there is one (then refreshes it quietly); otherwise waits for the server behind the loading screen.
   useEffect(() => {
     if (!user) {
       setWorkspace(null);
       setWorkspaceAccessError(null);
+      setBooting(false);
+      bootedRef.current = false;
       return;
     }
-    workspaceService
-      .get()
-      .then((ws) => {
-        setWorkspace(ws);
-        setWorkspaceAccessError(null);
+    let cancelled = false;
+    const cached = readBootCache(user.uid);
+    if (cached) applyBoot(cached);
+    else setBooting(true);
+    const giveUp = setTimeout(() => {
+      if (!cancelled) setBooting(false);
+    }, BOOT_WAIT_MS);
+    loadBootData()
+      .then((data) => {
+        if (cancelled) return;
+        applyBoot(data);
+        writeBootCache(user.uid, data);
+        if (hasLegacyPreferences()) settingsService.getPreferences().then(setPreferences).catch(() => undefined);
       })
       .catch((err) => {
+        if (cancelled) return;
+        bootedRef.current = true;
         if ((err as ApiError).status === 403) setWorkspaceAccessError((err as Error).message);
-        else showToast('Failed to Load Workspace', (err as Error).message, 'error');
+        else if (!cached) {
+          primeProfile(null);
+          showToast('Failed to Load Studio Data', (err as Error).message, 'error');
+        }
+      })
+      .finally(() => {
+        clearTimeout(giveUp);
+        if (!cancelled) setBooting(false);
       });
+    return () => {
+      cancelled = true;
+      clearTimeout(giveUp);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
@@ -193,12 +240,7 @@ export default function App() {
       setStudioStatus(null);
       rememberedStudioIdRef.current = null;
       restoreTriedRef.current = false;
-      return;
     }
-    settingsService
-      .getPreferences()
-      .then(setPreferences)
-      .catch(() => setPreferences(null));
   }, [user]);
 
   // Opening the dubbing screen with no studio running starts a fresh one.
@@ -261,23 +303,31 @@ export default function App() {
     setActiveTab('dubbing');
   };
 
-  // After joining a team through an invitation everything the app holds belongs to the old workspace, so it is all re-read.
+  // After joining a team through an invitation everything the app holds belongs to the old workspace, so it is all re-read behind the joining screen.
   const handleJoinedWorkspace = async (workspaceName: string) => {
-    try {
-      setWorkspace(await workspaceService.get());
-      setWorkspaceAccessError(null);
-    } catch (err) {
-      showToast('Failed to Load Workspace', (err as Error).message, 'error');
-    }
     setActiveWorkspaceProject(null);
     setStudioSession(null);
     setStudioStatus(null);
     forgetStudioProject();
     rememberedStudioIdRef.current = null;
     setActiveTab('dashboard');
-    await refreshProjectsAndUsage(true);
-    showToast('Joined Workspace', `You are now working in ${workspaceName}.`, 'success');
+    try {
+      const data = await loadBootData();
+      applyBoot(data);
+      if (user) writeBootCache(user.uid, data);
+      showToast('Joined Workspace', `You are now working in ${workspaceName}.`, 'success');
+    } catch (err) {
+      showToast('Joined, but Could Not Load It Yet', (err as Error).message, 'error');
+    } finally {
+      setJoiningWorkspace(null);
+    }
   };
+
+  const joiningScreen = joiningWorkspace && (
+    <div className="fixed inset-0 z-[80]">
+      <BrandSplash label={`Joining ${joiningWorkspace}…`} />
+    </div>
+  );
 
   const handleDismissToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -375,6 +425,10 @@ export default function App() {
     return <Login />;
   }
 
+  if (booting) {
+    return <BrandSplash label={hasPendingInvite() ? 'Opening your invitation…' : 'Loading your workspace…'} />;
+  }
+
   // Removed from their workspace: nothing else in the app would work, so say so plainly instead of failing every request.
   if (workspaceAccessError) {
     return (
@@ -391,7 +445,13 @@ export default function App() {
           </button>
         </div>
         <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
-        <InviteAcceptDialog onJoined={handleJoinedWorkspace} onShowToast={showToast} />
+        <InviteAcceptDialog
+          onJoining={setJoiningWorkspace}
+          onJoinFailed={() => setJoiningWorkspace(null)}
+          onJoined={handleJoinedWorkspace}
+          onShowToast={showToast}
+        />
+        {joiningScreen}
       </div>
     );
   }
@@ -400,7 +460,15 @@ export default function App() {
     <div className="h-screen bg-background text-foreground flex flex-col antialiased selection:bg-coral-500 selection:text-white overflow-hidden">
       {/* Toast Notification Container */}
       <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
-      {workspace && <InviteAcceptDialog onJoined={handleJoinedWorkspace} onShowToast={showToast} />}
+      {workspace && (
+        <InviteAcceptDialog
+          onJoining={setJoiningWorkspace}
+          onJoinFailed={() => setJoiningWorkspace(null)}
+          onJoined={handleJoinedWorkspace}
+          onShowToast={showToast}
+        />
+      )}
+      {joiningScreen}
 
       {/* Main Layout Body */}
       <div className="flex-1 flex overflow-hidden">

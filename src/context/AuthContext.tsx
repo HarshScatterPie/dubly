@@ -13,7 +13,7 @@ import {
   type User,
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
-import { apiGet } from '../lib/apiClient';
+import { clearBootCaches } from '../lib/bootCache';
 
 export interface UserProfile {
   name: string;
@@ -38,6 +38,8 @@ interface AuthContextValue {
   signInWithEmail: (email: string, password: string) => Promise<void>;
   // Emails a set-a-new-password link through Firebase itself; says nothing about whether the account exists.
   sendPasswordReset: (email: string) => Promise<void>;
+  // The profile arrives with the app's startup data (GET /api/bootstrap) rather than in a request of its own.
+  primeProfile: (profile: UserProfile | null) => void;
   signOut: () => Promise<void>;
 }
 
@@ -70,25 +72,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return unsubscribe;
   }, []);
 
+  // Signing out forgets the profile; on sign-in the app primes it (child effects run first, so this must not reset a primed one).
   useEffect(() => {
-    if (!user) {
-      setProfile(undefined);
-      return;
-    }
-    let cancelled = false;
-    setProfile(undefined);
-    apiGet<UserProfile | null>('/api/profile')
-      .then((p) => {
-        if (!cancelled) setProfile(p);
-      })
-      .catch(() => {
-        // No ScatterStudio record for this account — not an error the user needs to see,
-        // callers fall back to Firebase Auth's own displayName/email.
-        if (!cancelled) setProfile(null);
-      });
-    return () => {
-      cancelled = true;
-    };
+    if (!user) setProfile(undefined);
   }, [user]);
 
   const signInWithGoogle = async () => {
@@ -124,12 +110,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const signOut = async () => {
+    clearBootCaches();
     await firebaseSignOut(auth);
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, profile, loading, error, signInWithGoogle, signInWithEmail, sendPasswordReset, signOut }}
+      value={{ user, profile, loading, error, signInWithGoogle, signInWithEmail, sendPasswordReset, primeProfile: setProfile, signOut }}
     >
       {children}
     </AuthContext.Provider>

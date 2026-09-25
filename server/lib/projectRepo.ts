@@ -387,9 +387,26 @@ function toUserSettings(data: (Partial<ProviderSettings> & { preferences?: Parti
   return { ...DEFAULT_PROVIDER_SETTINGS, ...providers, preferences: withPreferenceDefaults(preferences) };
 }
 
+// Settings are read by every dub, analysis, preview and page load but change only through setSettings on this one process, so a short cache is exact.
+const SETTINGS_CACHE_MS = 60_000;
+const settingsCache = new Map<string, { settings: UserSettings; at: number }>();
+// The ScatterStudio profile only feeds a display name; minutes of staleness are harmless.
+const PROFILE_CACHE_MS = 5 * 60_000;
+const profileCache = new Map<string, { profile: UserProfile | null; at: number }>();
+
+// Test seam: forgets cached settings and profiles when the emulator is wiped.
+export function clearUserCaches(): void {
+  settingsCache.clear();
+  profileCache.clear();
+}
+
 export async function getSettings(uid: string): Promise<UserSettings> {
+  const hit = settingsCache.get(uid);
+  if (hit && Date.now() - hit.at < SETTINGS_CACHE_MS) return hit.settings;
   const snap = await settingsDoc(uid).get();
-  return toUserSettings(snap.exists ? snap.data() : undefined);
+  const settings = toUserSettings(snap.exists ? snap.data() : undefined);
+  settingsCache.set(uid, { settings, at: Date.now() });
+  return settings;
 }
 
 // A merge write: only the fields sent change, including single preferences.
@@ -400,7 +417,9 @@ export async function setSettings(
   const ref = settingsDoc(uid);
   await ref.set(settings, { merge: true });
   const snap = await ref.get();
-  return toUserSettings(snap.data());
+  const saved = toUserSettings(snap.data());
+  settingsCache.set(uid, { settings: saved, at: Date.now() });
+  return saved;
 }
 
 export interface UserProfile {
@@ -421,12 +440,17 @@ export interface UserProfile {
  * `api_key`, which must never reach the client.
  */
 export async function getUserProfile(uid: string): Promise<UserProfile | null> {
+  const hit = profileCache.get(uid);
+  if (hit && Date.now() - hit.at < PROFILE_CACHE_MS) return hit.profile;
   const snap = await db.collection('users').doc(uid).get();
-  if (!snap.exists) return null;
-  const data = snap.data() || {};
-  return {
-    name: typeof data.name === 'string' ? data.name : '',
-    role: typeof data.role === 'string' ? data.role : '',
-    workspace: typeof data.workspace === 'string' ? data.workspace : '',
-  };
+  const data = snap.exists ? snap.data() || {} : null;
+  const profile = data
+    ? {
+        name: typeof data.name === 'string' ? data.name : '',
+        role: typeof data.role === 'string' ? data.role : '',
+        workspace: typeof data.workspace === 'string' ? data.workspace : '',
+      }
+    : null;
+  profileCache.set(uid, { profile, at: Date.now() });
+  return profile;
 }

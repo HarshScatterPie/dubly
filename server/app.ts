@@ -12,6 +12,7 @@ import { repoRoot } from './lib/paths';
 import { healthRouter } from './routes/health';
 import { settingsRouter } from './routes/settings';
 import { usageRouter } from './routes/usage';
+import { bootstrapRouter } from './routes/bootstrap';
 import { projectsRouter } from './routes/projects';
 import { dubRouter } from './routes/dub';
 import { ttsRouter } from './routes/tts';
@@ -133,6 +134,7 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   app.use('/api/profile', requireAuth, profileRouter);
   app.use('/api/settings', requireAuth, settingsRouter);
   app.use('/api/usage', requireAuth, requireWorkspace, usageRouter);
+  app.use('/api/bootstrap', requireAuth, requireWorkspace, bootstrapRouter);
   app.use('/api/tts', requireAuth, requireWorkspace, ttsRouter);
   app.use('/api/voices', requireAuth, voicesRouter);
   // Invitations addressed to the caller are resolved by their email, before (and regardless of) which workspace they are in.

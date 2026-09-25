@@ -19,6 +19,7 @@ import {
 } from '../lib/workspaces';
 import { schemas, validateBody } from '../lib/validation';
 import { getGlossary, saveGlossary } from '../lib/glossaryStore';
+import { emailInvite } from '../lib/inviteEmail';
 
 export const workspaceRouter = Router();
 
@@ -62,13 +63,20 @@ workspaceRouter.get('/invites', requireAdmin, async (req, res) => {
   res.json({ invites: await listPendingInvites(req.workspaceId!) });
 });
 
-workspaceRouter.post('/invites', requireAdmin, validateBody(schemas.invite), async (req, res) => {
+const inviteLimit = rateLimit('invite', [
+  ['user', rateRules.invitePerUser],
+  ['workspace', rateRules.invitePerWorkspace],
+]);
+
+workspaceRouter.post('/invites', requireAdmin, inviteLimit, validateBody(schemas.invite), async (req, res) => {
   try {
-    const { invite, token } = await createInvite(req.workspaceId!, req.uid!, {
+    const { invite, token, workspaceName } = await createInvite(req.workspaceId!, req.uid!, {
       email: String(req.body?.email ?? ''),
       role: req.body?.role as WorkspaceRole,
     });
-    res.status(201).json({ invite, token });
+    // The link is returned either way, so a failed or unconfigured email never loses the invitation.
+    const emailed = await emailInvite(invite, workspaceName, token);
+    res.status(201).json({ invite, token, emailed });
   } catch (err) {
     sendError(res, err);
   }

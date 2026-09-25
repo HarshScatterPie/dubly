@@ -40,9 +40,24 @@ import { invalidateStorageUsage } from '../lib/storageUsage';
 import { log, withLogContext } from '../lib/log';
 import { randomUUID } from 'node:crypto';
 import { routeSynthesizeSpeech, type ProviderSettings } from '../lib/modelRouter';
-import { burnSubtitles, effectiveClipSeconds, MAX_COMPRESSION, muxVideoWithAudio, SEGMENT_GUARD_SECONDS, stitchDubbedAudio } from '../lib/ffmpeg';
-import { getWavDurationSeconds } from '../lib/audioUtils';
-import { vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
+import {
+  burnSubtitles,
+  effectiveClipSeconds,
+  extractAudioForStt,
+  loudnessTarget,
+  MAX_COMPRESSION,
+  measureLoudness,
+  muxVideoWithAudio,
+  normalizeLoudness,
+  SEGMENT_GUARD_SECONDS,
+  stitchDubbedAudio,
+  type TimedAudioSegment,
+} from '../lib/ffmpeg';
+import { getWavDurationSeconds, openWavSlicer, speechLevelDb, type WavSlicer } from '../lib/audioUtils';
+import { describeVerdict, retakeStyle, reviewDubbedLines, type LineVerdict } from '../lib/dubDirector';
+import { lineGainsDb } from '../lib/levelMatch';
+import { stripPerformanceTags } from '../lib/performance';
+import { isVertexConfigured, vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
 import { buildKaraokeAss } from '../lib/captions';
 import { isLipSyncAvailable, runLipSync } from '../lib/lipSync';
 import { costEstimate, createCostMeter, recordTts, summarizeCost } from '../lib/costMeter';
@@ -52,11 +67,11 @@ import { tmpDir } from '../lib/paths';
 import { resolveVoice, type VoiceSelection } from '../lib/voiceResolution';
 import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
 import { VOICES } from '../../src/data/mockData';
-import type { GlossaryEntry, LocalizedSegment, QaFlag } from '../../src/types';
+import type { GlossaryEntry, LocalizedSegment, QaFlag, Voice } from '../../src/types';
 import { schemas, validateBody } from '../lib/validation';
 import { getGlossary } from '../lib/glossaryStore';
 import { applySpokenForms, requiredRendering } from '../lib/glossary';
-import { buildStylePrompt } from '../lib/speechStyle';
+import { buildStylePrompt, paceRequest } from '../lib/speechStyle';
 import { renderQaFlags, textQaFlags, withFlags } from '../lib/lineReview';
 import { currentLineKey, retakePlan } from '../lib/retake';
 
@@ -422,6 +437,14 @@ async function renderLanguage(params: {
   ttsProvider: ProviderSettings['ttsProvider'];
   expressiveVoices: boolean;
   glossary: GlossaryEntry[];
+  // The original's speech track (16 kHz), for per-line levels and the AI review; null when it could not be extracted.
+  sourceSpeech: WavSlicer | null;
+  // The paid extras the user who started the dub switched on (Settings): AI review, premium voices, pace re-takes.
+  aiReview: boolean;
+  premiumVoices: boolean;
+  paceRetakes: boolean;
+  // Integrated loudness (LUFS) the finished track is levelled to, taken from the original; null skips levelling.
+  loudnessLufs: number | null;
   onProgress: (fraction: number, message: string) => Promise<void>;
 }): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[] }> {
   const { workspaceId, projectId, stored, languageCode, segments, videoLocalPath, background, costMeter } = params;
@@ -449,38 +472,74 @@ async function renderLanguage(params: {
   const review = { languageCode, sourceLanguageCode: stored.sourceLanguage, glossary: params.glossary };
   const protectedTerms = params.glossary.map((entry) => requiredRendering(entry, languageCode)).filter((term): term is string => Boolean(term));
 
-  const timedAudio: { startTime: number; endTime: number; audio: Buffer }[] = [];
+  // One per spoken line: its current take and everything needed to judge or re-record it.
+  interface LineTake {
+    index: number;
+    audio: Buffer;
+    engine: 'gemini' | 'chirp' | 'clone';
+    speechText: string;
+    style: string;
+    voice: Voice;
+    cloneReference?: { audioPath: string; transcript?: string };
+    available: number;
+    condensed: boolean;
+    sourceDb: number | null;
+    directorNote?: string;
+  }
+  const takes: LineTake[] = [];
+
+  const synthesizeLine = async (speechText: string, voice: Voice, cloneReference: LineTake['cloneReference'], style: string, take = 0) => {
+    const result = await routeSynthesizeSpeech(applySpokenForms(speechText, params.glossary), voice, languageCode, params.ttsProvider, {
+      cloneReference,
+      style,
+      expressive: params.expressiveVoices,
+      take,
+      premium: params.premiumVoices,
+    });
+    recordTts(costMeter, result.engine === 'gemini' ? 'gemini-tts' : result.provider, speechText.length, result.fromCache);
+    const engine: LineTake['engine'] = result.provider === 'clone' ? 'clone' : (result.engine ?? 'chirp');
+    return { audio: result.audio, engine };
+  };
+  // How long a take will actually play once the user's pitch and speed are applied.
+  const playedSeconds = (audio: Buffer) => effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
+
   for (let i = 0; i < finalSegments.length; i++) {
     const seg = finalSegments[i];
-    let renderFlags: QaFlag[] = [];
     // A segment with no text (e.g. a silent lead-in the STT step correctly
     // transcribed as empty) has nothing to synthesize — every provider rejects an
     // empty string outright. Leave that span silent in the stitched track instead.
     if (seg.translatedText.trim().length > 0) {
       // Resolved per line, not once per render: the voice can differ by speaker as well
       // as by language, and both are only known here.
-      const lineVoice = resolveVoice(params.voiceSelection, languageCode, seg.speaker, params.voiceCatalog);
-      const cloneReference = isClonedVoiceId(lineVoice.id) ? await params.loadCloneReference(lineVoice.id) : undefined;
+      const voice = resolveVoice(params.voiceSelection, languageCode, seg.speaker, params.voiceCatalog);
+      const cloneReference = isClonedVoiceId(voice.id) ? await params.loadCloneReference(voice.id) : undefined;
       // The project's overall emotion plus how the original line was delivered.
       const style = buildStylePrompt(stored.voiceEmotion, seg.delivery);
-      const synthesize = async (speechText: string) => {
-        const result = await routeSynthesizeSpeech(applySpokenForms(speechText, params.glossary), lineVoice, languageCode, params.ttsProvider, {
-          cloneReference,
-          style,
-          expressive: params.expressiveVoices,
-        });
-        recordTts(costMeter, result.engine === 'gemini' ? 'gemini-tts' : result.provider, speechText.length, result.fromCache);
-        return result.audio;
-      };
-
-      let audio = await synthesize(speechScript[seg.id] || seg.translatedText);
+      let speechText = speechScript[seg.id] || seg.translatedText;
+      let { audio, engine } = await synthesizeLine(speechText, voice, cloneReference, style);
 
       // The room this line has before the next one starts; past it the voices overlap and the dub drifts off the picture.
       const nextSpoken = finalSegments.slice(i + 1).find((s) => s.translatedText.trim().length > 0);
       const nextStart = nextSpoken ? nextSpoken.startTime : stored.videoDuration;
-      const available = Math.max(seg.endTime - seg.startTime, nextStart - seg.startTime - SEGMENT_GUARD_SECONDS);
-      let spokenSeconds = effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
+      const slot = seg.endTime - seg.startTime;
+      const available = Math.max(slot, nextStart - seg.startTime - SEGMENT_GUARD_SECONDS);
+      let spokenSeconds = playedSeconds(audio);
       let wasCondensed = false;
+
+      // Pace first: a voice asked to speed up or take its time still sounds like a person; audio stretched afterwards does not.
+      const pace = params.paceRetakes && engine === 'gemini' ? paceRequest(spokenSeconds, slot, available, spokenSeconds > 0 ? getWavDurationSeconds(audio) / spokenSeconds : 1) : null;
+      if (pace) {
+        try {
+          const paced = await synthesizeLine(speechText, voice, cloneReference, `${style} ${pace.direction}`.trim());
+          const pacedSeconds = playedSeconds(paced.audio);
+          if (pace.accept(pacedSeconds, spokenSeconds)) {
+            audio = paced.audio;
+            spokenSeconds = pacedSeconds;
+          }
+        } catch (err) {
+          console.error(`[dub] paced take of ${seg.id} failed, keeping the first take`, err);
+        }
+      }
 
       // Too long to fit even at the fastest natural pace: rewrite it shorter rather than gabble or overlap. Hand-edited lines are left as the user wrote them.
       if (!seg.isEdited && spokenSeconds > available * MAX_COMPRESSION) {
@@ -490,32 +549,117 @@ async function renderLanguage(params: {
             const condensedSpeech = isHinglish
               ? (await vertexHinglishToSpeechScript([{ id: seg.id, text: condensed }]))[seg.id] || condensed
               : condensed;
-            const retake = await synthesize(condensedSpeech);
-            if (getWavDurationSeconds(retake) < getWavDurationSeconds(audio)) {
+            const retake = await synthesizeLine(condensedSpeech, voice, cloneReference, style);
+            if (getWavDurationSeconds(retake.audio) < getWavDurationSeconds(audio)) {
               console.log(`[dub] ${languageCode} ${seg.id}: condensed to fit ${available.toFixed(1)}s slot (was ${spokenSeconds.toFixed(1)}s)`);
-              audio = retake;
+              audio = retake.audio;
+              engine = retake.engine;
+              speechText = condensedSpeech;
               seg.translatedText = condensed;
               wasCondensed = true;
-              spokenSeconds = effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
+              spokenSeconds = playedSeconds(audio);
             }
           }
         } catch (err) {
           console.error(`[dub] condensing ${seg.id} failed, keeping the full line`, err);
         }
       }
-      renderFlags = renderQaFlags({ condensed: wasCondensed, spokenSeconds, availableSeconds: available, maxCompression: MAX_COMPRESSION });
-      timedAudio.push({ startTime: seg.startTime, endTime: seg.endTime, audio });
+      takes.push({ index: i, audio, engine, speechText, style, voice, cloneReference, available, condensed: wasCondensed, sourceDb: null });
     }
-    // Every line, spoken or silent, records what was rendered, so a later retake can tell exactly which lines changed.
-    finalSegments[i] = withFlags({ ...seg, renderKey: currentLineKey(stored, languageCode, seg) }, [...textQaFlags(seg, review), ...renderFlags]);
     await params.onProgress(
-      segments.length ? ((i + 1) / segments.length) * 0.7 : 0.7,
+      segments.length ? ((i + 1) / segments.length) * 0.6 : 0.6,
       `${languageName}: generating neural voice audio (${i + 1}/${segments.length})...`
     );
   }
 
+  // The original line under each take: its level always, and the AI review when it is on. Read in groups so a long video never sits in memory whole.
+  const verdicts = new Map<string, LineVerdict>();
+  const REVIEW_GROUP = 48;
+  for (let g = 0; g < takes.length; g += REVIEW_GROUP) {
+    const group = takes.slice(g, g + REVIEW_GROUP);
+    const originals = await Promise.all(
+      group.map((t) => params.sourceSpeech?.slice(finalSegments[t.index].startTime, finalSegments[t.index].endTime) ?? Promise.resolve(null))
+    );
+    group.forEach((t, k) => (t.sourceDb = originals[k] ? speechLevelDb(originals[k]!) : null));
+    if (!params.aiReview) continue;
+    await params.onProgress(0.6 + (g / takes.length) * 0.08, `${languageName}: AI reviewer listening to every line (${g + group.length}/${takes.length})...`);
+    const found = await reviewDubbedLines(
+      group.map((t, k) => ({
+        id: finalSegments[t.index].id,
+        script: t.speechText,
+        delivery: finalSegments[t.index].delivery,
+        original: originals[k] ?? undefined,
+        dubbed: t.audio,
+      })),
+      languageName
+    );
+    for (const [id, verdict] of found) verdicts.set(id, verdict);
+  }
+
+  // One re-recording per line the reviewer rejected, kept only if the reviewer accepts it; Chirp3-HD would only repeat itself, so its lines are flagged.
+  const rejected = takes.filter((t) => verdicts.get(finalSegments[t.index].id)?.ok === false);
+  if (rejected.length) {
+    await params.onProgress(0.69, `${languageName}: re-recording ${rejected.length} line${rejected.length === 1 ? '' : 's'} the AI reviewer flagged...`);
+    const retakes: { take: LineTake; audio: Buffer }[] = [];
+    for (const t of rejected) {
+      const verdict = verdicts.get(finalSegments[t.index].id)!;
+      t.directorNote = describeVerdict(verdict);
+      if (t.engine === 'chirp') continue;
+      try {
+        const retake = await synthesizeLine(t.speechText, t.voice, t.cloneReference, retakeStyle(t.style, verdict), 1);
+        retakes.push({ take: t, audio: retake.audio });
+      } catch (err) {
+        console.error(`[dub] retake of ${finalSegments[t.index].id} failed, keeping the first take`, err);
+      }
+    }
+    if (retakes.length) {
+      const second = await reviewDubbedLines(
+        await Promise.all(
+          retakes.map(async ({ take, audio }) => ({
+            id: finalSegments[take.index].id,
+            script: take.speechText,
+            delivery: finalSegments[take.index].delivery,
+            original: (await params.sourceSpeech?.slice(finalSegments[take.index].startTime, finalSegments[take.index].endTime)) ?? undefined,
+            dubbed: audio,
+          }))
+        ),
+        languageName
+      );
+      let fixed = 0;
+      for (const { take, audio } of retakes) {
+        if (second.get(finalSegments[take.index].id)?.ok !== true) continue;
+        take.audio = audio;
+        take.directorNote = undefined;
+        fixed++;
+      }
+      log.info('dub_review', { languageCode, reviewed: verdicts.size, rejected: rejected.length, retaken: retakes.length, fixed });
+    }
+  }
+
+  // Each line at the level the original speaker used, relative to the rest (whispers stay quiet, shouts stay loud).
+  const gains = lineGainsDb(takes.map((t) => ({ id: finalSegments[t.index].id, sourceDb: t.sourceDb, dubDb: speechLevelDb(t.audio) })));
+
+  const timedAudio: TimedAudioSegment[] = [];
+  const takeByIndex = new Map(takes.map((t) => [t.index, t]));
+  for (let i = 0; i < finalSegments.length; i++) {
+    const seg = finalSegments[i];
+    const take = takeByIndex.get(i);
+    const renderFlags: QaFlag[] = take
+      ? [
+          ...renderQaFlags({ condensed: take.condensed, spokenSeconds: playedSeconds(take.audio), availableSeconds: take.available, maxCompression: MAX_COMPRESSION }),
+          ...(take.directorNote ? (['director'] as QaFlag[]) : []),
+        ]
+      : [];
+    if (take) timedAudio.push({ startTime: seg.startTime, endTime: seg.endTime, audio: take.audio, gainDb: gains.get(seg.id) });
+    // Every line, spoken or silent, records what was rendered, so a later retake can tell exactly which lines changed.
+    finalSegments[i] = withFlags(
+      { ...seg, renderKey: currentLineKey(stored, languageCode, seg), ...(take?.directorNote ? { directorNote: take.directorNote } : {}) },
+      [...textQaFlags(seg, review), ...renderFlags]
+    );
+  }
+
   await params.onProgress(0.75, `${languageName}: synchronizing dubbed audio timeline...`);
-  const stitchedAudioPath = await stitchDubbedAudio({
+  let stitchedAudioPath = await stitchDubbedAudio({
     segments: timedAudio,
     totalDurationSeconds: stored.videoDuration,
     pitch: stored.voicePitch,
@@ -534,6 +678,13 @@ async function renderLanguage(params: {
       duckLevel: background.isVocalsRemoved ? 0.3 : 0,
     },
   });
+
+  // As loud as the original, measured the way streaming platforms measure it, so the dub never plays quieter or louder than the source did.
+  if (params.loudnessLufs !== null) {
+    await params.onProgress(0.8, `${languageName}: matching loudness to the original...`);
+    const leveledPath = path.join(langDir, 'dubbed_audio_leveled.wav');
+    if (await normalizeLoudness(stitchedAudioPath, leveledPath, params.loudnessLufs)) stitchedAudioPath = leveledPath;
+  }
 
   await params.onProgress(0.82, `${languageName}: rendering final dubbed master video...`);
   let finalVideoPath = path.join(langDir, 'dubbed.mp4');
@@ -610,6 +761,8 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
   const costMeter = createCostMeter();
   // One download per cloned voice for the whole render, not one per line.
   const loadCloneReference = createReferenceLoader(uid, jobDir);
+  // Held open across languages and closed before the job directory is removed.
+  let sourceSpeech: WavSlicer | null = null;
 
   try {
     await writeProjectForJob(job, { progressPercent: 8, currentProcessingMessage: 'Preparing source audio...' }, { stage: 'preparing_audio', progress: 8 });
@@ -619,6 +772,19 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     await bucket.file(stored.videoStoragePath!).download({ destination: videoLocalPath });
 
     const background = await prepareBackgroundBed(videoLocalPath, jobDir, job, Boolean(stored.separateBackground));
+
+    // Shared by every language: the original's speech (per-line levels, AI review) and its loudness. Both are refinements, so failures are logged, not fatal.
+    const aiReview = settings.preferences.aiReview && isVertexConfigured();
+    const { premiumVoices, paceRetakes } = settings.preferences;
+    const sourceSpeechPath = path.join(jobDir, 'source_speech.wav');
+    sourceSpeech = await extractAudioForStt(videoLocalPath, sourceSpeechPath)
+      .then(() => openWavSlicer(sourceSpeechPath))
+      .catch((err) => {
+        console.error('[dub] could not extract the original speech track; lines keep their synthesized levels', err);
+        return null;
+      });
+    const sourceLoudness = await measureLoudness(videoLocalPath);
+    const loudnessLufs = loudnessTarget(sourceLoudness);
 
     // Separation, when it runs, is by far the longest step, so the shared setup gets a
     // fixed slice of the bar up front and the languages split what is left evenly.
@@ -659,6 +825,11 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           // The choice of whoever started the dub.
           expressiveVoices: settings.preferences.expressiveVoices,
           glossary,
+          sourceSpeech,
+          aiReview,
+          premiumVoices,
+          paceRetakes,
+          loudnessLufs,
           onProgress,
         });
         languageOutputs[languageCode] = {
@@ -668,7 +839,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           status: 'completed',
           progressPercent: 100,
           message: undefined,
-          wordsCount: segments.reduce((sum, s) => sum + s.translatedText.split(/\s+/).filter(Boolean).length, 0),
+          wordsCount: segments.reduce((sum, s) => sum + stripPerformanceTags(s.translatedText).split(/\s+/).filter(Boolean).length, 0),
           ...paths,
         };
         if (languageCode === stored.targetLanguage) primaryPaths = paths;
@@ -743,6 +914,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     const usage = costEstimate(costMeter);
     log.info('job_cost', { type: 'dub', ...usage }, `[cost] dub ${projectId}: ${summarizeCost(costMeter)}`);
     await recordJobUsage(job.id, { ...usage });
+    await sourceSpeech?.close().catch(() => undefined);
     await rm(jobDir, { recursive: true, force: true });
   }
 }

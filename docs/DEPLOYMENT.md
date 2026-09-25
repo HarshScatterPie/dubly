@@ -74,7 +74,8 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `PORT` | 8787 | Listen port |
 | `WEB_ORIGIN` | http://localhost:3000 | The only CORS origin allowed |
 | `VERTEX_PROJECT_ID`, `VERTEX_GEMINI_LOCATION`, `GEMINI_STT_MODEL`, `GEMINI_TRANSLATE_MODEL` | —, global, gemini-3.5-flash-lite ×2 | AI providers |
-| `TTS_ENGINE`, `GEMINI_TTS_MODEL` | gemini, gemini-2.5-flash-tts | `gemini` voices lines with emotion and delivery through Gemini-TTS and falls back to Chirp3-HD on quota errors, refused languages or a disabled model; `chirp` always uses Chirp3-HD |
+| `TTS_ENGINE`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_PREMIUM_MODEL` | gemini, gemini-2.5-flash-tts, gemini-3.1-flash-tts-preview | `gemini` voices lines with emotion, delivery and performance tags through Gemini-TTS, falling back to Chirp3-HD on quota errors, refused languages or a withdrawn model. `chirp` always uses Chirp3-HD. The premium model is tried first only for users who turn on **Premium voices** (Settings → Paid extras; about twice the voice cost). Both Gemini models were verified on this project's Cloud TTS on 2026-09-24. Gemini 3.8 TTS is not served there yet |
+| `GEMINI_REVIEW_MODEL` | gemini-3.5-flash-lite | Listens to every dubbed take next to the original, for users who turn on **AI review** (Settings → Paid extras) |
 | `FIREBASE_STORAGE_BUCKET` | — | Media bucket |
 | `CREDENTIALS_MODE` / `FIREBASE_PROJECT_ID` | keyfile / — | `adc` = no key files |
 | `CREDENTIALS_DIR`, `DUBLY_ENV_FILE` | server/credentials, server/.env | Secret locations |

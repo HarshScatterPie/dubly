@@ -35,7 +35,9 @@ import { tmpDir } from '../lib/paths';
 import { HttpError } from '../lib/httpError';
 import { requireAdmin } from '../lib/auth';
 import { SAMPLE_VIDEOS, VOICES } from '../../src/data/mockData';
-import type { LocalizedSegment, TranscriptSegment } from '../../src/types';
+import type { LocalizedSegment, SpeakerProfile, TranscriptSegment } from '../../src/types';
+import { castVoices, profilesForSpeakers } from '../lib/speakerProfiles';
+import { acceptHeardPerformance } from '../lib/performance';
 import { log } from '../lib/log';
 import {
   JobCancelledError,
@@ -61,30 +63,6 @@ import { reconcileSavedSegments, textQaFlags, withFlags } from '../lib/lineRevie
 import { withRetakeInfo } from '../lib/retake';
 
 /**
- * Auto-assigns a distinct voice per detected speaker so a multi-speaker dub sounds like
- * multiple people out of the box, with zero user effort — alternates gender across the
- * catalog for maximum perceived variety, and skips voices already handed out.
- */
-function assignVoicesToSpeakers(speakers: string[]): Record<string, string> {
-  const male = VOICES.filter((v) => v.gender === 'male');
-  const female = VOICES.filter((v) => v.gender === 'female');
-  const rest = VOICES.filter((v) => v.gender !== 'male' && v.gender !== 'female');
-  const rotation: typeof VOICES = [];
-  const maxLen = Math.max(male.length, female.length);
-  for (let i = 0; i < maxLen; i++) {
-    if (male[i]) rotation.push(male[i]);
-    if (female[i]) rotation.push(female[i]);
-  }
-  rotation.push(...rest);
-
-  const map: Record<string, string> = {};
-  speakers.forEach((speaker, i) => {
-    map[speaker] = rotation[i % rotation.length]?.id || VOICES[0].id;
-  });
-  return map;
-}
-
-/**
  * Derives speaker count and per-speaker voice assignments from labels the transcription
  * step already returned.
  *
@@ -93,19 +71,27 @@ function assignVoicesToSpeakers(speakers: string[]): Record<string, string> {
  * (audio-token priced) cost of analyzing a video. The transcription prompt now returns
  * the labels itself, so multi-speaker detection is effectively free.
  */
-function resolveSpeakers(segments: TranscriptSegment[]): {
+function resolveSpeakers(
+  segments: TranscriptSegment[],
+  heard: Record<string, SpeakerProfile>,
+  preferredVoiceId: string
+): {
   segments: TranscriptSegment[];
   speakersCount: number;
   speakerVoiceMap: Record<string, string>;
+  speakerProfiles: Record<string, SpeakerProfile>;
 } {
   if (segments.length === 0) {
-    return { segments, speakersCount: 1, speakerVoiceMap: {} };
+    return { segments, speakersCount: 1, speakerVoiceMap: {}, speakerProfiles: {} };
   }
   const distinct = Array.from(new Set(segments.map((s) => s.speaker || 'Speaker 1'))).sort();
+  const speakerProfiles = profilesForSpeakers(heard, distinct);
   return {
     segments,
     speakersCount: distinct.length,
-    speakerVoiceMap: distinct.length > 1 ? assignVoicesToSpeakers(distinct) : {},
+    // Cast by who is actually talking: a voice of the speaker's own gender, distinct per speaker.
+    speakerVoiceMap: distinct.length > 1 ? castVoices(distinct, speakerProfiles, VOICES, preferredVoiceId) : {},
+    speakerProfiles,
   };
 }
 
@@ -436,7 +422,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
 
     const settings = await getSettings(job.userId);
     await report(12, 'Listening to the speech');
-    const { language, segments: rawSegments, provider: sttProviderUsed } = await routeTranscribe(
+    const { language, segments: rawSegments, provider: sttProviderUsed, speakers: heardSpeakers } = await routeTranscribe(
       audioLocalPath,
       stored.targetLanguage,
       settings.sttProvider,
@@ -504,7 +490,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
     }
 
     await report(97, 'Identifying speakers');
-    const { segments, speakersCount, speakerVoiceMap } = resolveSpeakers(timedSegments);
+    const { segments, speakersCount, speakerVoiceMap, speakerProfiles } = resolveSpeakers(timedSegments, heardSpeakers, stored.selectedVoiceId);
 
     const wordsCount = segments.reduce((sum, s) => sum + s.wordsCount, 0);
     return {
@@ -514,6 +500,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
         wordsCount,
         speakersCount,
         speakerVoiceMap,
+        speakerProfiles,
         currentStep: 'understand',
         progressPercent: 0,
         currentProcessingMessage: '',
@@ -562,7 +549,9 @@ projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.trans
     const translatable = stored.transcriptSegments.filter((s) => s.text.trim().length > 0);
     const sourceLines = translatable.map((s) => ({
       id: s.id,
-      text: s.text,
+      // The tagged version carries the laughs and sighs through translation; it only counts while it still matches the (editable) text.
+      text: acceptHeardPerformance(s.text, s.performance) ?? s.text,
+      speaker: s.speaker,
       // The slot this line has to fit into, so the translation is written to be
       // speakable in that time instead of needing to be sped up afterwards.
       durationSeconds: Math.max(0.5, s.endTime - s.startTime),
@@ -580,7 +569,9 @@ projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.trans
 
       const { translations } =
         sourceLines.length > 0
-          ? await routeTranslateSegments(sourceLines, languageCode, finalStyle, finalAdapt, settings.translateProvider, glossary)
+          ? await routeTranslateSegments(sourceLines, languageCode, finalStyle, finalAdapt, settings.translateProvider, glossary, {
+              speakers: stored.speakerProfiles,
+            })
           : { translations: {} as Record<string, string> };
 
       const review = { languageCode, sourceLanguageCode: stored.sourceLanguage, glossary };

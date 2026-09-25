@@ -17,7 +17,7 @@ import {
   Clapperboard,
   Music,
 } from 'lucide-react';
-import { TranscriptSegment, Voice, VoiceCategory, VoiceEmotion } from '../../types';
+import { SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion } from '../../types';
 import { VOICES, LANGUAGES } from '../../data/mockData';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { StickyActionBar } from './StickyActionBar';
@@ -38,6 +38,8 @@ interface StepVoiceProps {
   voiceEmotion: VoiceEmotion;
   speakersCount?: number;
   speakerVoiceMap?: Record<string, string>;
+  /** Who each speaker is, heard during analysis. */
+  speakerProfiles?: Record<string, SpeakerProfile>;
   transcriptSegments?: TranscriptSegment[];
   autoLipSync?: boolean;
   lipSyncAvailable?: boolean;
@@ -68,6 +70,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   voiceEmotion,
   speakersCount = 1,
   speakerVoiceMap = {},
+  speakerProfiles = {},
   transcriptSegments = [],
   autoLipSync = false,
   lipSyncAvailable = false,
@@ -202,16 +205,36 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
               <span>{speakers.length} speakers detected</span>
             </h4>
             <p className="text-xs text-[#64748B] mt-0.5">
-              AI-estimated from the audio — each speaker got a distinct voice automatically, override any of them below.
+              Heard in the audio: each speaker got a distinct voice of their own gender automatically. Override any of them below.
             </p>
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {speakers.map(({ label, sample }) => {
               const assignedId = speakerVoiceMap[label] || selectedVoiceId;
+              const profile = speakerProfiles[label];
+              const assigned = availableVoices.find((v) => v.id === assignedId);
+              // A voice of the other gender than the one heard is allowed, but worth a second look.
+              const mismatch = profile && profile.gender !== 'unknown' && assigned && assigned.gender !== profile.gender;
               return (
                 <div key={label} className="p-3.5 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-[#0F172A]">{label}</span>
+                    <span className="text-xs font-bold text-[#0F172A] flex items-center gap-1.5">
+                      {label}
+                      {profile && profile.gender !== 'unknown' && (
+                        <span
+                          title="Heard in the original audio; translation uses it for gendered grammar."
+                          className="px-1.5 py-0.5 rounded-md bg-sky-50 border border-sky-200 text-sky-700 text-[10px] font-semibold"
+                        >
+                          {profile.gender === 'male' ? 'Male' : 'Female'}
+                          {profile.age ? ` · ${profile.age}` : ''}
+                        </span>
+                      )}
+                      {mismatch && (
+                        <span title="This voice is not the gender heard for this speaker." className="text-[10px] font-semibold text-amber-700">
+                          voice gender differs
+                        </span>
+                      )}
+                    </span>
                     <span className="text-[10px] text-[#94A3B8] font-mono">
                       {VOICES.find((v) => v.id === assignedId)?.accent.split(' ')[0]}
                     </span>

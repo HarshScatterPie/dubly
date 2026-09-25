@@ -1,4 +1,5 @@
 import type { LocalizedSegment } from '../../src/types';
+import { stripPerformanceTags } from './performance';
 
 // Mirrors the client-side karaoke chunking in VideoPlayer.tsx so a burned-in caption
 // visually matches what was shown in the live preview.
@@ -38,7 +39,7 @@ function estimateWordTimings(text: string, start: number, end: number) {
 }
 
 function buildCardEvents(seg: LocalizedSegment): string[] {
-  const timed = estimateWordTimings(seg.translatedText, seg.startTime, seg.endTime);
+  const timed = estimateWordTimings(stripPerformanceTags(seg.translatedText), seg.startTime, seg.endTime);
   if (timed.length === 0) return [];
 
   const events: string[] = [];

@@ -92,10 +92,18 @@ export interface TranscriptSegment {
   words?: TranscriptWord[];
   /** How the line is spoken in the original (e.g. "excited and fast"), heard by the transcription model; steers the dubbed voice's delivery. */
   delivery?: string;
+  /** The same words with the laughs and sighs heard in the original marked inline (e.g. "[laughing] No way!"), so the dub performs them too. */
+  performance?: string;
+}
+
+/** Who a detected speaker is, heard by transcription; drives voice casting and gendered grammar in translation. */
+export interface SpeakerProfile {
+  gender: 'male' | 'female' | 'unknown';
+  age?: 'child' | 'young' | 'adult' | 'senior';
 }
 
 /** Why a line deserves a reviewer's look: text flags are recomputed on every save, render flags come from the line's last dub. */
-export type QaFlag = 'untranslated' | 'wrong_script' | 'glossary' | 'condensed' | 'rushed' | 'overflow';
+export type QaFlag = 'untranslated' | 'wrong_script' | 'glossary' | 'condensed' | 'rushed' | 'overflow' | 'director';
 
 export interface LocalizedSegment {
   id: string;
@@ -109,6 +117,8 @@ export interface LocalizedSegment {
   /** Delivery direction for the dubbed voice; starts as the original line's delivery and can be edited. */
   delivery?: string;
   qaFlags?: QaFlag[];
+  /** What the AI review heard wrong in this line's last render (mispronounced word, flat delivery...); set with the `director` flag. */
+  directorNote?: string;
   /** Server-owned fingerprint of what the last render spoke for this line; clients cannot set it. */
   renderKey?: string;
 }
@@ -135,6 +145,12 @@ export interface UserPreferences {
   autoLipSync: boolean;
   /** Whether video downloads start with captions burned in. */
   burnCaptions: boolean;
+  /** Paid extra, off by default: an AI reviewer listens to every rendered line against the original and re-records the ones that came out wrong. */
+  aiReview: boolean;
+  /** Paid extra, off by default: lines are voiced by the premium Gemini-TTS model (performs sighs, richer delivery; about twice the voice cost). */
+  premiumVoices: boolean;
+  /** Paid extra, off by default: a line that does not fit its slot is voiced again at a better pace before any time-stretching. */
+  paceRetakes: boolean;
 }
 
 /** A workspace glossary term: `keep` terms (brand names) are never translated, `translate` terms use the given per-language rendering. */
@@ -210,6 +226,8 @@ export interface DubbingProject {
   updatedAt: string;
   wordsCount: number;
   speakersCount: number;
+  /** Speaker label -> who that speaker is (gender, age), as heard during analysis. Absent on projects analyzed before profiles existed. */
+  speakerProfiles?: Record<string, SpeakerProfile>;
   /** Speaker label (e.g. "Speaker 1") -> voice id, for videos with more than one detected speaker. Falls back to selectedVoiceId when a speaker has no override. */
   speakerVoiceMap?: Record<string, string>;
   /**

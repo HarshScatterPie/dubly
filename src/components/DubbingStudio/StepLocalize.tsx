@@ -25,7 +25,7 @@ import {
 import { LANGUAGES, VOICES } from '../../data/mockData';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { resolveVoice, type VoiceSelection } from '../../lib/voiceResolution';
-import { DeliveryInput, DeliveryTag, needsReview, QaFlagBadges, ReviewFilterToggle } from '../LineReview';
+import { DeliveryInput, DeliveryTag, insertTagAtCursor, needsReview, PerformanceTagPicker, QaFlagBadges, ReviewFilterToggle } from '../LineReview';
 import { StickyActionBar } from './StickyActionBar';
 
 interface StepLocalizeProps {
@@ -88,6 +88,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [editingLocId, setEditingLocId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
+  const editorRef = React.useRef<HTMLTextAreaElement>(null);
   const [editDelivery, setEditDelivery] = useState('');
   const [reviewOnly, setReviewOnly] = useState(false);
   const [activeSpeechLocId, setActiveSpeechLocId] = useState<string | null>(null);
@@ -486,7 +487,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
                           {targetLang.name}
                         </span>
                         <DeliveryTag delivery={loc.delivery} />
-                        <QaFlagBadges flags={loc.qaFlags} />
+                        <QaFlagBadges flags={loc.qaFlags} directorNote={loc.directorNote} />
                       </span>
 
                       <div className="flex items-center gap-1.5">
@@ -518,11 +519,13 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
                     {isEditing ? (
                       <div className="space-y-2 mt-1">
                         <textarea
+                          ref={editorRef}
                           value={editText}
                           onChange={(e) => setEditText(e.target.value)}
                           rows={2}
                           className="w-full p-2.5 rounded-xl bg-[#F8FAFC] border border-[#F05637] text-[#0F172A] text-sm focus:outline-none font-sans resize-none"
                         />
+                        <PerformanceTagPicker onInsert={(tag) => setEditText((text) => insertTagAtCursor(text, tag, editorRef.current))} />
                         <DeliveryInput value={editDelivery} onChange={setEditDelivery} />
                         <div className="flex items-center justify-end gap-2">
                           <button

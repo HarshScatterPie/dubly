@@ -2,8 +2,9 @@ import type { GlossaryEntry, LocalizedSegment, QaFlag } from '../../src/types';
 import { glossaryMisses, withoutKeptTerms } from './glossary';
 import { isInExpectedScript } from './languageMeta';
 import { cleanDelivery } from './speechStyle';
+import { stripPerformanceTags } from './performance';
 
-const RENDER_FLAGS: QaFlag[] = ['condensed', 'rushed', 'overflow'];
+const RENDER_FLAGS: QaFlag[] = ['condensed', 'rushed', 'overflow', 'director'];
 // A line sped up past this is audibly hurried, though still inside the stitcher's limit.
 export const RUSHED_RATIO = 1.15;
 
@@ -16,7 +17,8 @@ export interface ReviewContext {
 // Flags that follow from the text alone, so they are recomputed whenever a line is translated or saved.
 export function textQaFlags(seg: Pick<LocalizedSegment, 'sourceText' | 'translatedText'>, ctx: ReviewContext): QaFlag[] {
   const source = seg.sourceText.trim();
-  const translated = seg.translatedText.trim();
+  // Performance tags are acted, not read, so they neither count as translation nor as letters in the wrong script.
+  const translated = stripPerformanceTags(seg.translatedText).trim();
   if (!source) return [];
   const flags: QaFlag[] = [];
   // A failed translation falls back to the source text, so an unchanged line usually means nothing was translated.
@@ -37,8 +39,10 @@ export function renderQaFlags(opts: { condensed: boolean; spokenSeconds: number;
 }
 
 export function withFlags<T extends LocalizedSegment>(seg: T, flags: QaFlag[]): T {
-  const { qaFlags: _old, ...rest } = seg;
-  return (flags.length ? { ...rest, qaFlags: flags } : rest) as T;
+  const { qaFlags: _old, directorNote, ...rest } = seg;
+  // The reviewer's note belongs to its flag and goes when the flag does.
+  const note = flags.includes('director') && directorNote ? { directorNote } : {};
+  return (flags.length ? { ...rest, ...note, qaFlags: flags } : rest) as T;
 }
 
 // Applies the server's rules to lines a client saved: its fingerprints and render flags are ignored, text flags are recomputed.
@@ -46,7 +50,7 @@ export function reconcileSavedSegments(incoming: LocalizedSegment[], stored: Loc
   const storedById = new Map(stored.map((s) => [s.id, s]));
   return incoming.map((seg) => {
     const previous = storedById.get(seg.id);
-    const { renderKey: _clientKey, qaFlags: _clientFlags, delivery, ...rest } = seg;
+    const { renderKey: _clientKey, qaFlags: _clientFlags, directorNote: _clientNote, delivery, ...rest } = seg;
     // Render flags describe audio that was made from this exact text; an edit makes them stale.
     const renderFlags =
       previous && previous.translatedText === seg.translatedText ? (previous.qaFlags ?? []).filter((f) => RENDER_FLAGS.includes(f)) : [];
@@ -60,6 +64,7 @@ export function reconcileSavedSegments(incoming: LocalizedSegment[], stored: Loc
       ...pinned,
       ...(cleanedDelivery ? { delivery: cleanedDelivery } : {}),
       ...(previous?.renderKey ? { renderKey: previous.renderKey } : {}),
+      ...(renderFlags.includes('director') && previous?.directorNote ? { directorNote: previous.directorNote } : {}),
     };
     return withFlags(line, [...textQaFlags(line, ctx), ...renderFlags]);
   });

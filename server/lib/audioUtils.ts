@@ -1,3 +1,5 @@
+import { open } from 'node:fs/promises';
+
 /** Wraps raw PCM samples (as returned by Gemini's native TTS) in a canonical 44-byte WAV header. */
 export function pcmToWav(pcm: Buffer, sampleRate: number, channels = 1, bitsPerSample = 16): Buffer {
   const byteRate = sampleRate * channels * (bitsPerSample / 8);
@@ -104,4 +106,98 @@ export function trimSilence(wav: Buffer): Buffer {
   const end = align(Math.min(totalSamples, last + Math.round(KEEP_TAIL_SECONDS * sampleRate) * channels));
   if (start === 0 && end >= totalSamples) return wav;
   return pcmToWav(Buffer.from(data.subarray(start * 2, end * 2)), sampleRate, channels, 16);
+}
+
+// A time range of a 16-bit PCM WAV as its own WAV, cut in memory; null when the buffer is not plain PCM or the range is empty.
+export function sliceWav(wav: Buffer, startSeconds: number, endSeconds: number): Buffer | null {
+  const pcm = readPcm16Wav(wav);
+  if (!pcm) return null;
+  const { sampleRate, channels, data } = pcm;
+  const frameBytes = 2 * channels;
+  const totalFrames = Math.floor(data.length / frameBytes);
+  const first = Math.max(0, Math.min(totalFrames, Math.floor(startSeconds * sampleRate)));
+  const last = Math.max(first, Math.min(totalFrames, Math.ceil(endSeconds * sampleRate)));
+  if (last <= first) return null;
+  return pcmToWav(Buffer.from(data.subarray(first * frameBytes, last * frameBytes)), sampleRate, channels, 16);
+}
+
+// Loudness of the speech in a clip (RMS of its 10 ms frames above the silence floor, in dBFS); null when nothing rises above it.
+export function speechLevelDb(wav: Buffer): number | null {
+  const pcm = readPcm16Wav(wav);
+  if (!pcm) return null;
+  const { sampleRate, channels, data } = pcm;
+  const frameSamples = Math.max(1, Math.round(sampleRate * TRIM_FRAME_SECONDS)) * channels;
+  const totalSamples = Math.floor(data.length / 2);
+  const floor = 32768 * Math.pow(10, SILENCE_DBFS / 20);
+  let sumSquares = 0;
+  let counted = 0;
+  for (let f = 0; f < totalSamples; f += frameSamples) {
+    const end = Math.min(totalSamples, f + frameSamples);
+    let frameSum = 0;
+    for (let i = f; i < end; i++) {
+      const s = data.readInt16LE(i * 2);
+      frameSum += s * s;
+    }
+    if (Math.sqrt(frameSum / Math.max(1, end - f)) <= floor) continue;
+    sumSquares += frameSum;
+    counted += end - f;
+  }
+  if (counted === 0) return null;
+  return 20 * Math.log10(Math.sqrt(sumSquares / counted) / 32768);
+}
+
+export interface WavSlicer {
+  slice: (startSeconds: number, endSeconds: number) => Promise<Buffer | null>;
+  close: () => Promise<void>;
+}
+
+// Cuts line-length clips out of a long 16-bit PCM WAV on disk without loading it (a 60-minute 16 kHz track is ~115 MB).
+export async function openWavSlicer(filePath: string): Promise<WavSlicer | null> {
+  const handle = await open(filePath, 'r');
+  try {
+    const head = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(head, 0, head.length, 0);
+    const size = (await handle.stat()).size;
+    if (bytesRead < 44 || head.toString('ascii', 0, 4) !== 'RIFF') throw new Error('not a WAV');
+    let offset = 12;
+    let format: { channels: number; sampleRate: number; bits: number; audioFormat: number } | null = null;
+    let dataStart = -1;
+    let dataBytes = 0;
+    while (offset + 8 <= bytesRead) {
+      const chunkId = head.toString('ascii', offset, offset + 4);
+      const chunkSize = head.readUInt32LE(offset + 4);
+      if (chunkId === 'fmt ') {
+        format = { audioFormat: head.readUInt16LE(offset + 8), channels: head.readUInt16LE(offset + 10), sampleRate: head.readUInt32LE(offset + 12), bits: head.readUInt16LE(offset + 22) };
+      } else if (chunkId === 'data') {
+        dataStart = offset + 8;
+        // A streamed WAV may carry a placeholder size, so the file's real length wins.
+        dataBytes = Math.min(chunkSize, size - dataStart);
+        break;
+      }
+      offset += 8 + chunkSize + (chunkSize % 2);
+    }
+    if (!format || format.audioFormat !== 1 || format.bits !== 16 || dataStart < 0) throw new Error('not 16-bit PCM');
+    const { channels, sampleRate } = format;
+    const frameBytes = 2 * channels;
+    const totalFrames = Math.floor(dataBytes / frameBytes);
+    return {
+      slice: async (startSeconds, endSeconds) => {
+        const first = Math.max(0, Math.min(totalFrames, Math.floor(startSeconds * sampleRate)));
+        const last = Math.max(first, Math.min(totalFrames, Math.ceil(endSeconds * sampleRate)));
+        if (last <= first) return null;
+        const pcm = Buffer.alloc((last - first) * frameBytes);
+        await handle.read(pcm, 0, pcm.length, dataStart + first * frameBytes);
+        return pcmToWav(pcm, sampleRate, channels, 16);
+      },
+      close: () => handle.close(),
+    };
+  } catch {
+    await handle.close();
+    return null;
+  }
+}
+
+// A mono 16-bit WAV of silence, for a line whose engine has no words to say.
+export function silenceWav(seconds: number, sampleRate: number): Buffer {
+  return pcmToWav(Buffer.alloc(Math.round(seconds * sampleRate) * 2), sampleRate);
 }

@@ -14,7 +14,12 @@ export const env = {
   geminiTranslateModel: process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
   // `gemini` voices lines with emotion and delivery direction; `chirp` is the plain Chirp3-HD voice it falls back to.
   ttsEngine: (process.env.TTS_ENGINE === 'chirp' ? 'chirp' : 'gemini') as 'gemini' | 'chirp',
+  // The standard (GA) Gemini-TTS model every expressive line uses.
   geminiTtsModel: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-tts',
+  // Tried first for users who turned on premium voices, at about twice the voice cost. Verified on Cloud TTS (2026-09-24): performs [laughing] and [sigh]; 3.8 is not served there yet.
+  geminiTtsPremiumModel: process.env.GEMINI_TTS_PREMIUM_MODEL || 'gemini-3.1-flash-tts-preview',
+  // Listens to rendered lines next to the originals for the AI review (dubDirector.ts).
+  geminiReviewModel: process.env.GEMINI_REVIEW_MODEL || 'gemini-3.5-flash-lite',
   firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
   // Needed only with CREDENTIALS_MODE=adc, where it cannot be read from a key file.
   firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',

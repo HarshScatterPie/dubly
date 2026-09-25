@@ -16,6 +16,7 @@ import {
   LanguageOutput,
   LocalizedSegment,
   SampleVideoPreset,
+  SpeakerProfile,
   TranscriptSegment,
   TranslationStyle,
   UserPreferences,
@@ -40,6 +41,7 @@ import type { StudioStatus } from '../../lib/studioSession';
 import { projectProgress } from '../../lib/projectProgress';
 import { apiGet } from '../../lib/apiClient';
 import type { VoiceSelection } from '../../lib/voiceResolution';
+import { defaultVoiceFor, mainSpeakerGender } from '../../lib/voiceCasting';
 import { languageSegmentsOf } from '../LineReview';
 
 const STEP_ORDER: DubbingStep[] = ['upload', 'understand', 'localize', 'voice', 'export'];
@@ -148,6 +150,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const [transcriptSegments, setTranscriptSegments] = useState<TranscriptSegment[]>([]);
   const [speakersCount, setSpeakersCount] = useState<number>(1);
   const [speakerVoiceMap, setSpeakerVoiceMap] = useState<Record<string, string>>({});
+  // Who each speaker is (gender, age), heard during analysis; starting voices are chosen to match.
+  const [speakerProfiles, setSpeakerProfiles] = useState<Record<string, SpeakerProfile>>({});
 
   // Localization State
   // Several languages can be dubbed from one upload. The first entry is the primary one:
@@ -248,6 +252,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setDetectedLanguage(LANGUAGES.find((l) => l.code === p.sourceLanguage)?.name || p.sourceLanguage);
     setSpeakersCount(p.speakersCount || 1);
     setSpeakerVoiceMap(p.speakerVoiceMap || {});
+    setSpeakerProfiles(p.speakerProfiles || {});
     setLanguageOutputs(p.languageOutputs || {});
     setTranslationStyle(p.translationStyle);
     setAdaptExpressions(p.adaptExpressions);
@@ -284,6 +289,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       if (p.transcriptSegments?.length) setDetectedLanguage(LANGUAGES.find((l) => l.code === p.sourceLanguage)?.name || p.sourceLanguage);
       setSpeakersCount(p.speakersCount || 1);
       setSpeakerVoiceMap(p.speakerVoiceMap || {});
+      setSpeakerProfiles(p.speakerProfiles || {});
       setLanguageOutputs(p.languageOutputs || {});
       // A project holds placeholder style and voice choices until the user makes them, so the user's own defaults stand until then.
       const progress = projectProgress(p);
@@ -521,6 +527,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       setSourceLanguageCode(res.languageCode);
       setSpeakersCount(res.speakersCount);
       setSpeakerVoiceMap(res.speakerVoiceMap);
+      setSpeakerProfiles(res.speakerProfiles);
       setDetectedAudio(
         res.segments.length > 0
           ? `Speech detected · ${res.wordsCount} words transcribed · ${res.speakersCount} speaker${res.speakersCount > 1 ? 's' : ''}`
@@ -602,16 +609,17 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const handleContinueToVoice = () => {
     // Seed each language that has no voice yet with one native to it, so a fresh
     // multi-language project starts out sounding right rather than all one voice.
+    const gender = mainSpeakerGender(transcriptSegments, speakerProfiles);
     setLanguageVoiceMap((prev) => {
       const next = { ...prev };
       for (const code of targetLanguageCodes) {
         if (next[code]) continue;
-        const nativeVoice = VOICES.find((v) => v.languageCode === code);
+        const nativeVoice = defaultVoiceFor(code, gender);
         if (nativeVoice) next[code] = nativeVoice.id;
       }
       return next;
     });
-    const matchingVoice = VOICES.find((v) => v.languageCode === targetLanguageCode);
+    const matchingVoice = defaultVoiceFor(targetLanguageCode, gender);
     if (matchingVoice) setSelectedVoiceId(matchingVoice.id);
     setVoiceLanguageCode((current) => (targetLanguageCodes.includes(current) ? current : targetLanguageCode));
     setCurrentStep('voice');
@@ -1012,6 +1020,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           voiceEmotion={voiceEmotion}
           speakersCount={speakersCount}
           speakerVoiceMap={speakerVoicesForLanguage(voiceLanguageCode)}
+          speakerProfiles={speakerProfiles}
           transcriptSegments={transcriptSegments}
           autoLipSync={autoLipSync}
           lipSyncAvailable={lipSyncAvailable}

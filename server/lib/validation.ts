@@ -146,6 +146,9 @@ export const schemas = {
         separateBackground: z.boolean().optional(),
         autoLipSync: z.boolean().optional(),
         burnCaptions: z.boolean().optional(),
+        aiReview: z.boolean().optional(),
+        premiumVoices: z.boolean().optional(),
+        paceRetakes: z.boolean().optional(),
       })
       .optional(),
   }),

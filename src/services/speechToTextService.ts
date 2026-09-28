@@ -18,6 +18,8 @@ export interface TranscriptionResult {
   /** How many segments were dropped as speech-model repetition on non-speech audio. */
   removedSegments: number;
   sanitizeNote: string;
+  /** Stretches of the video (seconds) the speech model could not transcribe, even after a retry. */
+  missingParts: { start: number; end: number }[];
 }
 
 export class SpeechToTextService {
@@ -46,6 +48,7 @@ export class SpeechToTextService {
       speakerProfiles,
       removedSegments,
       sanitizeNote,
+      missingParts,
     } = raw;
     return {
       language: detectedLanguage,
@@ -57,6 +60,7 @@ export class SpeechToTextService {
       wordsCount,
       removedSegments,
       sanitizeNote,
+      missingParts,
     };
   }
 }

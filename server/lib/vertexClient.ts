@@ -41,6 +41,18 @@ export interface RawSttResult {
   segments: RawSttSegment[];
   // Speaker label -> gender and age as heard, merged across chunks.
   speakers?: Record<string, SpeakerProfile>;
+  /**
+   * The stretches of audio transcribed separately (chunks), in order, and whether each came
+   * back. Lines are only ever re-timed within their own chunk's window, so one chunk that
+   * failed or came back short cannot pull the rest of the transcript out of place.
+   */
+  windows?: TranscriptWindow[];
+}
+
+export interface TranscriptWindow {
+  start: number;
+  end: number;
+  transcribed: boolean;
 }
 
 let client: GoogleGenAI | null = null;
@@ -393,11 +405,25 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
   const languageCode = mapDetectedLanguageToAppCode(language);
   if (allowScriptRetry && joined && !isInExpectedScript(joined, languageCode)) {
     console.warn(`[vertexClient] transcript came back romanized for ${language}, retrying in native script`);
-    const retry = await vertexTranscribeSingle(filePath, speakerReferences, language, false);
-    if (isInExpectedScript(retry.text, languageCode)) return retry;
+    // The retry only wins if it still covers the speech. An empty or truncated retry used to
+    // pass the script check (no letters counts as "in script") and replace a complete
+    // transcript, silently dropping everything this chunk said.
+    const retry = await vertexTranscribeSingle(filePath, speakerReferences, language, false).catch((err) => {
+      console.warn('[vertexClient] native-script retry failed, keeping the romanized transcript', err);
+      return null;
+    });
+    if (retry && retry.text.trim() && isInExpectedScript(retry.text, languageCode) && coversSameSpeech(retry.segments, segments)) return retry;
   }
 
   return { text: joined, language, segments, speakers };
+}
+
+// Whether a second transcription of the same audio still reaches as far and says about as much as the first.
+function coversSameSpeech(candidate: RawSttSegment[], reference: RawSttSegment[]): boolean {
+  if (!reference.length) return candidate.length > 0;
+  const reach = (segs: RawSttSegment[]) => Math.max(0, ...segs.map((s) => s.end));
+  const spoken = (segs: RawSttSegment[]) => segs.reduce((sum, s) => sum + Math.max(0, s.end - s.start), 0);
+  return candidate.length >= Math.ceil(reference.length * 0.6) && reach(candidate) >= reach(reference) * 0.75 && spoken(candidate) >= spoken(reference) * 0.6;
 }
 
 // Gemini's inline-audio transcription silently truncates to only the first several
@@ -500,12 +526,15 @@ export async function vertexTranscribe(
 
       await Promise.all(
         wave.map(async (i) => {
-          try {
-            results[i] = await vertexTranscribeSingle(chunkPaths[i], references, knownLanguage);
-          } catch (err) {
-            // One bad chunk (e.g. a malformed JSON response) shouldn't sink the whole
-            // transcript — skip it and keep the segments we did get.
-            console.error(`[vertexClient] chunk ${i} transcription failed, skipping`, err);
+          // A bad response (malformed JSON, a truncated answer) is usually a one-off, so each
+          // chunk gets a second attempt. Skipping it silently lost that stretch of speech, and
+          // the lines after it were then stretched back over the gap.
+          for (let attempt = 1; attempt <= 2 && !results[i]; attempt++) {
+            try {
+              results[i] = await vertexTranscribeSingle(chunkPaths[i], references, knownLanguage);
+            } catch (err) {
+              console.error(`[vertexClient] chunk ${i} transcription failed (attempt ${attempt} of 2)`, err);
+            }
           }
         })
       );
@@ -529,15 +558,20 @@ export async function vertexTranscribe(
     const allText: string[] = [];
     // Chunk order, so a speaker's first confident description wins whichever request finished first.
     const speakers: Record<string, SpeakerProfile> = {};
+    const windows: TranscriptWindow[] = durations.map((duration, i) => ({ start: offsets[i], end: offsets[i] + duration, transcribed: Boolean(results[i]) }));
     results.forEach((result, i) => {
       if (!result) return;
       const offset = offsets[i];
+      const duration = durations[i];
       if (result.text) allText.push(result.text);
       mergeSpeakerProfiles(speakers, Object.entries(result.speakers ?? {}).map(([label, profile]) => ({ label, ...profile })));
       for (const seg of result.segments) {
+        // Gemini's in-chunk timestamps are loose; kept inside the chunk, a line can never be placed in another chunk's stretch.
+        const start = Math.min(Math.max(0, seg.start), Math.max(0, duration - 0.05));
+        const end = Math.min(Math.max(start + 0.05, seg.end), duration);
         allSegments.push({
-          start: seg.start + offset,
-          end: seg.end + offset,
+          start: start + offset,
+          end: end + offset,
           text: seg.text,
           confidence: seg.confidence,
           speaker: seg.speaker,
@@ -547,7 +581,7 @@ export async function vertexTranscribe(
         });
       }
     });
-    return { text: allText.join(' '), language: detectedLanguage, segments: allSegments, speakers };
+    return { text: allText.join(' '), language: detectedLanguage, segments: allSegments, speakers, windows };
   } finally {
     await rm(chunkDir, { recursive: true, force: true }).catch(() => undefined);
   }

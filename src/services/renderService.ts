@@ -4,57 +4,31 @@
  */
 
 import { LocalizedSegment } from '../types';
-import { stripPerformanceTags } from '../lib/performanceTags';
+import { toSrt, toVtt } from '../lib/captionCues';
 
 export class RenderService {
   /**
-   * Generates SRT subtitle file content
+   * SRT subtitles, timed to where the dubbed voice speaks each line and split into
+   * readable two-line cues — the same cues the player and the burned-in export show.
    */
   public generateSRT(segments: LocalizedSegment[]): string {
-    return segments
-      .map((seg, index) => {
-        const start = this.formatSRTTimestamp(seg.startTime);
-        const end = this.formatSRTTimestamp(seg.endTime);
-        return `${index + 1}\n${start} --> ${end}\n${stripPerformanceTags(seg.translatedText)}\n`;
-      })
-      .join('\n');
+    return toSrt(segments.filter((s) => s.translatedText.trim()));
   }
 
-  /**
-   * Generates VTT subtitle file content
-   */
+  /** WebVTT subtitles, same cues as the SRT. */
   public generateVTT(segments: LocalizedSegment[]): string {
-    const body = segments
-      .map((seg) => {
-        const start = this.formatVTTTimestamp(seg.startTime);
-        const end = this.formatVTTTimestamp(seg.endTime);
-        return `${start} --> ${end}\n${stripPerformanceTags(seg.translatedText)}\n`;
-      })
-      .join('\n');
-    return `WEBVTT - Dubly Localized Subtitles\n\n${body}`;
-  }
-
-  private formatSRTTimestamp(seconds: number): string {
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 1000);
-    return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')},${ms.toString().padStart(3, '0')}`;
-  }
-
-  private formatVTTTimestamp(seconds: number): string {
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    const secs = Math.floor(seconds % 60);
-    const ms = Math.floor((seconds % 1) * 1000);
-    return `${hours.toString().padStart(2, '0')}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}.${ms.toString().padStart(3, '0')}`;
+    return toVtt(
+      segments.filter((s) => s.translatedText.trim()),
+      'Dubly Localized Subtitles'
+    );
   }
 
   /**
    * Triggers client-side browser file download
    */
   public downloadTextFile(filename: string, content: string, mimeType = 'text/plain') {
-    const blob = new Blob([content], { type: mimeType });
+    // A BOM so editors on Windows open Hindi, Tamil and other scripts as UTF-8 instead of mojibake.
+    const blob = new Blob(['﻿', content], { type: `${mimeType};charset=utf-8` });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -84,6 +58,11 @@ export class RenderService {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(objectUrl);
+  }
+
+  /** A filename-safe version of a project title, keeping letters of any script. */
+  public safeName(title: string): string {
+    return title.replace(/[^\p{L}\p{N}]+/gu, '_').replace(/^_+|_+$/g, '') || 'Dub';
   }
 }
 

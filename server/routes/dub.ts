@@ -41,19 +41,34 @@ import { log, withLogContext } from '../lib/log';
 import { randomUUID } from 'node:crypto';
 import { routeSynthesizeSpeech, type ProviderSettings } from '../lib/modelRouter';
 import {
+  audioLeadSeconds,
   burnSubtitles,
   effectiveClipSeconds,
+  embedSubtitleTrack,
   extractAudioForStt,
   loudnessTarget,
   MAX_COMPRESSION,
   measureLoudness,
   muxVideoWithAudio,
   normalizeLoudness,
+  probeStreams,
+  runFfmpeg,
+  SAFE_INPUT_OPTIONS,
   SEGMENT_GUARD_SECONDS,
-  stitchDubbedAudio,
-  type TimedAudioSegment,
+  TIMEOUT,
+  type StreamLayout,
 } from '../lib/ffmpeg';
-import { getWavDurationSeconds, openWavSlicer, speechLevelDb, type WavSlicer } from '../lib/audioUtils';
+import {
+  mixDubAudio,
+  planPlacements,
+  renderVoiceTrack,
+  STRICT_MAX_TEMPO,
+  TAKE_LEAD_SECONDS,
+  voiceTrackFor16k,
+  type DuckSpan,
+  type LineTiming,
+} from '../lib/dubMix';
+import { detectSpeechBounds, getWavDurationSeconds, openWavSlicer, speechLevelDb, type SpeechBounds, type WavSlicer } from '../lib/audioUtils';
 import { describeVerdict, retakeStyle, reviewDubbedLines, type LineVerdict } from '../lib/dubDirector';
 import { lineGainsDb } from '../lib/levelMatch';
 import { stripPerformanceTags } from '../lib/performance';
@@ -61,15 +76,16 @@ import { planForWorkspace } from '../lib/plans';
 import { allowanceRate, effectiveExtras, NO_EXTRAS, type PaidExtrasChoice } from '../../src/lib/planMath';
 import { isVertexConfigured, vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
 import { buildKaraokeAss } from '../lib/captions';
-import { isLipSyncAvailable, runLipSync } from '../lib/lipSync';
+import { toSrt } from '../../src/lib/captionCues';
+import { isLipSyncAvailable, lipSyncFps, runLipSync } from '../lib/lipSync';
 import { costEstimate, createCostMeter, recordTts, summarizeCost } from '../lib/costMeter';
-import { isSeparationAvailable, separateBackground } from '../lib/audioSeparation';
+import { isSeparationAvailable, SEPARATION_MODEL, separateStems } from '../lib/audioSeparation';
 import { getLanguageName } from '../lib/languageMeta';
 import { tmpDir } from '../lib/paths';
 import { resolveVoice, type VoiceSelection } from '../lib/voiceResolution';
 import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
 import { VOICES } from '../../src/data/mockData';
-import type { GlossaryEntry, LocalizedSegment, QaFlag, Voice } from '../../src/types';
+import type { GlossaryEntry, LocalizedSegment, QaFlag, RenderReport, TranscriptSegment, Voice } from '../../src/types';
 import { schemas, validateBody } from '../lib/validation';
 import { getGlossary } from '../lib/glossaryStore';
 import { applySpokenForms, requiredRendering } from '../lib/glossary';
@@ -383,56 +399,167 @@ async function runDubJobInContext(job: DubJob, pipeline: (job: DubJob) => Promis
  * only while the dubbed voice speaks — that still preserves applause/music between lines,
  * which is where most of it lives, without ever letting the original speaker be heard.
  */
-async function prepareBackgroundBed(
-  videoLocalPath: string,
-  jobDir: string,
-  job: DubJob,
-  useSeparation: boolean
-): Promise<{ path: string; isVocalsRemoved: boolean }> {
-  if (useSeparation && isSeparationAvailable()) {
-    await writeProjectForJob(job, {
-      // Still inside the shared-setup slice of the bar: separation runs once for the whole
-      // job, before any language starts rendering.
-      progressPercent: 10,
-      currentProcessingMessage: 'Separating background audio (music, applause) from speech...',
-    }, { stage: 'separating_audio', progress: 10 });
-    const stem = await separateBackground(videoLocalPath, jobDir);
-    if (stem) return { path: stem, isVocalsRemoved: true };
-    console.warn('[dub] separation unavailable/failed, keeping background via ducking instead');
-  }
-  return { path: videoLocalPath, isVocalsRemoved: false };
+interface BackgroundBed {
+  path: string;
+  isVocalsRemoved: boolean;
+  /** The original speaker alone, when separation ran: a clean reference for where and how loud they speak. */
+  vocalsPath?: string;
+}
+
+// Identifies the exact upload the cached stems were made from; a re-upload lands on the same path, so size and length are part of it.
+const sourceKey = (stored: StoredProject) => `${stored.videoStoragePath}|${stored.videoDuration}|${stored.videoFileSize}`;
+
+// Calls `fn` with progress at most every few seconds and only on real movement, since each call is a Firestore write.
+function throttled(fn: (fraction: number) => Promise<unknown>, minIntervalMs = 3000): (fraction: number) => void {
+  let lastAt = 0;
+  let lastValue = -1;
+  return (fraction) => {
+    const now = Date.now();
+    if (now - lastAt < minIntervalMs || Math.abs(fraction - lastValue) < 0.02) return;
+    lastAt = now;
+    lastValue = fraction;
+    void fn(fraction).catch(() => undefined);
+  };
 }
 
 /**
- * Turns the localized lines into the spans where the bed has to give way to the dub.
+ * Chooses what the dubbed voice sits on top of.
  *
- * Overlapping and touching lines are merged into one span. ffmpeg's `enable` is a single
- * OR of `between()` terms, so leaving a term per line in it makes the filtergraph grow
- * with the transcript for no benefit — and on a long video that argument gets big enough
- * to matter.
- *
- * A raw source bed still carries the original speaker, so its spans are padded wider: the
- * segment boundaries are approximate, and even a fraction of a second of un-ducked source
- * is the original voice audible alongside the dub. A vocals-removed stem has no voice left
- * to leak, so it is padded only enough to cover the dubbed line itself.
+ * Preferred: a vocals-removed stem, so the original soundtrack keeps playing continuously
+ * underneath the dub. Its stems are cached in the project's storage, so a retake or another
+ * language reuses them instead of running the (slow) separation again. Fallback: the
+ * untouched source audio, which the mix then mutes only where the original speaker talks —
+ * that still preserves applause and music between lines without the original voice.
  */
-function buildDuckRegions(
-  segments: { startTime: number; endTime: number }[],
-  isVocalsRemoved: boolean
-): { start: number; end: number }[] {
-  const guard = isVocalsRemoved ? 0.08 : 0.25;
-  const spans = segments
-    .map((s) => ({ start: Math.max(0, s.startTime - guard), end: s.endTime + guard }))
-    .filter((s) => s.end > s.start)
-    .sort((a, b) => a.start - b.start);
+async function prepareBackgroundBed(
+  job: DubJob,
+  stored: StoredProject,
+  videoLocalPath: string,
+  jobDir: string,
+  useSeparation: boolean
+): Promise<BackgroundBed> {
+  const raw: BackgroundBed = { path: videoLocalPath, isVocalsRemoved: false };
+  if (!useSeparation) return raw;
 
+  const cache = stored.stemsCache;
+  if (cache && cache.sourcePath === sourceKey(stored) && cache.model === SEPARATION_MODEL) {
+    try {
+      await writeProjectForJob(job, { progressPercent: 10, currentProcessingMessage: 'Reusing the separated background audio...' }, { stage: 'separating_audio', progress: 10 });
+      const background = path.join(jobDir, 'stem_background.m4a');
+      const vocals = path.join(jobDir, 'stem_vocals.m4a');
+      await Promise.all([
+        bucket.file(cache.backgroundPath).download({ destination: background }),
+        bucket.file(cache.vocalsPath).download({ destination: vocals }),
+      ]);
+      return { path: background, isVocalsRemoved: true, vocalsPath: vocals };
+    } catch (err) {
+      if (err instanceof JobCancelledError || err instanceof JobSupersededError) throw err;
+      log.warn('stems_cache_miss', { error: (err as Error).message });
+    }
+  }
+  if (!isSeparationAvailable()) return raw;
+
+  // Still inside the shared-setup slice of the bar: separation runs once for the whole job, before any language renders.
+  const message = 'Separating background audio (music, applause) from speech';
+  await writeProjectForJob(job, { progressPercent: 10, currentProcessingMessage: `${message}...` }, { stage: 'separating_audio', progress: 10 });
+  const report = throttled((fraction) =>
+    writeProjectForJob(
+      job,
+      { progressPercent: 10 + Math.round(fraction * 4), currentProcessingMessage: `${message} — ${Math.round(fraction * 100)}%` },
+      { stage: 'separating_audio', progress: 10 + Math.round(fraction * 4) }
+    )
+  );
+  const stems = await separateStems(videoLocalPath, jobDir, { durationSeconds: stored.videoDuration, onProgress: report });
+  if (!stems) {
+    log.warn('separation_failed', {}, '[dub] separation unavailable/failed, keeping background via ducking instead');
+    return raw;
+  }
+
+  // Cached as AAC (a fraction of the WAV size, transparent for a music bed); a failure here only costs the next run the separation.
+  try {
+    const background = path.join(jobDir, 'stem_background_cache.m4a');
+    const vocals = path.join(jobDir, 'stem_vocals_cache.m4a');
+    await Promise.all([
+      runFfmpeg([...SAFE_INPUT_OPTIONS, '-i', stems.background, '-c:a', 'aac', '-b:a', '256k', '-y', background], TIMEOUT.render),
+      runFfmpeg([...SAFE_INPUT_OPTIONS, '-i', stems.vocals, '-c:a', 'aac', '-b:a', '128k', '-y', vocals], TIMEOUT.render),
+    ]);
+    const prefix = `workspaces/${job.workspaceId}/projects/${job.projectId}/stems/${SEPARATION_MODEL}`;
+    const stemsCache = { sourcePath: sourceKey(stored), model: SEPARATION_MODEL, backgroundPath: `${prefix}_background.m4a`, vocalsPath: `${prefix}_vocals.m4a` };
+    await Promise.all([
+      uploadFileToStorage(stemsCache.backgroundPath, background, 'audio/mp4'),
+      uploadFileToStorage(stemsCache.vocalsPath, vocals, 'audio/mp4'),
+    ]);
+    await writeProjectForJob(job, { stemsCache });
+  } catch (err) {
+    if (err instanceof JobCancelledError || err instanceof JobSupersededError) throw err;
+    log.warn('stems_cache_write_failed', { error: (err as Error).message });
+  }
+  return { path: stems.background, isVocalsRemoved: true, vocalsPath: stems.vocals };
+}
+
+/** Joins overlapping or touching spans. */
+function mergeSpans(spans: { start: number; end: number }[], gap = 0): { start: number; end: number }[] {
+  const sorted = spans.filter((s) => s.end > s.start).sort((a, b) => a.start - b.start);
   const merged: { start: number; end: number }[] = [];
-  for (const span of spans) {
+  for (const span of sorted) {
     const last = merged[merged.length - 1];
-    if (last && span.start <= last.end) last.end = Math.max(last.end, span.end);
+    if (last && span.start <= last.end + gap) last.end = Math.max(last.end, span.end);
     else merged.push({ ...span });
   }
   return merged;
+}
+
+/**
+ * How the background bed moves under the dub, as smooth gain ramps rather than on/off switches.
+ *
+ * A raw source bed still carries the original speaker, so it is muted wherever they talk,
+ * with a margin (line edges are approximate, and any leak is the original voice audible
+ * alongside the dub). A vocals-removed stem has no voice to hide; it only dips gently under
+ * the dub (and under any residue separation left), so the music keeps breathing.
+ */
+function bedSpans(original: { start: number; end: number }[], dub: { start: number; end: number }[], isVocalsRemoved: boolean): DuckSpan[] {
+  if (isVocalsRemoved) {
+    return mergeSpans([...original, ...dub], 0.4).map((s) => ({ ...s, level: 0.5, attack: 0.15, release: 0.4 }));
+  }
+  const muted = mergeSpans(original.map((s) => ({ start: Math.max(0, s.start - 0.12), end: s.end + 0.2 })), 0.15).map((s) => ({
+    ...s,
+    level: 0,
+    attack: 0.05,
+    release: 0.1,
+  }));
+  const under = mergeSpans(dub, 0.4).map((s) => ({ ...s, level: 0.45, attack: 0.12, release: 0.35 }));
+  return [...muted, ...under];
+}
+
+/**
+ * Where each original line's speech really starts and stops, measured once per job and
+ * shared by every language (see detectSpeechBounds). Keyed by transcript segment id.
+ */
+async function measureSpeechBounds(segments: TranscriptSegment[], speech: WavSlicer | null): Promise<Map<string, SpeechBounds>> {
+  const found = new Map<string, SpeechBounds>();
+  if (!speech) return found;
+  for (const seg of segments) {
+    if (!seg.text.trim()) continue;
+    const from = Math.max(0, seg.startTime - 0.4);
+    const clip = await speech.slice(from, seg.endTime + 0.4);
+    const bounds = clip ? detectSpeechBounds(clip, from, { start: seg.startTime, end: seg.endTime }) : null;
+    if (bounds && (bounds.onset !== null || bounds.offset !== null)) found.set(seg.id, bounds);
+  }
+  return found;
+}
+
+/**
+ * Line levels are read from a mono downmix of the original, while the dub's voice is laid
+ * into both stereo channels at full level. This is the difference between the two, so a
+ * voice matched on the downmix plays exactly as loud as the original speaker did.
+ */
+const DOWNMIX_CALIBRATION_DB = 0;
+
+function median(values: number[]): number | null {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 /**
@@ -452,7 +579,7 @@ async function renderLanguage(params: {
   languageCode: string;
   segments: LocalizedSegment[];
   videoLocalPath: string;
-  background: { path: string; isVocalsRemoved: boolean };
+  background: BackgroundBed;
   jobDir: string;
   costMeter: ReturnType<typeof createCostMeter>;
   voiceSelection: VoiceSelection;
@@ -461,8 +588,16 @@ async function renderLanguage(params: {
   ttsProvider: ProviderSettings['ttsProvider'];
   expressiveVoices: boolean;
   glossary: GlossaryEntry[];
-  // The original's speech track (16 kHz), for per-line levels and the AI review; null when it could not be extracted.
+  // The original's audio (16 kHz), which the AI review compares each take with; null when it could not be extracted.
   sourceSpeech: WavSlicer | null;
+  // The cleanest record of the original speaker (the vocals stem when separated, else the same track): per-line levels.
+  levelSpeech: WavSlicer | null;
+  // Measured start/end of each original line's speech, by transcript segment id.
+  speechBounds: Map<string, SpeechBounds>;
+  // A face is on screen or lip-sync is on: fit each line to the speaker's mouth, not just to the gap before the next line.
+  strictSync: boolean;
+  // The source's streams: frame rate for lip-sync, and how far its sound is offset from its picture.
+  layout: StreamLayout | null;
   // The paid extras the user who started the dub switched on (Settings): AI review, premium voices, pace re-takes.
   aiReview: boolean;
   premiumVoices: boolean;
@@ -470,7 +605,7 @@ async function renderLanguage(params: {
   // Integrated loudness (LUFS) the finished track is levelled to, taken from the original; null skips levelling.
   loudnessLufs: number | null;
   onProgress: (fraction: number, message: string) => Promise<void>;
-}): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[] }> {
+}): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[]; report: RenderReport }> {
   const { workspaceId, projectId, stored, languageCode, segments, videoLocalPath, background, costMeter } = params;
   const languageName = getLanguageName(languageCode);
   // Each language renders in its own directory: the stitcher writes fixed filenames
@@ -547,6 +682,11 @@ async function renderLanguage(params: {
       const nextStart = nextSpoken ? nextSpoken.startTime : stored.videoDuration;
       const slot = seg.endTime - seg.startTime;
       const available = Math.max(slot, nextStart - seg.startTime - SEGMENT_GUARD_SECONDS);
+      // With lip-sync on, the line has to fit the speaker's mouth, not merely the gap before the next line.
+      const bounds = params.speechBounds.get(seg.segmentId);
+      const mouthSlot = Math.max(0.2, (bounds?.offset ?? seg.endTime) - (bounds?.onset ?? seg.startTime));
+      const fitLimit = stored.autoLipSync ? Math.min(available * MAX_COMPRESSION, mouthSlot * STRICT_MAX_TEMPO * 1.06) : available * MAX_COMPRESSION;
+      const fitTarget = stored.autoLipSync ? Math.min(available, mouthSlot * 1.12) : available;
       let spokenSeconds = playedSeconds(audio);
       let wasCondensed = false;
 
@@ -566,16 +706,16 @@ async function renderLanguage(params: {
       }
 
       // Too long to fit even at the fastest natural pace: rewrite it shorter rather than gabble or overlap. Hand-edited lines are left as the user wrote them.
-      if (!seg.isEdited && spokenSeconds > available * MAX_COMPRESSION) {
+      if (!seg.isEdited && spokenSeconds > fitLimit) {
         try {
-          const condensed = await vertexCondenseLine(seg.translatedText, languageCode, languageName, available * 1.1, spokenSeconds, protectedTerms);
+          const condensed = await vertexCondenseLine(seg.translatedText, languageCode, languageName, fitTarget * 1.1, spokenSeconds, protectedTerms);
           if (condensed) {
             const condensedSpeech = isHinglish
               ? (await vertexHinglishToSpeechScript([{ id: seg.id, text: condensed }]))[seg.id] || condensed
               : condensed;
             const retake = await synthesizeLine(condensedSpeech, voice, cloneReference, style);
             if (getWavDurationSeconds(retake.audio) < getWavDurationSeconds(audio)) {
-              console.log(`[dub] ${languageCode} ${seg.id}: condensed to fit ${available.toFixed(1)}s slot (was ${spokenSeconds.toFixed(1)}s)`);
+              console.log(`[dub] ${languageCode} ${seg.id}: condensed to fit ${fitTarget.toFixed(1)}s slot (was ${spokenSeconds.toFixed(1)}s)`);
               audio = retake.audio;
               engine = retake.engine;
               speechText = condensedSpeech;
@@ -601,10 +741,12 @@ async function renderLanguage(params: {
   const REVIEW_GROUP = 48;
   for (let g = 0; g < takes.length; g += REVIEW_GROUP) {
     const group = takes.slice(g, g + REVIEW_GROUP);
-    const originals = await Promise.all(
-      group.map((t) => params.sourceSpeech?.slice(finalSegments[t.index].startTime, finalSegments[t.index].endTime) ?? Promise.resolve(null))
-    );
-    group.forEach((t, k) => (t.sourceDb = originals[k] ? speechLevelDb(originals[k]!) : null));
+    const sliceOf = (speech: WavSlicer | null, t: LineTake) =>
+      speech?.slice(finalSegments[t.index].startTime, finalSegments[t.index].endTime) ?? Promise.resolve(null);
+    const originals = await Promise.all(group.map((t) => sliceOf(params.sourceSpeech, t)));
+    // Levels come from the vocals stem when there is one: music under a line would otherwise read as a louder speaker.
+    const levelClips = params.levelSpeech === params.sourceSpeech ? originals : await Promise.all(group.map((t) => sliceOf(params.levelSpeech, t)));
+    group.forEach((t, k) => (t.sourceDb = levelClips[k] ? speechLevelDb(levelClips[k]!) : null));
     if (!params.aiReview) continue;
     await params.onProgress(0.6 + (g / takes.length) * 0.08, `${languageName}: AI reviewer listening to every line (${g + group.length}/${takes.length})...`);
     const found = await reviewDubbedLines(
@@ -662,45 +804,92 @@ async function renderLanguage(params: {
 
   // Each line at the level the original speaker used, relative to the rest (whispers stay quiet, shouts stay loud).
   const gains = lineGainsDb(takes.map((t) => ({ id: finalSegments[t.index].id, sourceDb: t.sourceDb, dubDb: speechLevelDb(t.audio) })));
+  // ...and the voice as a whole as loud against the soundtrack as the original speaker was, so music between lines keeps its old balance.
+  const levelPairs = takes
+    .map((t) => ({ source: t.sourceDb, dub: speechLevelDb(t.audio) }))
+    .filter((p): p is { source: number; dub: number } => p.source !== null && p.dub !== null);
+  const sourceMid = median(levelPairs.map((p) => p.source));
+  const dubMid = median(levelPairs.map((p) => p.dub));
+  const voiceGainDb = levelPairs.length >= 3 && sourceMid !== null && dubMid !== null ? Math.max(-10, Math.min(10, sourceMid - dubMid + DOWNMIX_CALIBRATION_DB)) : 0;
 
-  const timedAudio: TimedAudioSegment[] = [];
+  // Where each take lands: on the original speaker's measured onset (so the voice never arrives before the lips),
+  // paced to the mouth when a face is on screen, and never into the next line.
+  const timings: LineTiming[] = takes.map((t) => {
+    const seg = finalSegments[t.index];
+    const bounds = params.speechBounds.get(seg.segmentId);
+    return {
+      start: bounds?.onset != null ? Math.max(0, bounds.onset - TAKE_LEAD_SECONDS) : seg.startTime,
+      end: bounds?.offset ?? seg.endTime,
+      rawSeconds: getWavDurationSeconds(t.audio),
+    };
+  });
+  const placements = planPlacements(timings, { totalSeconds: stored.videoDuration, speed: stored.voiceSpeed, strict: params.strictSync });
+  const placedByIndex = new Map(takes.map((t, k) => [t.index, { placement: placements[k], timing: timings[k] }]));
+
+  const report: RenderReport = {
+    lipSync: stored.autoLipSync ? 'failed' : 'off',
+    background: background.isVocalsRemoved ? 'separated' : 'ducked',
+    channels: 'stereo',
+    lines: takes.length,
+    inSync: 0,
+    condensed: 0,
+    rushed: 0,
+    overflow: 0,
+    onsetsSnapped: takes.filter((t) => params.speechBounds.get(finalSegments[t.index].segmentId)?.onset != null).length,
+    renderedAt: new Date().toISOString(),
+  };
+  const round3 = (n: number) => Math.round(n * 1000) / 1000;
   const takeByIndex = new Map(takes.map((t) => [t.index, t]));
   for (let i = 0; i < finalSegments.length; i++) {
-    const seg = finalSegments[i];
+    const { dubStartTime: _oldStart, dubEndTime: _oldEnd, ...seg } = finalSegments[i];
     const take = takeByIndex.get(i);
+    const placed = placedByIndex.get(i);
     const renderFlags: QaFlag[] = take
       ? [
           ...renderQaFlags({ condensed: take.condensed, spokenSeconds: playedSeconds(take.audio), availableSeconds: take.available, maxCompression: MAX_COMPRESSION }),
           ...(take.directorNote ? (['director'] as QaFlag[]) : []),
         ]
       : [];
-    if (take) timedAudio.push({ startTime: seg.startTime, endTime: seg.endTime, audio: take.audio, gainDb: gains.get(seg.id) });
+    let spokenAt: Pick<LocalizedSegment, 'dubStartTime' | 'dubEndTime'> = {};
+    if (take && placed) {
+      const { placement, timing } = placed;
+      const dubEnd = placement.start + placement.playedSeconds;
+      const mouthSlot = Math.max(0.2, timing.end - timing.start);
+      if (Math.abs(dubEnd - timing.end) <= Math.max(0.3, mouthSlot * 0.15)) report.inSync++;
+      // The take's own lead-in and tail are silence, so captions start and stop with the sound itself.
+      spokenAt = { dubStartTime: round3(placement.start + TAKE_LEAD_SECONDS), dubEndTime: round3(placement.start + Math.max(0.25, placement.playedSeconds - 0.06)) };
+    }
+    if (renderFlags.includes('condensed')) report.condensed++;
+    if (renderFlags.includes('rushed')) report.rushed++;
+    if (renderFlags.includes('overflow')) report.overflow++;
     // Every line, spoken or silent, records what was rendered, so a later retake can tell exactly which lines changed.
     finalSegments[i] = withFlags(
-      { ...seg, renderKey: currentLineKey(stored, languageCode, seg), ...(take?.directorNote ? { directorNote: take.directorNote } : {}) },
+      { ...seg, ...spokenAt, renderKey: currentLineKey(stored, languageCode, seg), ...(take?.directorNote ? { directorNote: take.directorNote } : {}) },
       [...textQaFlags(seg, review), ...renderFlags]
     );
   }
 
-  await params.onProgress(0.75, `${languageName}: synchronizing dubbed audio timeline...`);
-  let stitchedAudioPath = await stitchDubbedAudio({
-    segments: timedAudio,
-    totalDurationSeconds: stored.videoDuration,
-    pitch: stored.voicePitch,
-    speed: stored.voiceSpeed,
+  await params.onProgress(0.72, `${languageName}: synchronizing every line to the speaker's timing...`);
+  const voicePath = path.join(langDir, 'voice.wav');
+  await renderVoiceTrack(
+    takes.map((t, k) => ({ audio: t.audio, start: placements[k].start, tempo: placements[k].tempo, gainDb: gains.get(finalSegments[t.index].id) })),
+    { totalSeconds: stored.videoDuration, pitch: stored.voicePitch, outputPath: voicePath }
+  );
+
+  await params.onProgress(0.77, `${languageName}: synchronizing the voice with the soundtrack...`);
+  // Every line the original speaker talks in, spoken in the dub or not: an untranslated line still has their voice under it.
+  const originalSpans = segments.map((s) => {
+    const bounds = params.speechBounds.get(s.segmentId);
+    return { start: Math.min(s.startTime, bounds?.onset ?? Infinity), end: Math.max(s.endTime, bounds?.offset ?? -Infinity) };
+  });
+  const dubSpans = placements.map((p) => ({ start: p.start, end: p.start + p.playedSeconds }));
+  let stitchedAudioPath = await mixDubAudio({
+    voicePath,
+    totalSeconds: stored.videoDuration,
+    outputPath: path.join(langDir, 'dubbed_audio.wav'),
     workDir: langDir,
-    background: {
-      path: background.path,
-      // Ducked across every span the original speaker talks in — taken from all
-      // localized segments, not just the ones that produced audio, since a segment
-      // whose translation came back empty still has the original voice under it and
-      // would otherwise play through untouched.
-      duckRegions: buildDuckRegions(segments, background.isVocalsRemoved),
-      // Separation is imperfect, so a stem still gets attenuated over speech to bury any
-      // leftover vocal — but only attenuated, so its music/ambience keeps playing. A raw
-      // source track is muted outright; there the original voice must be silent.
-      duckLevel: background.isVocalsRemoved ? 0.3 : 0,
-    },
+    voiceGainDb,
+    bed: { path: background.path, spans: bedSpans(originalSpans, dubSpans, background.isVocalsRemoved) },
   });
 
   // As loud as the original, measured the way streaming platforms measure it, so the dub never plays quieter or louder than the source did.
@@ -711,19 +900,60 @@ async function renderLanguage(params: {
   }
 
   await params.onProgress(0.82, `${languageName}: rendering final dubbed master video...`);
+  // Positive when the source's sound starts after its picture; transcript times count from the first sound, so the dub starts that much later too.
+  const audioLead = audioLeadSeconds(params.layout);
   let finalVideoPath = path.join(langDir, 'dubbed.mp4');
-  await muxVideoWithAudio(videoLocalPath, stitchedAudioPath, finalVideoPath);
+  await muxVideoWithAudio(videoLocalPath, stitchedAudioPath, finalVideoPath, { audioOffsetSeconds: Math.max(0, audioLead), languageCode });
 
-  if (stored.autoLipSync && isLipSyncAvailable()) {
-    await params.onProgress(0.86, `${languageName}: running lip-sync (CPU-only — this can take several minutes)...`);
-    const lipSyncedPath = path.join(langDir, 'dubbed_lipsynced.mp4');
+  if (stored.autoLipSync) {
+    if (!isLipSyncAvailable()) report.lipSync = 'unavailable';
+    else if (stored.faceScan && !stored.faceScan.hasFaces) report.lipSync = 'skipped_no_face';
+    else {
+      const lipSyncMessage = `${languageName}: lip-syncing the speaker's mouth to the new voice`;
+      await params.onProgress(0.84, `${lipSyncMessage}...`);
+      try {
+        const voice16k = await voiceTrackFor16k(voicePath, path.join(langDir, 'voice_16k.wav'));
+        const lipSyncVideo = path.join(langDir, 'lipsync_video.mp4');
+        const result = await runLipSync({
+          videoPath: videoLocalPath,
+          voiceWavPath: voice16k,
+          outputPath: lipSyncVideo,
+          fps: lipSyncFps(params.layout?.video?.fps ?? 0),
+          durationSeconds: stored.videoDuration,
+          spans: mergeSpans([...originalSpans, ...dubSpans], 0.3),
+          workDir: langDir,
+          onProgress: throttled((fraction) => params.onProgress(0.84 + fraction * 0.1, `${lipSyncMessage} — ${Math.round(fraction * 100)}%`), 4000),
+        });
+        if (result.synced === 0) {
+          report.lipSync = 'skipped_no_face';
+        } else {
+          const lipSyncedPath = path.join(langDir, 'dubbed_lipsynced.mp4');
+          // The lip-synced picture starts at the source's first frame, so an offset either way is applied here.
+          await muxVideoWithAudio(lipSyncVideo, stitchedAudioPath, lipSyncedPath, { audioOffsetSeconds: audioLead, languageCode });
+          finalVideoPath = lipSyncedPath;
+          report.lipSync = 'applied';
+        }
+        log.info('lipsync_done', { languageCode, frames: result.frames, synced: result.synced });
+      } catch (err) {
+        if (err instanceof JobCancelledError || err instanceof JobSupersededError) throw err;
+        // Best-effort enhancement, not a core requirement: fall back to the non-lip-synced render rather than failing the dub.
+        log.error('lipsync_failed', err, { languageCode }, '[dub] lip-sync failed, continuing with non-lip-synced video');
+        report.lipSync = 'failed';
+      }
+    }
+  }
+
+  // The captions ride along as a subtitle track viewers can switch on, so every download has them.
+  const spokenLines = finalSegments.filter((s) => stripPerformanceTags(s.translatedText).trim());
+  if (spokenLines.length) {
     try {
-      await runLipSync(finalVideoPath, lipSyncedPath);
-      finalVideoPath = lipSyncedPath;
+      const srtPath = path.join(langDir, 'captions.srt');
+      await writeFile(srtPath, toSrt(spokenLines), 'utf8');
+      const withCaptions = path.join(langDir, 'dubbed_cc.mp4');
+      await embedSubtitleTrack(finalVideoPath, srtPath, withCaptions, languageCode);
+      finalVideoPath = withCaptions;
     } catch (err) {
-      // Best-effort enhancement, not a core requirement (e.g. no clear face in the
-      // video) — fall back to the non-lip-synced render rather than failing the dub.
-      console.error('[dub] lip-sync failed, continuing with non-lip-synced video', err);
+      log.warn('subtitle_track_failed', { languageCode, error: (err as Error).message });
     }
   }
 
@@ -739,11 +969,13 @@ async function renderLanguage(params: {
   invalidateSignedUrlCache(finalDubbedVideoStoragePath);
   // Any captioned variant was burned from the *previous* render of this language, so it is
   // now stale — drop it and let the next captioned download rebuild it.
-  const stalePath = captionedStoragePathFor(workspaceId, projectId, languageCode);
-  await bucket.file(stalePath).delete({ ignoreNotFound: true });
-  invalidateSignedUrlCache(stalePath);
+  for (let version = 1; version <= CAPTIONS_VERSION; version++) {
+    const stalePath = captionedStoragePathFor(workspaceId, projectId, languageCode, version);
+    await bucket.file(stalePath).delete({ ignoreNotFound: true });
+    invalidateSignedUrlCache(stalePath);
+  }
 
-  return { paths: { dubbedAudioStoragePath, finalDubbedVideoStoragePath }, segments: finalSegments };
+  return { paths: { dubbedAudioStoragePath, finalDubbedVideoStoragePath }, segments: finalSegments, report };
 }
 
 export interface PipelineResult {
@@ -787,6 +1019,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
   const loadCloneReference = createReferenceLoader(uid, jobDir);
   // Held open across languages and closed before the job directory is removed.
   let sourceSpeech: WavSlicer | null = null;
+  let vocalsSpeech: WavSlicer | null = null;
 
   try {
     await writeProjectForJob(job, { progressPercent: 8, currentProcessingMessage: 'Preparing source audio...' }, { stage: 'preparing_audio', progress: 8 });
@@ -794,23 +1027,40 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     // applause/music/ambience survive into the export instead of being replaced by silence.
     const videoLocalPath = path.join(jobDir, 'source.mp4');
     await bucket.file(stored.videoStoragePath!).download({ destination: videoLocalPath });
+    const layout = await probeStreams(videoLocalPath).catch(() => null);
 
-    const background = await prepareBackgroundBed(videoLocalPath, jobDir, job, Boolean(stored.separateBackground));
+    const background = await prepareBackgroundBed(job, stored, videoLocalPath, jobDir, Boolean(stored.separateBackground));
 
-    // Shared by every language: the original's speech (per-line levels, AI review) and its loudness. Both are refinements, so failures are logged, not fatal.
+    // Shared by every language: the original's speech (per-line levels, onsets, AI review) and its loudness. All are refinements, so failures are logged, not fatal.
     // Exactly the extras this dub was charged for when it started; jobs from before plans had none.
     const extras = job.extras ?? NO_EXTRAS;
     const aiReview = extras.aiReview && isVertexConfigured();
     const { premiumVoices, paceRetakes } = extras;
-    const sourceSpeechPath = path.join(jobDir, 'source_speech.wav');
-    sourceSpeech = await extractAudioForStt(videoLocalPath, sourceSpeechPath)
-      .then(() => openWavSlicer(sourceSpeechPath))
-      .catch((err) => {
-        console.error('[dub] could not extract the original speech track; lines keep their synthesized levels', err);
-        return null;
-      });
+    const openSpeech = (input: string, output: string) =>
+      extractAudioForStt(input, output)
+        .then(() => openWavSlicer(output))
+        .catch((err) => {
+          console.error(`[dub] could not extract ${path.basename(output)}; lines keep their synthesized levels`, err);
+          return null;
+        });
+    sourceSpeech = await openSpeech(videoLocalPath, path.join(jobDir, 'source_speech.wav'));
+    // The vocals stem is the original speaker with the music taken out: exact onsets and honest levels.
+    vocalsSpeech = background.vocalsPath ? await openSpeech(background.vocalsPath, path.join(jobDir, 'vocals_speech.wav')) : null;
+    const levelSpeech = vocalsSpeech ?? sourceSpeech;
+    await writeProjectForJob(job, { progressPercent: 14, currentProcessingMessage: 'Measuring where every line is spoken...' }, { stage: 'measuring_speech', progress: 14 });
+    const speechBounds = await measureSpeechBounds(stored.transcriptSegments || [], levelSpeech);
     const sourceLoudness = await measureLoudness(videoLocalPath);
     const loudnessLufs = loudnessTarget(sourceLoudness);
+    // A face on screen means viewers watch the mouth: fit every line to it, not only to the gap before the next line.
+    const strictSync = Boolean(stored.autoLipSync) || stored.faceScan?.hasFaces === true;
+    log.info('dub_setup', {
+      separated: background.isVocalsRemoved,
+      onsetsMeasured: speechBounds.size,
+      lines: stored.transcriptSegments?.length ?? 0,
+      strictSync,
+      audioLead: audioLeadSeconds(layout),
+      fps: layout?.video?.fps,
+    });
 
     // Separation, when it runs, is by far the longest step, so the shared setup gets a
     // fixed slice of the bar up front and the languages split what is left evenly.
@@ -833,7 +1083,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
       };
 
       try {
-        const { paths, segments: renderedSegments } = await renderLanguage({
+        const { paths, segments: renderedSegments, report } = await renderLanguage({
           job,
           workspaceId,
           projectId,
@@ -852,6 +1102,10 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           expressiveVoices: settings.preferences.expressiveVoices,
           glossary,
           sourceSpeech,
+          levelSpeech,
+          speechBounds,
+          strictSync,
+          layout,
           aiReview,
           premiumVoices,
           paceRetakes,
@@ -865,6 +1119,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           status: 'completed',
           progressPercent: 100,
           message: undefined,
+          renderReport: report,
           wordsCount: segments.reduce((sum, s) => sum + stripPerformanceTags(s.translatedText).split(/\s+/).filter(Boolean).length, 0),
           ...paths,
         };
@@ -941,6 +1196,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     log.info('job_cost', { type: 'dub', ...usage }, `[cost] dub ${projectId}: ${summarizeCost(costMeter)}`);
     await recordJobUsage(job.id, { ...usage });
     await sourceSpeech?.close().catch(() => undefined);
+    await vocalsSpeech?.close().catch(() => undefined);
     await rm(jobDir, { recursive: true, force: true });
   }
 }
@@ -949,9 +1205,13 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
  * Where a language's burned-in-captions render is cached. One per language, because the
  * captions are that language's own translated text over that language's own video.
  */
-function captionedStoragePathFor(workspaceId: string, projectId: string, languageCode: string): string {
-  return `workspaces/${workspaceId}/projects/${projectId}/dubbed_captioned_${languageCode}.mp4`;
+function captionedStoragePathFor(workspaceId: string, projectId: string, languageCode: string, version = CAPTIONS_VERSION): string {
+  return `workspaces/${workspaceId}/projects/${projectId}/dubbed_captioned${version > 1 ? `_v${version}` : ''}_${languageCode}.mp4`;
 }
+
+// Bumped when burned captions change look or fix a fault, so renders cached under the old name are never served again.
+// v2: fonts are found at all (before, captions could burn in blank), sized to the video, timed to the dubbed voice.
+const CAPTIONS_VERSION = 2;
 
 /**
  * Returns the URL to download for this export — either the plain dubbed video (fast,
@@ -997,15 +1257,80 @@ dubRouter.post('/:id/export-video', rateLimit('export', [['user', rateRules.expo
     return;
   }
 
-  const captionedStoragePath = captionedStoragePathFor(workspaceId, projectId, languageCode);
-  const [alreadyRendered] = await bucket.file(captionedStoragePath).exists();
-  if (alreadyRendered) {
-    res.json({ url: await getSignedDownloadUrl(captionedStoragePath) });
+  const state = await captionedExportState(workspaceId, projectId, languageCode, videoStoragePath, segments, true);
+  if (state.status === 'ready') res.json({ url: state.url, status: state.status });
+  else if (state.status === 'failed') res.status(500).json({ error: state.error, code: 'CAPTIONS_FAILED' });
+  else res.status(202).json(state);
+});
+
+// Polled while a captioned render runs; separate from the POST so polling never spends the export rate limit.
+dubRouter.get('/:id/export-video/captions', async (req, res) => {
+  const workspaceId = req.workspaceId!;
+  const projectId = req.params.id;
+  const stored = await getStoredProject(workspaceId, projectId);
+  if (!stored) {
+    res.status(404).json({ error: 'Project not found' });
     return;
   }
+  const languageCode = typeof req.query.languageCode === 'string' && req.query.languageCode ? req.query.languageCode : stored.targetLanguage;
+  const videoStoragePath =
+    languageCode === stored.targetLanguage ? stored.finalDubbedVideoStoragePath : stored.languageOutputs?.[languageCode]?.finalDubbedVideoStoragePath;
+  if (!projectLanguages(stored).includes(languageCode) || !videoStoragePath) {
+    res.status(404).json({ error: 'This dub is not ready yet' });
+    return;
+  }
+  res.json(await captionedExportState(workspaceId, projectId, languageCode, videoStoragePath, segmentsForLanguage(stored, languageCode), false));
+});
 
-  // Unique per request: two people downloading the same captions at once must not share scratch files.
-  const jobDir = path.join(tmpDir, 'jobs', `${projectId}-captions-${languageCode}-${randomUUID()}`);
+type CaptionedState = { status: 'ready'; url: string } | { status: 'rendering' } | { status: 'failed'; error: string };
+
+// Captioned renders in progress (or just failed) on this server, by storage path.
+const captionRenders = new Map<string, { promise: Promise<void>; error?: string; failedAt?: number }>();
+
+/**
+ * Where a language's captioned video stands, starting its render when asked to and none is
+ * running. The render re-encodes the whole video, which on a long dub takes longer than a
+ * proxy will hold a request open — so it runs in the background and the client polls,
+ * instead of the download failing with a gateway timeout.
+ */
+async function captionedExportState(
+  workspaceId: string,
+  projectId: string,
+  languageCode: string,
+  videoStoragePath: string,
+  segments: LocalizedSegment[],
+  start: boolean
+): Promise<CaptionedState> {
+  const captionedStoragePath = captionedStoragePathFor(workspaceId, projectId, languageCode);
+  const running = captionRenders.get(captionedStoragePath);
+  if (running?.error) {
+    captionRenders.delete(captionedStoragePath);
+    return { status: 'failed', error: running.error };
+  }
+  if (running) return { status: 'rendering' };
+  const [alreadyRendered] = await bucket.file(captionedStoragePath).exists();
+  if (alreadyRendered) return { status: 'ready', url: await getSignedDownloadUrl(captionedStoragePath) };
+  if (!start) return { status: 'failed', error: 'No captioned render is in progress. Start the download again.' };
+
+  const entry: { promise: Promise<void>; error?: string } = { promise: Promise.resolve() };
+  entry.promise = renderCaptionedVideo(videoStoragePath, captionedStoragePath, segments, `${projectId}-captions-${languageCode}`)
+    .then(() => {
+      captionRenders.delete(captionedStoragePath);
+    })
+    .catch((err) => {
+      log.error('captions_render_failed', err, { projectId, languageCode });
+      entry.error = err instanceof HttpError ? err.message : 'Adding captions failed. Please try again.';
+      // A failure is reported to the next poll, then forgotten so a retry starts afresh.
+      setTimeout(() => captionRenders.get(captionedStoragePath) === entry && captionRenders.delete(captionedStoragePath), 10 * 60_000).unref();
+    });
+  captionRenders.set(captionedStoragePath, entry);
+  void trackBackgroundWork(entry.promise);
+  return { status: 'rendering' };
+}
+
+async function renderCaptionedVideo(videoStoragePath: string, captionedStoragePath: string, segments: LocalizedSegment[], label: string): Promise<void> {
+  // Unique per render: scratch files are never shared.
+  const jobDir = path.join(tmpDir, 'jobs', `${label}-${randomUUID()}`);
   let releaseSlot: (() => void) | undefined;
   try {
     releaseSlot = await acquireHeavySlot();
@@ -1013,22 +1338,21 @@ dubRouter.post('/:id/export-video', rateLimit('export', [['user', rateRules.expo
     const sourceLocalPath = path.join(jobDir, 'dubbed.mp4');
     await bucket.file(videoStoragePath).download({ destination: sourceLocalPath });
 
+    // Laid out in the video's own pixels, so captions are the same size on a vertical short as on a landscape talk.
+    const layout = await probeStreams(sourceLocalPath).catch(() => null);
     const assPath = path.join(jobDir, 'captions.ass');
-    await writeFile(assPath, buildKaraokeAss(segments), 'utf8');
+    await writeFile(
+      assPath,
+      buildKaraokeAss(segments, layout?.video?.width && layout.video.height ? { width: layout.video.width, height: layout.video.height } : undefined),
+      'utf8'
+    );
 
     const captionedLocalPath = path.join(jobDir, 'dubbed_captioned.mp4');
     await burnSubtitles(sourceLocalPath, assPath, captionedLocalPath);
-
     await uploadFileToStorage(captionedStoragePath, captionedLocalPath, 'video/mp4');
-    res.json({ url: await getSignedDownloadUrl(captionedStoragePath) });
-  } catch (err) {
-    if (err instanceof HttpError) {
-      res.status(err.status).json({ error: err.message, code: err.code });
-      return;
-    }
-    res.status(500).json({ error: (err as Error).message });
+    invalidateSignedUrlCache(captionedStoragePath);
   } finally {
     releaseSlot?.();
     await rm(jobDir, { recursive: true, force: true });
   }
-});
+}

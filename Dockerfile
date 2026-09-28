@@ -18,8 +18,9 @@ RUN npm run build
 
 FROM ${NODE_IMAGE} AS runtime
 # ffmpeg comes from Debian so it receives distribution security updates; rebuild the image to pick them up.
+# Noto fonts give burned-in captions glyphs for every script the app dubs into (Devanagari, Tamil, Bengali, Arabic, CJK...).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates tini fontconfig fonts-noto-core fonts-noto-cjk \
   && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV NODE_ENV=production \

@@ -346,8 +346,12 @@ export default function App() {
     }
   };
 
+  // Where "Back" in the project workspace returns to: the list the project was opened from.
+  const workspaceReturnTabRef = useRef<NavigationTab>('dashboard');
+
   // Finished projects open in the project workspace; unfinished ones reopen in the studio at the step they reached.
   const handleOpenWorkspace = async (listed: DubbingProject) => {
+    if (activeTab !== 'workspace') workspaceReturnTabRef.current = activeTab;
     if (projectProgress(listed).complete) {
       setActiveWorkspaceProject(listed);
       setActiveTab('workspace');
@@ -601,11 +605,13 @@ export default function App() {
               activeWorkspaceProject ? (
                 <ProjectWorkspace
                   project={activeWorkspaceProject}
-                  onBack={() => setActiveTab('dashboard')}
+                  onBack={() => setActiveTab(workspaceReturnTabRef.current === 'dubbing' ? 'history' : workspaceReturnTabRef.current)}
                   onUpdateProject={handleUpdateProject}
                   onProjectRefreshed={handleProjectRefreshed}
                   onShowToast={showToast}
                   allowanceRate={extrasRate}
+                  onDubMoreLanguages={handleRedubProject}
+                  defaultBurnCaptions={preferences?.burnCaptions ?? false}
                 />
               ) : (
                 <div className="max-w-4xl mx-auto px-4 py-16 text-center space-y-4">

@@ -1,7 +1,8 @@
 import { Router } from '../lib/router';
 import { createHash, randomBytes } from 'node:crypto';
 import { bucket, db, signReadUrl } from '../lib/firebaseAdmin';
-import { getStoredProject, projectLanguages } from '../lib/projectRepo';
+import { getStoredProject, projectLanguages, segmentsForLanguage } from '../lib/projectRepo';
+import { toVtt } from '../../src/lib/captionCues';
 import { getLanguageName } from '../lib/languageMeta';
 import { rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
@@ -129,15 +130,32 @@ function expiredPage(res: import('express').Response, status: number, heading: s
 // Mounted without auth: this is what the recipient opens.
 export const publicShareRouter = Router();
 
-// The share page is plain server-rendered HTML with inline styles and a video from Cloud Storage; nothing else may load or run.
-const SHARE_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; media-src https://storage.googleapis.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+// The share page is plain server-rendered HTML with inline styles, a video from Cloud Storage and its captions from here; nothing else may load or run.
+const SHARE_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; media-src 'self' https://storage.googleapis.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
+// Links made before tokens were hashed were stored under the raw token; they expire within a day of this change.
+async function findShare(token: string) {
+  const hashed = await sharesCol().doc(shareIdFor(token)).get();
+  return hashed.exists ? hashed : sharesCol().doc(token).get();
+}
+
+// The shared dub's captions, for the page's <track>; they die with the link.
+publicShareRouter.get('/:token/captions.vtt', rateLimit('share-view', [['ip', rateRules.shareViewPerIp]]), async (req, res) => {
+  const snap = await findShare(req.params.token);
+  const share = snap.exists ? (snap.data() as StoredShare) : null;
+  if (!share || share.revokedAt || new Date(share.expiresAt).getTime() <= Date.now() || !share.workspaceId) {
+    res.status(404).type('text/plain').send('Not found');
+    return;
+  }
+  const stored = await getStoredProject(share.workspaceId, share.projectId);
+  const lines = stored ? segmentsForLanguage(stored, share.languageCode).filter((s) => s.translatedText.trim()) : [];
+  res.status(200).type('text/vtt').setHeader('Cache-Control', 'no-store').send(toVtt(lines, share.title));
+});
 
 publicShareRouter.get('/:token', rateLimit('share-view', [['ip', rateRules.shareViewPerIp]]), async (req, res) => {
   res.setHeader('Content-Security-Policy', SHARE_PAGE_CSP);
   res.setHeader('Referrer-Policy', 'no-referrer');
-  // Links made before tokens were hashed were stored under the raw token; they expire within a day of this change.
-  const hashed = await sharesCol().doc(shareIdFor(req.params.token)).get();
-  const snap = hashed.exists ? hashed : await sharesCol().doc(req.params.token).get();
+  const snap = await findShare(req.params.token);
   if (!snap.exists) {
     expiredPage(res, 404, 'Link not found', 'This share link does not exist. Ask the sender for a new one.');
     return;
@@ -173,7 +191,7 @@ publicShareRouter.get('/:token', rateLimit('share-view', [['ip', rateRules.share
     .send(
       page(
         `${share.title} · ${languageName} dub`,
-        `<div class="card"><video controls playsinline preload="metadata" src="${escapeHtml(streamUrl)}"></video>
+        `<div class="card"><video controls playsinline preload="metadata" src="${escapeHtml(streamUrl)}"><track kind="captions" default srclang="${escapeHtml(share.languageCode)}" label="${escapeHtml(languageName)}" src="${escapeHtml(`/api/share/${encodeURIComponent(req.params.token)}/captions.vtt`)}"></video>
 <div class="meta"><div><h1>${escapeHtml(share.title)}<span class="pill">${escapeHtml(languageName)}</span></h1>
 <div class="sub">This link expires in about ${hoursLeft} hour${hoursLeft === 1 ? '' : 's'}.</div></div>
 <a class="btn" href="${escapeHtml(downloadUrl)}">Download video</a></div></div>`

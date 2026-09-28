@@ -146,6 +146,74 @@ export function speechLevelDb(wav: Buffer): number | null {
   return 20 * Math.log10(Math.sqrt(sumSquares / counted) / 32768);
 }
 
+export interface SpeechBounds {
+  /** When the voice audibly starts and stops; null for an edge that could not be told apart from the background. */
+  onset: number | null;
+  offset: number | null;
+}
+
+function percentile(sorted: number[], p: number): number {
+  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(p * (sorted.length - 1))))];
+}
+
+/**
+ * Where the speech in a line really starts and stops, measured on the original's audio.
+ *
+ * Line timings come from voice-activity detection (padded ~0.1 s either side) or word
+ * alignment, so a dub placed on them can start a beat before the speaker's mouth opens —
+ * and a voice that arrives *before* the lips is the mismatch viewers notice first. This
+ * finds the first and last stretches of sound near the line's edges that are loud relative
+ * to the line itself. It only answers when the speech clearly stands above the background
+ * (on a vocals stem, or quiet rooms); under music it says nothing rather than guess.
+ *
+ * `wav` is a clip cut from the original starting at `sliceStart` seconds.
+ */
+export function detectSpeechBounds(wav: Buffer, sliceStart: number, line: { start: number; end: number }): SpeechBounds | null {
+  const pcm = readPcm16Wav(wav);
+  if (!pcm) return null;
+  const { sampleRate, channels, data } = pcm;
+  const frameSamples = Math.max(1, Math.round(sampleRate * TRIM_FRAME_SECONDS)) * channels;
+  const totalSamples = Math.floor(data.length / 2);
+  const levels: number[] = [];
+  for (let f = 0; f + frameSamples <= totalSamples; f += frameSamples) {
+    let sum = 0;
+    for (let i = f; i < f + frameSamples; i++) {
+      const s = data.readInt16LE(i * 2);
+      sum += s * s;
+    }
+    const rms = Math.sqrt(sum / frameSamples) / 32768;
+    levels.push(rms > 0 ? 20 * Math.log10(rms) : -120);
+  }
+  const frameAt = (t: number) => Math.round((t - sliceStart) / TRIM_FRAME_SECONDS);
+  const timeOf = (f: number) => sliceStart + f * TRIM_FRAME_SECONDS;
+  const inside = levels.slice(Math.max(0, frameAt(line.start)), Math.min(levels.length, frameAt(line.end)));
+  if (inside.length < 8) return null;
+  const speech = percentile([...inside].sort((a, b) => a - b), 0.9);
+  const floor = percentile([...levels].sort((a, b) => a - b), 0.15);
+  if (speech < -50 || speech - floor < 14) return null;
+  const threshold = Math.max(speech - 24, floor + 9);
+  const loud = (f: number) => f >= 0 && f < levels.length && levels[f] >= threshold;
+  const runAfter = (f: number) => [0, 1, 2, 3].filter((k) => loud(f + k)).length >= 3;
+  const runBefore = (f: number) => [0, 1, 2, 3].filter((k) => loud(f - k)).length >= 3;
+
+  let onset: number | null = null;
+  for (let f = Math.max(0, frameAt(line.start - 0.15)); f <= Math.min(levels.length - 1, frameAt(line.start + 0.45)); f++) {
+    if (loud(f) && runAfter(f)) {
+      onset = timeOf(f);
+      break;
+    }
+  }
+  let offset: number | null = null;
+  for (let f = Math.min(levels.length - 1, frameAt(line.end + 0.2)); f >= Math.max(0, frameAt(line.end - 0.45)); f--) {
+    if (loud(f) && runBefore(f)) {
+      offset = timeOf(f + 1);
+      break;
+    }
+  }
+  if (onset !== null && offset !== null && offset - onset < 0.15) return null;
+  return { onset, offset };
+}
+
 export interface WavSlicer {
   slice: (startSeconds: number, endSeconds: number) => Promise<Buffer | null>;
   close: () => Promise<void>;

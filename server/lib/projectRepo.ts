@@ -32,6 +32,15 @@ export interface StoredProject
   // The dub job currently allowed to write this project's outputs; absent/null when none is running.
   activeJobId?: string | null;
   dubAttempts?: number;
+  // Separated stems of the current source, kept so a retake or another language skips the (slow) separation.
+  stemsCache?: StemsCache;
+}
+
+export interface StemsCache {
+  sourcePath: string;
+  model: string;
+  backgroundPath: string;
+  vocalsPath: string;
 }
 
 /**
@@ -94,6 +103,7 @@ export async function toClientProject(stored: StoredProject): Promise<DubbingPro
     finalDubbedVideoStoragePath,
     videoThumbnailStoragePath,
     languageOutputs,
+    stemsCache: _stems,
     ...rest
   } = stored;
 

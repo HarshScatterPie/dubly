@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { DubbingProject, LocalizedSegment, SpeakerProfile, TranscriptSegment, TranslationStyle, VoiceEmotion } from '../types';
-import { apiDelete, apiGet, apiPatch, apiPost, apiUpload } from '../lib/apiClient';
+import { DubbingProject, FaceScan, LocalizedSegment, SpeakerProfile, TranscriptSegment, TranslationStyle, VoiceEmotion } from '../types';
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiUpload } from '../lib/apiClient';
 import { randomId } from '../lib/randomId';
 
 export class ProjectService {
@@ -129,9 +129,43 @@ export class ProjectService {
     });
   }
 
-  /** Resolves the right download URL for one language's dub — plain (fast) or with karaoke captions burned in (rendered once per language, then cached server-side). */
-  public exportVideo(projectId: string, captions: boolean, languageCode?: string): Promise<{ url: string }> {
-    return apiPost<{ url: string }>(`/api/projects/${projectId}/export-video`, { captions, languageCode });
+  /**
+   * Resolves the right download URL for one language's dub — plain (instant) or with karaoke
+   * captions burned in. A captioned render re-encodes the whole video, so the server does it
+   * in the background (once per language, then cached) and this waits for it by polling.
+   */
+  public async exportVideo(
+    projectId: string,
+    captions: boolean,
+    languageCode?: string,
+    onWaiting?: (seconds: number) => void
+  ): Promise<{ url: string }> {
+    const first = await apiPost<{ url?: string; status?: string }>(`/api/projects/${projectId}/export-video`, { captions, languageCode });
+    if (first.url) return { url: first.url };
+    const started = Date.now();
+    let failures = 0;
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      onWaiting?.(Math.round((Date.now() - started) / 1000));
+      const query = languageCode ? `?languageCode=${encodeURIComponent(languageCode)}` : '';
+      let state: { status: string; url?: string; error?: string };
+      try {
+        state = await apiGet(`/api/projects/${projectId}/export-video/captions${query}`);
+        failures = 0;
+      } catch (err) {
+        // A dropped connection or a gateway hiccup is retried; an answer from the server is final.
+        const transient = !(err instanceof ApiError) || err.status >= 502;
+        if (!transient || ++failures >= 5) throw err;
+        continue;
+      }
+      if (state.status === 'ready' && state.url) return { url: state.url };
+      if (state.status === 'failed') throw new Error(state.error || 'Adding captions failed. Please try again.');
+    }
+  }
+
+  /** Faces on screen in the project's video (scanned on upload; scans older projects on first ask). */
+  public scanFaces(projectId: string): Promise<{ faceScan: FaceScan | null; available: boolean }> {
+    return apiPost(`/api/projects/${projectId}/face-scan`, {});
   }
 
   /** Creates a public watch link for one language's dub that stops working after 24 hours. */

@@ -50,7 +50,7 @@ export function reconcileSavedSegments(incoming: LocalizedSegment[], stored: Loc
   const storedById = new Map(stored.map((s) => [s.id, s]));
   return incoming.map((seg) => {
     const previous = storedById.get(seg.id);
-    const { renderKey: _clientKey, qaFlags: _clientFlags, directorNote: _clientNote, delivery, ...rest } = seg;
+    const { renderKey: _clientKey, qaFlags: _clientFlags, directorNote: _clientNote, dubStartTime: _clientStart, dubEndTime: _clientEnd, delivery, ...rest } = seg;
     // Render flags describe audio that was made from this exact text; an edit makes them stale.
     const renderFlags =
       previous && previous.translatedText === seg.translatedText ? (previous.qaFlags ?? []).filter((f) => RENDER_FLAGS.includes(f)) : [];
@@ -64,6 +64,10 @@ export function reconcileSavedSegments(incoming: LocalizedSegment[], stored: Loc
       ...pinned,
       ...(cleanedDelivery ? { delivery: cleanedDelivery } : {}),
       ...(previous?.renderKey ? { renderKey: previous.renderKey } : {}),
+      // Where the last render spoke the line; captions keep following it until the line is rendered again.
+      ...(Number.isFinite(previous?.dubStartTime) && Number.isFinite(previous?.dubEndTime)
+        ? { dubStartTime: previous!.dubStartTime, dubEndTime: previous!.dubEndTime }
+        : {}),
       ...(renderFlags.includes('director') && previous?.directorNote ? { directorNote: previous.directorNote } : {}),
     };
     return withFlags(line, [...textQaFlags(line, ctx), ...renderFlags]);

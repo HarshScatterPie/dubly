@@ -1211,7 +1211,8 @@ function captionedStoragePathFor(workspaceId: string, projectId: string, languag
 
 // Bumped when burned captions change look or fix a fault, so renders cached under the old name are never served again.
 // v2: fonts are found at all (before, captions could burn in blank), sized to the video, timed to the dubbed voice.
-const CAPTIONS_VERSION = 2;
+// v3: the app bundles its caption fonts, so renders made on a host without Indic/Arabic fonts are redrawn.
+const CAPTIONS_VERSION = 3;
 
 /**
  * Returns the URL to download for this export — either the plain dubbed video (fast,

@@ -36,6 +36,13 @@ if ! swapon --show | grep -q /swapfile; then
   grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab >/dev/null
 fi
 
+# Fonts for burned-in captions: without them libass has no glyphs for Indic, Arabic or CJK scripts.
+if ! fc-list 2>/dev/null | grep -qi 'Noto Sans Devanagari'; then
+  log "installing caption fonts (Noto)"
+  sudo apt-get update -qq
+  sudo apt-get install -y -qq --no-install-recommends fontconfig fonts-noto-core fonts-noto-cjk >/dev/null
+fi
+
 # 2. Shared files, taken once from the existing hand-copied install.
 mkdir -p "$SHARED/credentials" "$SHARED/cache" "$RELEASES"
 chmod 700 "$SHARED/credentials"

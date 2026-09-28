@@ -29,9 +29,9 @@ function formatElapsed(seconds: number): string {
 
 // The dub pipeline's real phases, recognised from the status message the server writes as it works.
 const STAGES = [
-  { label: 'Preparing the source audio', match: /preparing|separating|starting/i },
-  { label: 'Generating the dubbed voice', match: /generating neural voice/i },
-  { label: 'Syncing voice to the video timeline', match: /synchroniz/i },
+  { label: 'Preparing audio & measuring speech', match: /preparing|separating|reusing|measuring|starting/i },
+  { label: 'Generating the dubbed voice', match: /generating neural voice|ai reviewer|re-recording/i },
+  { label: "Syncing every line to the speaker's timing", match: /synchroniz|matching loudness/i },
   { label: 'Rendering the final video', match: /rendering|lip-sync|uploading/i },
 ];
 

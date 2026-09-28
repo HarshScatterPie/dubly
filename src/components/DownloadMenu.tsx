@@ -16,6 +16,8 @@ interface DownloadMenuProps {
   onDownload: (code: string) => Promise<void>;
   onShowToast?: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   label?: string;
+  /** Shown on the button while a download is being prepared (e.g. captions rendering). */
+  busyLabel?: string;
   sublabel?: string;
   /** 'large' is the Export step's hero button, 'compact' fits a toolbar. */
   size?: 'large' | 'compact';
@@ -28,6 +30,7 @@ export const DownloadMenu: React.FC<DownloadMenuProps> = ({
   onDownload,
   onShowToast,
   label = 'Download Video',
+  busyLabel,
   sublabel,
   size = 'large',
   align = 'right',
@@ -95,7 +98,7 @@ export const DownloadMenu: React.FC<DownloadMenuProps> = ({
   const mainText = allProgress
     ? `Downloading ${Math.min(allProgress.done + 1, allProgress.total)} of ${allProgress.total}…`
     : busyCode
-    ? 'Preparing…'
+    ? busyLabel || 'Preparing…'
     : label;
 
   return (

@@ -121,6 +121,43 @@ export interface LocalizedSegment {
   directorNote?: string;
   /** Server-owned fingerprint of what the last render spoke for this line; clients cannot set it. */
   renderKey?: string;
+  /** Where the dubbed voice actually speaks this line in the last render (seconds). Captions follow these; server-owned. */
+  dubStartTime?: number;
+  dubEndTime?: number;
+}
+
+/** What a scan of sampled frames found on screen; decides whether lip-sync is worth offering. */
+export interface FaceScan {
+  /** Frames sampled across the video, and how many of them showed a face. */
+  sampledFrames: number;
+  framesWithFace: number;
+  /** Most faces seen in a single frame. */
+  maxFaces: number;
+  /** Median share of the frame the main face covers (0..1), over frames that had one. */
+  medianFaceArea: number;
+  /** Share of face frames where the face looks towards the camera. */
+  frontalRatio: number;
+  /** A clear face worth lip-syncing is on screen for a good part of the video. */
+  hasFaces: boolean;
+  /** The clearest face seen: where (seconds) and its box as fractions of the frame [x1, y1, x2, y2]. */
+  best?: { time: number; box: [number, number, number, number] };
+  scannedAt: string;
+}
+
+/** How one language's last render came out, for the export screen's quality panel. */
+export interface RenderReport {
+  lipSync: 'applied' | 'off' | 'skipped_no_face' | 'unavailable' | 'failed';
+  background: 'separated' | 'ducked';
+  channels: 'stereo' | 'mono';
+  /** Spoken lines, and how many of them start and end with the original speaker's mouth. */
+  lines: number;
+  inSync: number;
+  condensed: number;
+  rushed: number;
+  overflow: number;
+  /** Lines whose start was snapped to the measured onset of the original speech. */
+  onsetsSnapped: number;
+  renderedAt: string;
 }
 
 /** Lines of a rendered language that changed since its last render, and what re-rendering just those costs. */
@@ -183,6 +220,8 @@ export interface LanguageOutput {
   wordsCount?: number;
   dubbedAudioUrl?: string;
   finalDubbedVideoUrl?: string;
+  /** How the last render of this language came out (sync, lip-sync, background). */
+  renderReport?: RenderReport;
 }
 
 export interface DubbingProject {
@@ -242,6 +281,8 @@ export interface DubbingProject {
    * `languageVoiceMap`, then `speakerVoiceMap`, then `selectedVoiceId`.
    */
   languageSpeakerVoiceMap?: Record<string, Record<string, string>>;
+  /** Faces found on screen when the video was uploaded; absent until scanned. */
+  faceScan?: FaceScan;
   /** The job (dub or analysis) currently running on this project, if any. */
   activeJobId?: string | null;
   /** Language code -> edits waiting to be rendered, for languages whose last render recorded line fingerprints. Computed by the server. */

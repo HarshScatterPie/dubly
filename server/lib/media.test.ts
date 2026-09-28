@@ -16,8 +16,8 @@ import {
   muxVideoWithAudio,
   probeMedia,
   splitAudioIntoChunks,
-  stitchDubbedAudio,
 } from './ffmpeg';
+import { stitchDubbedAudio } from './dubMix';
 import { sniffContainer, validateMedia } from './mediaValidation';
 import { buildKaraokeAss } from './captions';
 import { detectSpeechRegions } from './forcedAlign';

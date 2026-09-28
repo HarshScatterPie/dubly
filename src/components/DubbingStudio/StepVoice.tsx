@@ -16,12 +16,14 @@ import {
   Zap,
   Clapperboard,
   Music,
+  ScanFace,
 } from 'lucide-react';
-import { SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion } from '../../types';
+import { FaceScan, SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion } from '../../types';
 import { VOICES, LANGUAGES } from '../../data/mockData';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { StickyActionBar } from './StickyActionBar';
 import { VoiceProviderBadge } from '../VoiceProviderBadge';
+import { lipSyncEstimate } from './LipSyncPrompt';
 
 interface StepVoiceProps {
   selectedVoiceId: string;
@@ -43,6 +45,9 @@ interface StepVoiceProps {
   transcriptSegments?: TranscriptSegment[];
   autoLipSync?: boolean;
   lipSyncAvailable?: boolean;
+  /** Faces found in the video; decides how lip-sync is presented. */
+  faceScan?: FaceScan | null;
+  videoDuration?: number;
   separateBackground?: boolean;
   separationAvailable?: boolean;
   onToggleSeparateBackground?: (enabled: boolean) => void;
@@ -74,6 +79,8 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   transcriptSegments = [],
   autoLipSync = false,
   lipSyncAvailable = false,
+  faceScan = null,
+  videoDuration = 0,
   separateBackground = false,
   separationAvailable = false,
   onToggleSeparateBackground,
@@ -385,7 +392,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
         >
           <div className="flex items-center gap-2.5">
             <Sliders className="w-4 h-4 text-[#F05637]" />
-            <h4 className="text-sm font-bold text-[#0F172A]">Advanced: speed, pitch, emotion &amp; render options</h4>
+            <h4 className="text-sm font-bold text-[#0F172A]">Advanced: speed, pitch &amp; emotion</h4>
           </div>
           <span className="text-xs font-semibold text-[#64748B]">{showAdvanced ? 'Hide' : 'Show'}</span>
         </button>
@@ -465,61 +472,85 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           </div>
         </div>
 
-        {/* Background Audio Separation Toggle */}
-        {separationAvailable && (
-          <button
-            type="button"
-            onClick={() => onToggleSeparateBackground?.(!separateBackground)}
-            className="w-full flex items-center justify-between p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]"
-          >
-            <div className="flex items-center gap-2.5 text-left">
-              <Music className="w-4 h-4 text-[#F05637] shrink-0" />
-              <div>
-                <span className="text-xs font-semibold text-[#0F172A] block">Keep music &amp; ambience under the voice</span>
-                <span className="text-[10px] text-[#94A3B8]">
-                  Applause and gaps are always kept. This also preserves background <em>during</em> speech — slow (roughly 2× video length).
-                </span>
-              </div>
-            </div>
-            <span className={`relative w-9 h-5 rounded-full shrink-0 transition-colors ${separateBackground ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
-              <span
-                className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                  separateBackground ? 'translate-x-4' : 'translate-x-0.5'
-                }`}
-              />
-            </span>
-          </button>
-        )}
-
-        {/* Lip-Sync Toggle */}
-        {lipSyncAvailable && (
-          <button
-            type="button"
-            onClick={() => onToggleLipSync?.(!autoLipSync)}
-            className="w-full flex items-center justify-between p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]"
-          >
-            <div className="flex items-center gap-2.5 text-left">
-              <Clapperboard className="w-4 h-4 text-[#F05637] shrink-0" />
-              <div>
-                <span className="text-xs font-semibold text-[#0F172A] block">Lip-sync (experimental, free)</span>
-                <span className="text-[10px] text-[#94A3B8]">
-                  CPU-only — adds several minutes to render time. Best on clear, front-facing faces.
-                </span>
-              </div>
-            </div>
-            <span className={`relative w-9 h-5 rounded-full shrink-0 transition-colors ${autoLipSync ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
-              <span
-                className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${
-                  autoLipSync ? 'translate-x-4' : 'translate-x-0.5'
-                }`}
-              />
-            </span>
-          </button>
-        )}
-
         </>
         )}
       </div>
+
+      {/* Render quality: what happens to the picture and the soundtrack */}
+      {(lipSyncAvailable || separationAvailable) && (
+        <div className="rounded-3xl glass-panel p-5 sm:p-6 space-y-4">
+          <div>
+            <h4 className="text-sm font-bold text-[#0F172A]">Render quality</h4>
+            <p className="text-xs text-[#64748B] mt-0.5">Every line is timed to the moment the original speaker starts talking. These add more.</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {lipSyncAvailable && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={autoLipSync}
+                onClick={() => onToggleLipSync?.(!autoLipSync)}
+                className={`flex items-start justify-between gap-3 p-4 rounded-2xl border text-left transition-colors ${
+                  autoLipSync ? 'bg-[#FFF4F1] border-[#F05637]/50' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
+                }`}
+              >
+                <span className="flex items-start gap-3">
+                  <span className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center ${autoLipSync ? 'bg-[#F05637] text-white' : 'bg-[#F8FAFC] text-[#94A3B8] border border-[#E2E8F0]'}`}>
+                    <Clapperboard className="w-4 h-4" />
+                  </span>
+                  <span>
+                    <span className="text-xs font-bold text-[#0F172A] block">Lip-sync</span>
+                    <span className="text-[11px] text-[#64748B] block leading-relaxed">
+                      Re-animates the speaker's mouth to the new voice. Adds {lipSyncEstimate(videoDuration)} of rendering.
+                    </span>
+                    {faceScan && (
+                      <span
+                        className={`mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold border ${
+                          faceScan.hasFaces ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-amber-50 border-amber-200 text-amber-700'
+                        }`}
+                      >
+                        <ScanFace className="w-3 h-3" />
+                        {faceScan.hasFaces
+                          ? `Face on screen in ${Math.round((faceScan.framesWithFace / Math.max(1, faceScan.sampledFrames)) * 100)}% of the video`
+                          : 'No clear face found — lip-sync would be skipped'}
+                      </span>
+                    )}
+                  </span>
+                </span>
+                <span className={`relative mt-1 w-9 h-5 rounded-full shrink-0 transition-colors ${autoLipSync ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${autoLipSync ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </span>
+              </button>
+            )}
+            {separationAvailable && (
+              <button
+                type="button"
+                role="switch"
+                aria-checked={separateBackground}
+                onClick={() => onToggleSeparateBackground?.(!separateBackground)}
+                className={`flex items-start justify-between gap-3 p-4 rounded-2xl border text-left transition-colors ${
+                  separateBackground ? 'bg-[#FFF4F1] border-[#F05637]/50' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
+                }`}
+              >
+                <span className="flex items-start gap-3">
+                  <span className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center ${separateBackground ? 'bg-[#F05637] text-white' : 'bg-[#F8FAFC] text-[#94A3B8] border border-[#E2E8F0]'}`}>
+                    <Music className="w-4 h-4" />
+                  </span>
+                  <span>
+                    <span className="text-xs font-bold text-[#0F172A] block">Keep music under the voice</span>
+                    <span className="text-[11px] text-[#64748B] block leading-relaxed">
+                      Removes the original voice and keeps music and ambience playing underneath the dub. Off, the background plays only between lines. Done once per video, then reused.
+                    </span>
+                  </span>
+                </span>
+                <span className={`relative mt-1 w-9 h-5 rounded-full shrink-0 transition-colors ${separateBackground ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
+                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${separateBackground ? 'translate-x-4' : 'translate-x-0.5'}`} />
+                </span>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <StickyActionBar
         summary={

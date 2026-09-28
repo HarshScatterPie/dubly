@@ -3,7 +3,9 @@ import multer from 'multer';
 import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { bucket, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { FieldValue } from 'firebase-admin/firestore';
+import { bucket, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { isFaceScanAvailable, scanFaces } from '../lib/faceScan';
 import {
   createProject,
   deleteStoredProject,
@@ -225,6 +227,8 @@ async function ingestSourceVideo(workspaceId: string, projectId: string, localVi
       `Videos can be up to ${Math.round(limits.maxVideoSeconds / 60)} minutes long; this one is ${Math.ceil(probe.durationSeconds / 60)} minutes.`
     );
   }
+  // Looks for faces while the file uploads, so offering lip-sync costs the user no extra wait.
+  const faceScanning = scanFaces(localVideoPath, probe.durationSeconds).catch(() => null);
   const storagePath = `workspaces/${workspaceId}/projects/${projectId}/source${probe.ext}`;
   await uploadFileToStorage(storagePath, localVideoPath, probe.contentType);
 
@@ -245,6 +249,9 @@ async function ingestSourceVideo(workspaceId: string, projectId: string, localVi
     }
   }
 
+  // A scan still running after the upload is given a short grace period, then left out rather than holding the response.
+  const faceScan = await Promise.race([faceScanning, new Promise<null>((resolve) => setTimeout(() => resolve(null), FACE_SCAN_GRACE_MS).unref())]);
+
   invalidateStorageUsage(workspaceId);
   return updateStoredProject(workspaceId, projectId, {
     videoStoragePath: storagePath,
@@ -254,8 +261,25 @@ async function ingestSourceVideo(workspaceId: string, projectId: string, localVi
     videoResolution: resolution,
     videoFileSize: `${sizeMb.toFixed(1)} MB`,
     status: 'draft',
+    // A new video's faces replace the old one's; an unscanned one clears them so the studio asks again.
+    faceScan: faceScan ?? (FieldValue.delete() as unknown as undefined),
   });
 }
+
+const FACE_SCAN_GRACE_MS = 20_000;
+
+// Scans a project's video for faces (projects uploaded before scanning existed, or whose scan timed out); cached on the project.
+projectsRouter.post('/:id/face-scan', rateLimit('face-scan', [['user', rateRules.uploadPerUser]]), async (req, res) => {
+  const stored = await requireProject(req.workspaceId!, req.params.id);
+  if (!stored) return res.status(404).json({ error: 'Project not found' });
+  if (!stored.videoStoragePath) return res.status(400).json({ error: 'Upload a video first' });
+  if (stored.faceScan && !req.body?.force) return res.json({ faceScan: stored.faceScan, available: true });
+  if (!isFaceScanAvailable()) return res.json({ faceScan: null, available: false });
+  // ffmpeg seeks straight into the stored file over HTTP, so a scan never downloads the whole video.
+  const faceScan = await scanFaces(await getSignedDownloadUrl(stored.videoStoragePath), stored.videoDuration);
+  if (faceScan) await updateStoredProject(req.workspaceId!, req.params.id, { faceScan });
+  res.json({ faceScan, available: true });
+});
 
 projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['user', rateRules.uploadPerUser]]), upload.single('file'), async (req, res) => {
   const stored = await requireProject(req.workspaceId!, req.params.id);

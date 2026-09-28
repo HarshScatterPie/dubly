@@ -3,40 +3,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   ArrowLeft,
-  Video,
+  Check,
+  Clock,
+  Download,
   FileText,
   Languages,
-  Mic,
-  Download,
-  Share2,
-  Sparkles,
-  Check,
-  Edit3,
-  Volume2,
-  Trash2,
-  ExternalLink,
-  Play,
-  Pause,
   Loader2,
-  Wand2,
+  Mic,
+  Monitor,
+  Pause,
+  Play,
+  PlayCircle,
+  Plus,
   RotateCcw,
+  Share2,
+  Users,
+  Video,
+  Volume2,
+  Wand2,
 } from 'lucide-react';
-import { DubbingProject, LocalizedSegment, TranscriptSegment, Voice } from '../types';
+import { DubbingProject, LocalizedSegment, Voice } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { voiceCloneService } from '../services/voiceCloneService';
 import { projectService } from '../services/projectService';
 import { VideoPlayer } from './VideoPlayer';
 import { textToSpeechService } from '../services/textToSpeechService';
-import { renderService } from '../services/renderService';
-import { DownloadMenu } from './DownloadMenu';
 import { resolveVoice } from '../lib/voiceResolution';
 import { DeliveryInput, DeliveryTag, insertTagAtCursor, needsReview, PerformanceTagPicker, QaFlagBadges, ReviewFilterToggle } from './LineReview';
 import { notifyWorkDone } from '../lib/devicePrefs';
 import { projectProgress } from '../lib/projectProgress';
 import { ProjectStatusBadge } from './ProjectStatusBadge';
+import { ShareDialog } from './ShareDialog';
+import { dubbedLanguagesOf, formatClock, QualityPanel, StatTile, SyncedScript } from './DubResult';
+import { ExportPanel } from './ExportPanel';
 
 interface ProjectWorkspaceProps {
   project: DubbingProject;
@@ -47,7 +49,13 @@ interface ProjectWorkspaceProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   /** Allowance used per dubbed minute with the user's paid extras (1 with none), so estimates match what is charged. */
   allowanceRate?: number;
+  /** Opens the studio on this project to add languages, without re-uploading. */
+  onDubMoreLanguages?: (project: DubbingProject) => void;
+  /** The user's saved default for captioned downloads. */
+  defaultBurnCaptions?: boolean;
 }
+
+type Tab = 'overview' | 'translation' | 'transcript' | 'voice' | 'export';
 
 export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   allowanceRate = 1,
@@ -56,17 +64,19 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   onUpdateProject,
   onProjectRefreshed,
   onShowToast,
+  onDubMoreLanguages,
+  defaultBurnCaptions = false,
 }) => {
-  const [activeTab, setActiveTab] = useState<'overview' | 'transcript' | 'translation' | 'voice' | 'export'>('overview');
+  const [activeTab, setActiveTab] = useState<Tab>('overview');
   const [editingSegId, setEditingSegId] = useState<string | null>(null);
   const [editText, setEditText] = useState('');
   const translationEditorRef = React.useRef<HTMLTextAreaElement>(null);
-  // Which language's translation the Translation tab is showing — a project can hold
-  // several, but only ever displayed the primary one regardless of what the tab's own
-  // label ("Translation (Tamil +1)") implied was there to look at.
-  const [translationLanguage, setTranslationLanguage] = useState<string>(project.targetLanguage);
-  const [videoSeekTime, setVideoSeekTime] = useState<number | undefined>(undefined);
+  // One language drives the whole workspace: what plays, which script shows, what the export tab downloads.
+  const [viewLanguage, setViewLanguage] = useState<string>(project.targetLanguage);
+  const [seekTo, setSeekTo] = useState<number | undefined>(undefined);
+  const [playhead, setPlayhead] = useState(0);
   const [activeTrack, setActiveTrack] = useState<'dubbed' | 'original'>('dubbed');
+  const [showShare, setShowShare] = useState(false);
 
   // Which language the Voice tab is editing, and the voice picked for it. Held locally
   // until the user re-dubs, because picking a voice changes nothing on its own — the audio
@@ -99,60 +109,37 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [project.id]);
 
+  const languages = useMemo(() => dubbedLanguagesOf(project), [project]);
+  const active = languages.find((l) => l.code === viewLanguage) || languages[0];
   const sourceLang = LANGUAGES.find((l) => l.code === project.sourceLanguage) || LANGUAGES[10];
-  const targetLang = LANGUAGES.find((l) => l.code === project.targetLanguage) || LANGUAGES[0];
   /** The user's cloned voices first, then the shared catalog — same order as the studio. */
   const availableVoices = [...customVoices, ...VOICES];
-  const selectedVoice = availableVoices.find((v) => v.id === project.selectedVoiceId) || VOICES[0];
-
-  /** Every language this project targets, tolerating projects saved before multi-language. */
-  const projectLanguages = project.targetLanguages?.length
-    ? project.targetLanguages
-    : [project.targetLanguage];
-
-  // Every language's finished render, for the download menus (the primary language's lives at the top level).
-  const downloadableLanguages = projectLanguages.map((code) => {
-    const output = project.languageOutputs?.[code];
-    const lang = LANGUAGES.find((l) => l.code === code);
-    const videoUrl = code === project.targetLanguage ? project.finalDubbedVideoUrl : output?.finalDubbedVideoUrl;
-    return {
-      code,
-      name: lang?.name || code,
-      nativeName: lang?.nativeName,
-      ready: Boolean(videoUrl),
-      statusLabel: output?.status === 'failed' ? output.message || 'Dubbing failed' : 'Not dubbed yet',
-      videoUrl,
-    };
-  });
-  const downloadLanguageVideo = async (code: string) => {
-    const entry = downloadableLanguages.find((l) => l.code === code);
-    if (!entry?.videoUrl) throw new Error('This language has not been dubbed yet.');
-    await renderService.downloadMedia(`${project.title.replace(/\s+/g, '_')}_${entry.name}.mp4`, entry.videoUrl);
-  };
+  const projectLanguages = languages.map((l) => l.code);
+  const readyCount = languages.filter((l) => l.videoUrl).length;
 
   /** The voice currently assigned to a language, before any unsaved pick. */
-  const savedVoiceForLanguage = (code: string) =>
-    project.languageVoiceMap?.[code] || project.selectedVoiceId;
+  const savedVoiceForLanguage = (code: string) => project.languageVoiceMap?.[code] || project.selectedVoiceId;
+  const activeVoiceName = availableVoices.find((v) => v.id === savedVoiceForLanguage(active?.code || project.targetLanguage))?.name.replace(/\s*\(.*\)$/, '') || 'AI voice';
 
-  /**
-   * The primary language's segments live at the top level (`project.localizedSegments`,
-   * kept there for projects saved before multi-language dubbing existed); every other
-   * language's live under `languageOutputs`. Segment ids are namespaced per language
-   * (`loc-<lang>-...`), so there's no risk of the two ever colliding.
-   */
-  const translationSegments: LocalizedSegment[] =
-    translationLanguage === project.targetLanguage
-      ? project.localizedSegments
-      : project.languageOutputs?.[translationLanguage]?.localizedSegments || [];
-  const translationLang = LANGUAGES.find((l) => l.code === translationLanguage) || targetLang;
+  const translationSegments: LocalizedSegment[] = active?.segments || [];
+  const translationLang = active?.language || LANGUAGES[0];
 
   const activeVoiceId = pendingVoiceId ?? savedVoiceForLanguage(voiceLanguage);
   const hasVoiceChange = pendingVoiceId !== null && pendingVoiceId !== savedVoiceForLanguage(voiceLanguage);
 
+  // A jump belongs to the moment it was made: coming back to Watch later must not replay it.
+  useEffect(() => {
+    if (activeTab !== 'overview') setSeekTo(undefined);
+  }, [activeTab]);
+
+  // The same number twice would not move the player, so each jump is nudged by a hair.
+  const jumpTo = (time: number) => {
+    setSeekTo(time + Math.random() * 1e-4);
+    setActiveTab('overview');
+  };
+
   const handleUpdateTranscriptSegment = (segmentId: string, newText: string) => {
-    const updatedSegments = project.transcriptSegments.map((s) =>
-      s.id === segmentId ? { ...s, text: newText } : s
-    );
+    const updatedSegments = project.transcriptSegments.map((s) => (s.id === segmentId ? { ...s, text: newText } : s));
     onUpdateProject({ ...project, transcriptSegments: updatedSegments });
     setEditingSegId(null);
     onShowToast('Transcript Updated', 'Segment text saved.', 'success');
@@ -163,26 +150,20 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       s.id === locId ? { ...s, translatedText: newText, delivery: delivery.trim() || undefined, isEdited: true } : s
     );
     try {
-      // The dedicated per-language endpoint, not the generic project patch: the generic
-      // one only ever writes the top-level (primary-language) `localizedSegments` field,
-      // so an edit made while viewing a secondary language would silently vanish — its
-      // segment ids (`loc-<lang>-...`) don't even appear in that array.
-      const saved = await projectService.updateLanguageSegments(project.id, translationLanguage, updatedLoc);
+      // The dedicated per-language endpoint, not the generic project patch: the generic one
+      // only ever writes the primary language's lines.
+      const saved = await projectService.updateLanguageSegments(project.id, translationLang.code, updatedLoc);
       onProjectRefreshed(saved);
       setEditingSegId(null);
-      onShowToast('Translation Updated', 'Segment translation saved.', 'success');
+      onShowToast('Translation Updated', 'Saved. Update the dub to hear it.', 'success');
     } catch (err) {
       onShowToast('Save Failed', (err as Error).message, 'error');
     }
   };
 
   /**
-   * Re-renders one language with the newly picked voice.
-   *
-   * Picking a voice used to save the id and claim the track had switched, which was simply
-   * untrue — the rendered audio is a file, and nothing had re-rendered it. The voice only
-   * takes effect when the dub is run again, so that is what this does, and only for the one
-   * language being edited rather than every language in the project.
+   * Re-renders one language with the newly picked voice. Picking a voice alone changes
+   * nothing — the audio is a rendered file — so this re-dubs just that language.
    */
   const handleRedubWithVoice = async () => {
     if (!pendingVoiceId) return;
@@ -241,15 +222,15 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
     void poll();
   };
 
-  const pendingRetake = project.retakeInfo?.[translationLanguage];
+  const pendingRetake = project.retakeInfo?.[translationLang.code];
   const changedLineIds = new Set(pendingRetake?.changedLineIds ?? []);
   const flaggedCount = translationSegments.filter(needsReview).length;
   const shownTranslationSegments = reviewOnly ? translationSegments.filter(needsReview) : translationSegments;
 
   // Plays a line in the voice its speaker gets in this language, directed the way the dub directs it.
   const handlePreviewLine = (loc: LocalizedSegment) => {
-    const voice = resolveVoice(project, translationLanguage, loc.speaker, availableVoices);
-    textToSpeechService.speakText(loc.translatedText, voice, translationLanguage, {
+    const voice = resolveVoice(project, translationLang.code, loc.speaker, availableVoices);
+    textToSpeechService.speakText(loc.translatedText, voice, translationLang.code, {
       onError: (err) => onShowToast('Playback Failed', err.message, 'error'),
       emotion: project.voiceEmotion,
       delivery: loc.delivery,
@@ -258,8 +239,8 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 
   // Re-renders the edited lines of one language; only the changed lines are charged.
   const handleRetake = async () => {
-    const language = translationLanguage;
-    const langName = LANGUAGES.find((l) => l.code === language)?.name || language;
+    const language = translationLang.code;
+    const langName = translationLang.name;
     setRetake({ language, progress: 3, message: `Starting ${langName} update...` });
     try {
       await projectService.retakeLines(project.id, language);
@@ -308,200 +289,166 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
     });
   };
 
-  const formatTime = (seconds: number) => {
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
-    return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-  };
+  const tabs: { id: Tab; label: string; icon: React.ElementType; count?: number }[] = [
+    { id: 'overview', label: 'Watch', icon: PlayCircle },
+    { id: 'translation', label: 'Translation', icon: Languages, count: flaggedCount || undefined },
+    { id: 'transcript', label: 'Original script', icon: FileText },
+    { id: 'voice', label: 'Voices', icon: Mic },
+    { id: 'export', label: 'Export', icon: Download },
+  ];
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fade-in">
-      {/* Workspace Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-[#E2E8F0]">
-        <div className="flex items-center gap-4">
-          <button
-            type="button"
-            onClick={onBack}
-            className="p-2 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#0F172A] border border-[#E2E8F0] transition-colors"
-          >
-            <ArrowLeft className="w-4 h-4" />
-          </button>
-          <div>
-            <div className="flex items-center gap-2">
-              <h2 className="text-xl sm:text-2xl font-bold text-[#0F172A] tracking-tight">
-                {project.title}
-              </h2>
-              {/* The project's real state: this screen also shows projects whose re-dub is running or failed. */}
-              <ProjectStatusBadge progress={projectProgress(project)} />
+    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-fade-in">
+      {/* Header */}
+      <div className="rounded-3xl glass-panel p-4 sm:p-5">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex items-center gap-4 min-w-0">
+            <button
+              type="button"
+              onClick={onBack}
+              aria-label="Back"
+              className="p-2 rounded-xl bg-white hover:bg-[#F1F5F9] text-[#0F172A] border border-[#E2E8F0] transition-colors shrink-0"
+            >
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="relative w-24 h-14 rounded-xl overflow-hidden bg-[#0F172A] shrink-0 hidden sm:block">
+              {project.videoThumbnailUrl ? (
+                <img src={project.videoThumbnailUrl} alt="" className="w-full h-full object-cover" />
+              ) : (
+                <div className="w-full h-full flex items-center justify-center">
+                  <Video className="w-5 h-5 text-slate-500" />
+                </div>
+              )}
+              <span className="absolute bottom-1 right-1 px-1 rounded bg-black/75 text-[9px] font-mono text-white">{formatClock(project.videoDuration)}</span>
             </div>
-            <p className="text-xs text-[#64748B] mt-0.5">
-              {sourceLang.name} → {targetLang.name} · Voice: {selectedVoice.name} · {project.videoFileSize}
-            </p>
-          </div>
-        </div>
-
-        {/* Quick Export Actions */}
-        <div className="flex items-center gap-2">
-          <DownloadMenu
-            size="compact"
-            label="Download"
-            languages={downloadableLanguages}
-            onDownload={downloadLanguageVideo}
-            onShowToast={onShowToast}
-          />
-        </div>
-      </div>
-
-      {/* Horizontal Tab Navigation */}
-      <div className="flex items-center gap-2 p-1.5 glass-panel rounded-2xl overflow-x-auto custom-scrollbar">
-        <button
-          type="button"
-          onClick={() => setActiveTab('overview')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
-            activeTab === 'overview'
-              ? 'bg-[#F05637] text-white shadow-sm shadow-[0_0_12px_rgba(240,86,55,0.4)]'
-              : 'text-[#64748B] hover:text-[#0F172A]'
-          }`}
-        >
-          <Video className="w-3.5 h-3.5" />
-          <span>Overview</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('transcript')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
-            activeTab === 'transcript'
-              ? 'bg-[#F05637] text-white shadow-sm shadow-[0_0_12px_rgba(240,86,55,0.4)]'
-              : 'text-[#64748B] hover:text-[#0F172A]'
-          }`}
-        >
-          <FileText className="w-3.5 h-3.5" />
-          <span>Transcript ({project.transcriptSegments.length})</span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('translation')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
-            activeTab === 'translation'
-              ? 'bg-[#F05637] text-white shadow-sm shadow-[0_0_12px_rgba(240,86,55,0.4)]'
-              : 'text-[#64748B] hover:text-[#0F172A]'
-          }`}
-        >
-          <Languages className="w-3.5 h-3.5" />
-          <span>
-            Translation (
-            {projectLanguages.length > 1
-              ? `${targetLang.name} +${projectLanguages.length - 1}`
-              : targetLang.name}
-            )
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('voice')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
-            activeTab === 'voice'
-              ? 'bg-[#F05637] text-white shadow-sm shadow-[0_0_12px_rgba(240,86,55,0.4)]'
-              : 'text-[#64748B] hover:text-[#0F172A]'
-          }`}
-        >
-          <Mic className="w-3.5 h-3.5" />
-          <span>
-            Voice Track (
-            {projectLanguages.length > 1
-              ? `${projectLanguages.length} languages`
-              : selectedVoice.name}
-            )
-          </span>
-        </button>
-
-        <button
-          type="button"
-          onClick={() => setActiveTab('export')}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
-            activeTab === 'export'
-              ? 'bg-[#F05637] text-white shadow-sm shadow-[0_0_12px_rgba(240,86,55,0.4)]'
-              : 'text-[#64748B] hover:text-[#0F172A]'
-          }`}
-        >
-          <Download className="w-3.5 h-3.5" />
-          <span>Export Center</span>
-        </button>
-      </div>
-
-      {/* Tab Content Render */}
-      {activeTab === 'overview' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-          <div className="lg:col-span-7 space-y-4">
-            <div className="relative rounded-2xl overflow-hidden border border-[#E2E8F0] shadow-2xl bg-[#FFFFFF]">
-              <VideoPlayer
-                src={project.finalDubbedVideoUrl || project.videoUrl}
-                originalSrc={project.videoUrl}
-                currentTime={videoSeekTime}
-                localizedSegments={project.localizedSegments}
-                activeLanguageName={targetLang.name}
-                showAudioTrackSwitch={true}
-                activeAudioTrack={activeTrack}
-                onToggleAudioTrack={setActiveTrack}
-                className="w-full aspect-video"
-              />
-            </div>
-          </div>
-
-          <div className="lg:col-span-5 space-y-6">
-            <div className="rounded-3xl glass-panel p-6 space-y-5">
-              <h3 className="text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
-                Project Parameters
-              </h3>
-
-              <div className="space-y-3 text-xs">
-                <div className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-[#64748B]">Language Pair</span>
-                  <span className="font-semibold text-[#0F172A]">
-                    {sourceLang.name} → <strong className="text-[#D94B2E]">{targetLang.name}</strong>
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-[#64748B]">AI Voice</span>
-                  <span className="font-semibold text-[#0F172A]">
-                    {selectedVoice.name} ({selectedVoice.accent})
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-[#64748B]">Translation Style</span>
-                  <span className="font-semibold text-[#0F172A] capitalize">
-                    {project.translationStyle} (Adapt Native: {project.adaptExpressions ? 'Yes' : 'No'})
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-[#64748B]">Segments Count</span>
-                  <span className="font-mono text-[#0F172A] font-bold">
-                    {project.localizedSegments.length} Segments ({project.wordsCount} words)
-                  </span>
-                </div>
-
-                <div className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-                  <span className="text-[#64748B]">Resolution & Size</span>
-                  <span className="font-mono text-[#0F172A]">
-                    {project.videoResolution} · {project.videoFileSize}
-                  </span>
-                </div>
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="text-lg sm:text-xl font-extrabold text-[#0F172A] tracking-tight truncate">{project.title}</h2>
+                {/* The project's real state: this screen also shows projects whose re-dub is running or failed. */}
+                <ProjectStatusBadge progress={projectProgress(project)} />
               </div>
+              <p className="text-xs text-[#64748B] mt-0.5 truncate">
+                {sourceLang.name} → {languages.length > 1 ? `${readyCount} of ${languages.length} languages dubbed` : active?.language.name}
+                {' · '}
+                {project.videoResolution?.split(' (')[0]} · {project.videoFileSize}
+              </p>
+            </div>
+          </div>
 
+          <div className="flex flex-wrap items-center gap-2">
+            {onDubMoreLanguages && project.transcriptSegments?.length > 0 && (
               <button
                 type="button"
-                onClick={() => setActiveTab('translation')}
-                className="w-full py-3 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] border border-[#E2E8F0] text-xs font-semibold text-[#D94B2E] hover:text-[#ff9d83] transition-colors"
+                onClick={() => onDubMoreLanguages(project)}
+                className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-[#F8FAFC] border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] transition-colors"
               >
-                Inspect & Edit Translations →
+                <Plus className="w-3.5 h-3.5 text-[#D94B2E]" />
+                More languages
               </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setShowShare(true)}
+              disabled={readyCount === 0}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-white hover:bg-[#F8FAFC] border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] transition-colors disabled:opacity-50"
+            >
+              <Share2 className="w-3.5 h-3.5 text-[#D94B2E]" />
+              Share
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('export')}
+              className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-[0_0_15px_rgba(240,86,55,0.3)] transition-colors"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Download
+            </button>
+          </div>
+        </div>
+
+        {/* One language picker for the whole workspace */}
+        {languages.length > 1 && (
+          <div className="mt-4 pt-4 border-t border-[#E2E8F0] flex items-center gap-2 overflow-x-auto custom-scrollbar">
+            <span className="text-[11px] font-semibold text-[#94A3B8] shrink-0">Language</span>
+            {languages.map((entry) => {
+              const isActive = entry.code === active?.code;
+              return (
+                <button
+                  key={entry.code}
+                  type="button"
+                  onClick={() => {
+                    setViewLanguage(entry.code);
+                    setEditingSegId(null);
+                  }}
+                  className={`shrink-0 inline-flex items-center gap-1.5 pl-2 pr-3 py-1.5 rounded-full text-xs font-semibold border transition-all ${
+                    isActive ? 'bg-[#0F172A] border-[#0F172A] text-white' : 'bg-white border-[#E2E8F0] text-[#475569] hover:text-[#0F172A]'
+                  }`}
+                >
+                  <span>{entry.language.flag}</span>
+                  {entry.language.name}
+                  {!entry.videoUrl && <span className={`text-[10px] ${isActive ? 'text-white/60' : 'text-[#94A3B8]'}`}>· not dubbed</span>}
+                  {project.retakeInfo?.[entry.code] && <span className="w-1.5 h-1.5 rounded-full bg-sky-500" title="Has edits waiting for a render" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Tabs */}
+      <div className="flex items-center gap-1 p-1 rounded-2xl bg-[#F1F5F9] overflow-x-auto custom-scrollbar">
+        {tabs.map(({ id, label, icon: Icon, count }) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setActiveTab(id)}
+            className={`shrink-0 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all ${
+              activeTab === id ? 'bg-white text-[#0F172A] shadow-sm' : 'text-[#64748B] hover:text-[#0F172A]'
+            }`}
+          >
+            <Icon className={`w-3.5 h-3.5 ${activeTab === id ? 'text-[#F05637]' : ''}`} />
+            {label}
+            {count ? <span className="px-1.5 rounded-full bg-amber-100 text-amber-700 text-[10px] font-bold">{count}</span> : null}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'overview' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="lg:col-span-8 space-y-3 min-w-0">
+            <VideoPlayer
+              key={active?.code}
+              src={active?.videoUrl || project.videoUrl}
+              originalSrc={project.videoUrl}
+              poster={project.videoThumbnailUrl || undefined}
+              currentTime={seekTo}
+              autoPlayOnSeek
+              onTimeUpdate={setPlayhead}
+              localizedSegments={activeTrack === 'dubbed' && active?.videoUrl ? translationSegments : []}
+              transcriptSegments={activeTrack === 'original' || !active?.videoUrl ? project.transcriptSegments : []}
+              activeLanguageName={active?.language.name || 'Dubbed'}
+              showAudioTrackSwitch={Boolean(active?.videoUrl)}
+              activeAudioTrack={activeTrack}
+              onToggleAudioTrack={setActiveTrack}
+              className="w-full aspect-video shadow-[0_24px_60px_rgba(15,23,42,0.16)]"
+            />
+            {!active?.videoUrl && (
+              <p className="text-xs text-[#64748B] px-1">
+                {active?.language.name} has not been dubbed yet — you are watching the original.
+              </p>
+            )}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+              <StatTile icon={Mic} label="Voice" value={activeVoiceName} />
+              <StatTile icon={Users} label="Speakers" value={String(project.speakersCount || 1)} />
+              <StatTile icon={Clock} label="Duration" value={formatClock(project.videoDuration)} />
+              <StatTile icon={Monitor} label="Lines" value={`${translationSegments.length} · ${project.wordsCount} words`} />
             </div>
+          </div>
+          <div className="lg:col-span-4 space-y-4">
+            <QualityPanel report={active?.report} faceDetected={project.faceScan?.hasFaces} onReviewLines={() => { setReviewOnly(true); setActiveTab('translation'); }} />
+            {active && (
+              <SyncedScript segments={translationSegments} currentTime={playhead} onSeek={(t) => setSeekTo(t + Math.random() * 1e-4)} languageName={active.language.name} maxHeightClass="max-h-[340px]" />
+            )}
           </div>
         </div>
       )}
@@ -509,19 +456,23 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       {activeTab === 'transcript' && (
         <div className="rounded-3xl glass-panel p-6 space-y-4">
           <div className="flex items-center justify-between pb-3 border-b border-[#E2E8F0]">
-            <h3 className="text-sm font-bold text-[#0F172A]">Original Source Transcript</h3>
-            <span className="text-xs text-[#64748B] font-mono">{project.transcriptSegments.length} Segments</span>
+            <div>
+              <h3 className="text-sm font-bold text-[#0F172A]">Original script · {sourceLang.name}</h3>
+              <p className="text-[11px] text-[#64748B]">What was said in the video, line by line. Click a time to watch it.</p>
+            </div>
+            <span className="text-xs text-[#64748B] font-mono">{project.transcriptSegments.length} lines</span>
           </div>
 
-          <div className="space-y-3">
+          <div className="space-y-2">
             {project.transcriptSegments.map((seg) => {
               const isEditing = editingSegId === seg.id;
               return (
-                <div key={seg.id} className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
+                <div key={seg.id} className="p-4 rounded-2xl bg-white border border-[#E2E8F0] space-y-2">
                   <div className="flex items-center justify-between text-xs text-[#64748B] font-mono">
-                    <span>
-                      {formatTime(seg.startTime)} — {formatTime(seg.endTime)}
-                    </span>
+                    <button type="button" onClick={() => jumpTo(seg.startTime)} className="hover:text-[#D94B2E]" title="Watch this line">
+                      {formatClock(seg.startTime)} — {formatClock(seg.endTime)}
+                      {seg.speaker && <span className="ml-2 font-sans text-[10px] text-[#94A3B8]">{seg.speaker}</span>}
+                    </button>
                     {!isEditing && (
                       <button
                         type="button"
@@ -529,7 +480,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                           setEditingSegId(seg.id);
                           setEditText(seg.text);
                         }}
-                        className="text-[#D94B2E] hover:text-[#ff9d83] text-xs font-semibold"
+                        className="text-[#D94B2E] hover:text-[#ff9d83] text-xs font-semibold font-sans"
                       >
                         Edit
                       </button>
@@ -544,11 +495,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                         className="w-full p-2.5 rounded-xl bg-[#FFFFFF] border border-[#F05637] text-[#0F172A] text-xs focus:outline-none focus:ring-1 focus:ring-[#F05637]"
                       />
                       <div className="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setEditingSegId(null)}
-                          className="px-3 py-1 text-xs text-[#64748B]"
-                        >
+                        <button type="button" onClick={() => setEditingSegId(null)} className="px-3 py-1 text-xs text-[#64748B]">
                           Cancel
                         </button>
                         <button
@@ -561,7 +508,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                       </div>
                     </div>
                   ) : (
-                    <p className="text-xs text-[#0F172A]">"{seg.text}"</p>
+                    <p className="text-[13px] text-[#0F172A] leading-relaxed">{seg.text}</p>
                   )}
                 </div>
               );
@@ -572,49 +519,22 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 
       {activeTab === 'translation' && (
         <div className="rounded-3xl glass-panel p-6 space-y-4">
-          <div className="flex items-center justify-between pb-3 border-b border-[#E2E8F0]">
-            <h3 className="text-sm font-bold text-[#0F172A]">
-              Dubbed Localization ({translationLang.name})
-            </h3>
-            <span className="text-xs text-[#D94B2E] font-mono">{translationSegments.length} Segments</span>
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#E2E8F0]">
+            <div>
+              <h3 className="text-sm font-bold text-[#0F172A]">
+                {translationLang.flag} {translationLang.name} translation
+              </h3>
+              <p className="text-[11px] text-[#64748B]">Edit a line, then update the dub — only the changed lines are re-voiced.</p>
+            </div>
+            <ReviewFilterToggle count={flaggedCount} active={reviewOnly} onToggle={() => setReviewOnly(!reviewOnly)} />
           </div>
 
-          {/* Which language is showing — a project can hold several, and this is the only
-              place in the tab that lets you pick. */}
-          {projectLanguages.length > 1 && (
-            <div className="flex flex-wrap items-center gap-2 pb-1">
-              <span className="text-[11px] text-[#64748B]">Language:</span>
-              {projectLanguages.map((code) => {
-                const lang = LANGUAGES.find((l) => l.code === code);
-                if (!lang) return null;
-                const isActive = code === translationLanguage;
-                return (
-                  <button
-                    key={code}
-                    type="button"
-                    onClick={() => {
-                      setTranslationLanguage(code);
-                      setEditingSegId(null);
-                    }}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
-                      isActive
-                        ? 'bg-[#F05637] text-white border-[#F05637]'
-                        : 'bg-[#F8FAFC] text-[#64748B] border-[#E2E8F0] hover:text-[#0F172A]'
-                    }`}
-                  >
-                    {lang.flag} {lang.name}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-
-          {(pendingRetake || retake?.language === translationLanguage) && (
+          {(pendingRetake || retake?.language === translationLang.code) && (
             <div className="p-4 rounded-2xl bg-[#F05637]/5 border border-[#F05637]/30 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div>
                   <p className="text-xs font-bold text-[#0F172A]">
-                    {retake?.language === translationLanguage
+                    {retake?.language === translationLang.code
                       ? retake.message
                       : `${pendingRetake!.changedLineIds.length} edited line${pendingRetake!.changedLineIds.length === 1 ? '' : 's'} not in the ${translationLang.name} dub yet`}
                   </p>
@@ -635,7 +555,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                   {retake ? `Updating... ${retake.progress}%` : 'Update the dub'}
                 </button>
               </div>
-              {retake?.language === translationLanguage && (
+              {retake?.language === translationLang.code && (
                 <div className="h-1.5 rounded-full bg-[#E2E8F0] overflow-hidden">
                   <div className="h-full bg-[#F05637] transition-all" style={{ width: `${Math.max(3, retake.progress)}%` }} />
                 </div>
@@ -643,25 +563,17 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
             </div>
           )}
 
-          <div className="flex justify-end">
-            <ReviewFilterToggle count={flaggedCount} active={reviewOnly} onToggle={() => setReviewOnly(!reviewOnly)} />
-          </div>
-
-          <div className="space-y-3">
-            {translationSegments.length === 0 && (
-              <p className="text-xs text-[#94A3B8] text-center py-8">
-                No translation yet for {translationLang.name}.
-              </p>
-            )}
+          <div className="space-y-2">
+            {translationSegments.length === 0 && <p className="text-xs text-[#94A3B8] text-center py-8">No translation yet for {translationLang.name}.</p>}
             {shownTranslationSegments.map((loc) => {
               const isEditing = editingSegId === loc.id;
               return (
-                <div key={loc.id} className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-2">
+                <div key={loc.id} className={`p-4 rounded-2xl bg-white border space-y-2 ${needsReview(loc) ? 'border-amber-200' : 'border-[#E2E8F0]'}`}>
                   <div className="flex items-center justify-between gap-2 text-xs text-[#64748B] font-mono">
                     <span className="flex flex-wrap items-center gap-1.5">
-                      <span>
-                        {formatTime(loc.startTime)} — {formatTime(loc.endTime)}
-                      </span>
+                      <button type="button" onClick={() => jumpTo(loc.dubStartTime ?? loc.startTime)} className="hover:text-[#D94B2E]" title="Watch this line">
+                        {formatClock(loc.startTime)} — {formatClock(loc.endTime)}
+                      </button>
                       {changedLineIds.has(loc.id) && (
                         <span
                           title="Edited since the last render. Update the dub to hear it."
@@ -674,12 +586,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                       <QaFlagBadges flags={loc.qaFlags} directorNote={loc.directorNote} />
                     </span>
                     <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handlePreviewLine(loc)}
-                        className="text-[#64748B] hover:text-[#D94B2E]"
-                        title="Listen"
-                      >
+                      <button type="button" onClick={() => handlePreviewLine(loc)} className="text-[#64748B] hover:text-[#D94B2E]" title="Listen">
                         <Volume2 className="w-3.5 h-3.5" />
                       </button>
                       {!isEditing && (
@@ -690,7 +597,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                             setEditText(loc.translatedText);
                             setEditDelivery(loc.delivery || '');
                           }}
-                          className="text-[#D94B2E] hover:text-[#ff9d83] text-xs font-semibold"
+                          className="text-[#D94B2E] hover:text-[#ff9d83] text-xs font-semibold font-sans"
                         >
                           Edit
                         </button>
@@ -698,7 +605,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                     </div>
                   </div>
 
-                  <p className="text-[11px] text-[#94A3B8] italic">Original: "{loc.sourceText}"</p>
+                  <p className="text-[11px] text-[#94A3B8] italic">{loc.sourceText}</p>
 
                   {isEditing ? (
                     <div className="space-y-2 pt-1">
@@ -712,11 +619,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                       <PerformanceTagPicker onInsert={(tag) => setEditText((text) => insertTagAtCursor(text, tag, translationEditorRef.current))} />
                       <DeliveryInput value={editDelivery} onChange={setEditDelivery} />
                       <div className="flex justify-end gap-2">
-                        <button
-                          type="button"
-                          onClick={() => setEditingSegId(null)}
-                          className="px-3 py-1 text-xs text-[#64748B]"
-                        >
+                        <button type="button" onClick={() => setEditingSegId(null)} className="px-3 py-1 text-xs text-[#64748B]">
                           Cancel
                         </button>
                         <button
@@ -729,7 +632,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                       </div>
                     </div>
                   ) : (
-                    <p className="text-xs text-[#0F172A] font-medium">"{loc.translatedText}"</p>
+                    <p className="text-[13px] text-[#0F172A] font-medium leading-relaxed">{loc.translatedText}</p>
                   )}
                 </div>
               );
@@ -740,40 +643,33 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 
       {activeTab === 'voice' && (
         <div className="rounded-3xl glass-panel p-6 space-y-5">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h3 className="text-sm font-bold text-[#0F172A]">Switch or Re-assign Voice Model</h3>
-              <p className="text-[11px] text-[#64748B] mt-0.5">
-                Preview a voice, then re-dub to actually apply it — the audio is a rendered file, so
-                picking a voice alone does not change it.
-              </p>
-            </div>
+          <div>
+            <h3 className="text-sm font-bold text-[#0F172A]">Change a language's voice</h3>
+            <p className="text-[11px] text-[#64748B] mt-0.5">
+              Preview a voice, then re-dub to apply it — the audio is a rendered file, so picking a voice alone does not change it.
+            </p>
           </div>
 
           {/* Which language's voice is being set. A project can hold several. */}
           {projectLanguages.length > 1 && (
             <div className="flex flex-wrap items-center gap-2">
               <span className="text-[11px] text-[#64748B]">Voice for:</span>
-              {projectLanguages.map((code) => {
-                const lang = LANGUAGES.find((l) => l.code === code);
-                if (!lang) return null;
-                const isActive = code === voiceLanguage;
+              {languages.map((entry) => {
+                const isActive = entry.code === voiceLanguage;
                 return (
                   <button
-                    key={code}
+                    key={entry.code}
                     type="button"
                     disabled={isRedubbing}
                     onClick={() => {
-                      setVoiceLanguage(code);
+                      setVoiceLanguage(entry.code);
                       setPendingVoiceId(null);
                     }}
                     className={`px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all disabled:opacity-50 ${
-                      isActive
-                        ? 'bg-[#F05637] text-white border-[#F05637]'
-                        : 'bg-[#F8FAFC] text-[#64748B] border-[#E2E8F0] hover:text-[#0F172A]'
+                      isActive ? 'bg-[#0F172A] text-white border-[#0F172A]' : 'bg-white text-[#64748B] border-[#E2E8F0] hover:text-[#0F172A]'
                     }`}
                   >
-                    {lang.flag} {lang.name}
+                    {entry.language.flag} {entry.language.name}
                   </button>
                 );
               })}
@@ -781,7 +677,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
           )}
 
           {/* Action bar: the only thing here that actually changes the audio. */}
-          <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0]">
+          <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-2xl bg-white border border-[#E2E8F0]">
             <div className="min-w-0">
               <span className="text-xs font-bold text-[#0F172A] block truncate">
                 {availableVoices.find((v) => v.id === activeVoiceId)?.name || 'No voice selected'}
@@ -802,23 +698,18 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
             >
               {isRedubbing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Wand2 className="w-3.5 h-3.5" />}
               <span>
-                {isRedubbing
-                  ? `Re-dubbing... ${redubProgress}%`
-                  : `Re-dub ${LANGUAGES.find((l) => l.code === voiceLanguage)?.name || ''} with this voice`}
+                {isRedubbing ? `Re-dubbing... ${redubProgress}%` : `Re-dub ${LANGUAGES.find((l) => l.code === voiceLanguage)?.name || ''} with this voice`}
               </span>
             </button>
           </div>
 
           {isRedubbing && (
             <div className="h-1.5 rounded-full bg-[#E2E8F0] overflow-hidden">
-              <div
-                className="h-full bg-[#F05637] transition-all duration-500"
-                style={{ width: `${Math.max(3, redubProgress)}%` }}
-              />
+              <div className="h-full bg-[#F05637] transition-all duration-500" style={{ width: `${Math.max(3, redubProgress)}%` }} />
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
             {availableVoices.map((v) => {
               const isSelected = activeVoiceId === v.id;
               const isRendered = savedVoiceForLanguage(voiceLanguage) === v.id;
@@ -827,35 +718,29 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                 <div
                   key={v.id}
                   onClick={() => !isRedubbing && setPendingVoiceId(v.id)}
-                  className={`p-4 rounded-2xl border transition-all ${
-                    isRedubbing ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'
-                  } ${
-                    isSelected
-                      ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637] shadow-[0_0_15px_rgba(240,86,55,0.3)]'
-                      : 'bg-[#F8FAFC] border-[#E2E8F0] hover:bg-[#E2E8F0]'
+                  className={`p-4 rounded-2xl border transition-all ${isRedubbing ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'} ${
+                    isSelected ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637]' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
                   }`}
                 >
                   <div className="flex items-center gap-3">
                     {v.avatarUrl ? (
-                      <img src={v.avatarUrl} alt={v.name} className="w-12 h-12 rounded-xl object-cover shrink-0" />
+                      <img src={v.avatarUrl} alt={v.name} className="w-11 h-11 rounded-xl object-cover shrink-0" />
                     ) : (
-                      <span className="w-12 h-12 rounded-xl bg-[#F05637]/15 text-[#D94B2E] flex items-center justify-center shrink-0">
+                      <span className="w-11 h-11 rounded-xl bg-[#F05637]/15 text-[#D94B2E] flex items-center justify-center shrink-0">
                         <Mic className="w-5 h-5" />
                       </span>
                     )}
                     <div className="min-w-0 flex-1">
                       <h4 className="text-xs font-bold text-[#0F172A] truncate">{v.name}</h4>
                       <span className="text-[11px] text-[#D94B2E] block truncate">{v.accent}</span>
-                      <p className="text-[10px] text-[#94A3B8] line-clamp-1 mt-1">{v.description}</p>
+                      <p className="text-[10px] text-[#94A3B8] line-clamp-1 mt-0.5">{v.description}</p>
                     </div>
                     <button
                       type="button"
                       onClick={(e) => handlePreviewVoice(e, v)}
                       title={`Preview ${v.name}`}
                       className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center transition-colors ${
-                        isPreviewing
-                          ? 'bg-[#F05637] text-white'
-                          : 'bg-white text-[#64748B] border border-[#E2E8F0] hover:text-[#D94B2E]'
+                        isPreviewing ? 'bg-[#F05637] text-white' : 'bg-white text-[#64748B] border border-[#E2E8F0] hover:text-[#D94B2E]'
                       }`}
                     >
                       {isPreviewing ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
@@ -875,75 +760,68 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       )}
 
       {activeTab === 'export' && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <div className="relative z-20 p-6 rounded-3xl glass-panel space-y-4">
-            <h4 className="text-sm font-bold text-[#0F172A]">Video Master</h4>
-            <p className="text-xs text-[#64748B]">
-              Download 1080p MP4 with multiplexed audio and soft subtitles.
-            </p>
-            <DownloadMenu
-              align="left"
-              label="Download MP4"
-              sublabel="Dubbed master"
-              languages={downloadableLanguages}
-              onDownload={downloadLanguageVideo}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+          <div className="lg:col-span-5">
+            <ExportPanel
+              project={project}
+              languages={languages}
+              active={active}
+              defaultBurnCaptions={defaultBurnCaptions}
+              onShare={() => setShowShare(true)}
               onShowToast={onShowToast}
             />
           </div>
-
-          <div className="p-6 rounded-3xl glass-panel space-y-4">
-            <h4 className="text-sm font-bold text-[#0F172A]">Audio Track Only</h4>
-            <p className="text-xs text-[#64748B]">
-              Export the dubbed voiceover track as lossless WAV.
-            </p>
-            <button
-              type="button"
-              onClick={async () => {
-                try {
-                  await renderService.downloadMedia(`${project.title}_Audio.wav`, project.dubbedAudioUrl || '');
-                  onShowToast('Audio Exported', 'Downloaded WAV audio.', 'success');
-                } catch (err) {
-                  onShowToast('Download Failed', (err as Error).message, 'error');
-                }
-              }}
-              disabled={!project.dubbedAudioUrl}
-              className="w-full py-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#0F172A] text-xs font-semibold border border-[#E2E8F0] disabled:opacity-50"
-            >
-              Download WAV
-            </button>
-          </div>
-
-          <div className="p-6 rounded-3xl glass-panel space-y-4">
-            <h4 className="text-sm font-bold text-[#0F172A]">Subtitles (.SRT / .VTT)</h4>
-            <p className="text-xs text-[#64748B]">
-              Download standard subtitle files for YouTube, Vimeo, or Premiere.
-            </p>
-            <div className="grid grid-cols-2 gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  const srt = renderService.generateSRT(project.localizedSegments);
-                  renderService.downloadTextFile(`${project.title}.srt`, srt);
-                  onShowToast('Subtitles Exported', 'Downloaded SRT subtitle file.', 'success');
-                }}
-                className="py-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#0F172A] text-xs font-semibold border border-[#E2E8F0]"
-              >
-                Download SRT
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  const vtt = renderService.generateVTT(project.localizedSegments);
-                  renderService.downloadTextFile(`${project.title}.vtt`, vtt, 'text/vtt');
-                  onShowToast('Subtitles Exported', 'Downloaded VTT subtitle file.', 'success');
-                }}
-                className="py-2.5 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#0F172A] text-xs font-semibold border border-[#E2E8F0]"
-              >
-                Download VTT
-              </button>
+          <div className="lg:col-span-7 space-y-4">
+            <QualityPanel report={active?.report} faceDetected={project.faceScan?.hasFaces} onReviewLines={() => { setReviewOnly(true); setActiveTab('translation'); }} />
+            <div className="rounded-3xl glass-panel p-5 space-y-3">
+              <h4 className="text-sm font-bold text-[#0F172A]">Every language</h4>
+              <div className="divide-y divide-[#E2E8F0]">
+                {languages.map((entry) => (
+                  <div key={entry.code} className="flex items-center justify-between gap-3 py-2.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-base">{entry.language.flag}</span>
+                      <div className="min-w-0">
+                        <p className="text-xs font-semibold text-[#0F172A] truncate">{entry.language.name}</p>
+                        <p className="text-[11px] text-[#94A3B8] truncate">
+                          {entry.videoUrl
+                            ? entry.report
+                              ? `${Math.round((entry.report.inSync / Math.max(1, entry.report.lines)) * 100)}% timing match${entry.report.lipSync === 'applied' ? ' · lip-synced' : ''}`
+                              : 'Rendered'
+                            : entry.message || 'Not dubbed yet'}
+                        </p>
+                      </div>
+                    </div>
+                    {entry.videoUrl ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setViewLanguage(entry.code);
+                          setActiveTab('overview');
+                        }}
+                        className="text-[11px] font-semibold text-[#D94B2E] hover:underline shrink-0"
+                      >
+                        Watch
+                      </button>
+                    ) : (
+                      <span className="text-[10px] font-semibold text-[#94A3B8] shrink-0">—</span>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
+      )}
+
+      {showShare && (
+        <ShareDialog
+          projectId={project.id}
+          projectTitle={project.title}
+          languages={languages.map((entry) => ({ code: entry.code, name: entry.language.name, ready: Boolean(entry.videoUrl) }))}
+          initialLanguage={active?.code || project.targetLanguage}
+          onClose={() => setShowShare(false)}
+          onShowToast={onShowToast}
+        />
       )}
     </div>
   );

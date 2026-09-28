@@ -1,9 +1,7 @@
-import type { LocalizedSegment } from '../../src/types';
-import { stripPerformanceTags } from './performance';
+import { buildCaptionCards, CARD_LINGER_SECONDS, type CaptionLine } from '../../src/lib/captionCues';
+import { captionFontFamily } from './fonts';
 
-// Mirrors the client-side karaoke chunking in VideoPlayer.tsx so a burned-in caption
-// visually matches what was shown in the live preview.
-const WORDS_PER_CARD = 9;
+// The same cards the live player shows (src/lib/captionCues.ts), so a burned-in caption matches the preview word for word.
 
 function toAssTime(seconds: number): string {
   const cs = Math.max(0, Math.round(seconds * 100));
@@ -18,61 +16,60 @@ function escapeAssText(text: string): string {
   return text.replace(/\\/g, '\\\\').replace(/\{/g, '\\{').replace(/\}/g, '\\}');
 }
 
-/**
- * Per-word timing within a segment, estimated proportionally to character length across
- * the segment's real [start,end] window — the same approximation used client-side for
- * the live karaoke preview (translated text has no per-word STT timestamps of its own).
- */
-function estimateWordTimings(text: string, start: number, end: number) {
-  const words = text.split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [];
-  const totalChars = words.reduce((sum, w) => sum + w.length, 0) || words.length;
-  const duration = Math.max(0.1, end - start);
-  let cursor = start;
-  return words.map((w) => {
-    const share = (Math.max(1, w.length) / totalChars) * duration;
-    const wordStart = cursor;
-    const wordEnd = Math.min(end, cursor + share);
-    cursor = wordEnd;
-    return { text: w, start: wordStart, end: wordEnd };
-  });
-}
-
-function buildCardEvents(seg: LocalizedSegment): string[] {
-  const timed = estimateWordTimings(stripPerformanceTags(seg.translatedText), seg.startTime, seg.endTime);
-  if (timed.length === 0) return [];
-
-  const events: string[] = [];
-  for (let i = 0; i < timed.length; i += WORDS_PER_CARD) {
-    const card = timed.slice(i, i + WORDS_PER_CARD);
-    const cardStart = card[0].start;
-    const cardEnd = card[card.length - 1].end;
-    const kTags = card
-      .map((w) => `{\\k${Math.max(1, Math.round((w.end - w.start) * 100))}}${escapeAssText(w.text)}`)
-      .join(' ');
-    events.push(`Dialogue: 0,${toAssTime(cardStart)},${toAssTime(cardEnd)},Karaoke,,0,0,0,,${kTags}`);
-  }
-  return events;
+export interface CaptionCanvas {
+  /** The video's displayed size; captions are laid out in its own pixels so they scale with it, landscape or vertical. */
+  width: number;
+  height: number;
 }
 
 /**
- * Builds an ASS subtitle file with native \k karaoke tags (word progressively switches
- * from the "not yet spoken" to the "spoken" color as playback passes it) — burned into
- * the export via ffmpeg's libass-backed `subtitles` filter, so the downloaded video's
- * captions look like the live preview's word-highlight instead of a plain static line.
+ * An ASS subtitle file with `\kf` karaoke sweeps: each word fills from the waiting colour to
+ * the spoken colour as the dubbed voice says it. Burned in with ffmpeg's libass-backed
+ * `subtitles` filter.
  */
-export function buildKaraokeAss(segments: LocalizedSegment[]): string {
-  const events = segments.flatMap(buildCardEvents).join('\n');
+export function buildKaraokeAss(segments: CaptionLine[], canvas: CaptionCanvas = { width: 1280, height: 720 }): string {
+  const width = Math.max(160, Math.round(canvas.width));
+  const height = Math.max(120, Math.round(canvas.height));
+  const cards = buildCaptionCards(segments);
+  const events = cards
+    .map((card, index) => {
+      // Lingers briefly into the pause, but never onto the screen with the next card.
+      const next = cards[index + 1];
+      const end = Math.max(card.end, Math.min(card.end + CARD_LINGER_SECONDS, next ? next.start - 0.01 : Infinity));
+      let cursor = card.start;
+      const body = card.words
+        .map((word, i) => {
+          // Durations are taken from the running cursor so rounding never lets the sweep drift from the card.
+          const cs = Math.max(1, Math.round((word.end - cursor) * 100));
+          cursor += cs / 100;
+          return `{\\kf${cs}}${escapeAssText(word.text)}${word.space && i < card.words.length - 1 ? ' ' : ''}`;
+        })
+        .join('');
+      return `Dialogue: 0,${toAssTime(card.start)},${toAssTime(end)},Caption,,0,0,0,,${body}`;
+    })
+    .join('\n');
+
+  const allText = segments.map((s) => s.translatedText).join(' ');
+  const font = captionFontFamily(allText);
+  const short = Math.min(width, height);
+  const fontSize = Math.round(short * (width >= height ? 0.058 : 0.052));
+  const outline = Math.max(2, Math.round(fontSize * 0.08));
+  const shadow = Math.max(1, Math.round(fontSize * 0.035));
+  const marginSide = Math.round(width * 0.07);
+  const marginBottom = Math.round(height * (width >= height ? 0.07 : 0.12));
+
+  // Colours are &HAABBGGRR. Spoken words turn white; the words still to come wait in a soft grey.
   return `[Script Info]
 ScriptType: v4.00+
-PlayResX: 1280
-PlayResY: 720
+PlayResX: ${width}
+PlayResY: ${height}
 WrapStyle: 0
 ScaledBorderAndShadow: yes
+YCbCr Matrix: TV.709
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Karaoke,Arial,44,&H003756F0,&H00FFFFFF,&H00000000,&H96000000,0,0,0,0,100,100,0,0,1,2.5,1.5,2,60,60,70,1
+Style: Caption,${font},${fontSize},&H00FFFFFF,&H00C8C8C8,&H00141414,&H78000000,-1,0,0,0,100,100,0,0,1,${outline},${shadow},2,${marginSide},${marginSide},${marginBottom},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

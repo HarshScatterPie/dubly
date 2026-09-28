@@ -64,10 +64,14 @@ export function planPlacements(lines: LineTiming[], opts: { totalSeconds: number
   const speed = Math.min(1.5, Math.max(0.6, opts.speed || 1));
   const order = lines.map((_, i) => i).sort((a, b) => lines[a].start - lines[b].start);
   const placements: Placement[] = new Array(lines.length);
+  // Where the previous take stops. A take that still runs long at the fastest natural pace used
+  // to be overlapped by the next line — two voices at once, and the words of both lost. The
+  // next line now waits for it instead, and its own pace absorbs the delay where it can.
+  let previousEnd = 0;
   order.forEach((index, k) => {
     const line = lines[index];
-    const start = Math.max(0, line.start);
-    const nextStart = k + 1 < order.length ? lines[order[k + 1]].start : opts.totalSeconds;
+    const start = Math.max(0, line.start, previousEnd > line.start ? previousEnd + 0.04 : 0);
+    const nextStart = Math.max(start, k + 1 < order.length ? lines[order[k + 1]].start : opts.totalSeconds);
     const slot = Math.max(0.2, line.end - start);
     const available = Math.max(slot, nextStart - start - SEGMENT_GUARD_SECONDS);
     const raw = line.rawSeconds > 0 ? line.rawSeconds : slot * speed;
@@ -80,6 +84,7 @@ export function planPlacements(lines: LineTiming[], opts: { totalSeconds: number
     if (raw / tempo > available) tempo = Math.min(raw / available, speed * MAX_COMPRESSION);
     tempo = Math.max(0.5, tempo);
     placements[index] = { start, tempo, playedSeconds: raw / tempo };
+    previousEnd = start + raw / tempo;
   });
   return placements;
 }

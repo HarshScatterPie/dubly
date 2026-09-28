@@ -142,8 +142,18 @@ export function cardsForLine(line: CaptionLine): CaptionCard[] {
 
 /** Every card of a language in play order, trimmed so two cards never share the screen. */
 export function buildCaptionCards(lines: CaptionLine[]): CaptionCard[] {
-  const cards = lines
-    .flatMap(cardsForLine)
+  // Each line's words stay inside its own span: a line that ran long must end before the next
+  // begins, or the two lines' cards interleave and flash past each other unread.
+  const spans = lines
+    .filter((line) => stripPerformanceTags(line.translatedText).trim())
+    .map((line) => ({ line, span: spokenSpan(line) }))
+    .sort((a, b) => a.span.start - b.span.start);
+  spans.forEach((entry, i) => {
+    const next = spans[i + 1];
+    if (next && entry.span.end > next.span.start - 0.02) entry.span.end = Math.max(entry.span.start + 0.3, next.span.start - 0.02);
+  });
+  const cards = spans
+    .flatMap(({ line, span }) => cardsForLine({ ...line, dubStartTime: span.start, dubEndTime: span.end }))
     .filter((card) => card.end > card.start)
     .sort((a, b) => a.start - b.start);
   for (let i = 0; i < cards.length - 1; i++) {

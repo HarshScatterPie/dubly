@@ -62,7 +62,6 @@ import {
   mixDubAudio,
   planPlacements,
   renderVoiceTrack,
-  STRICT_MAX_TEMPO,
   TAKE_LEAD_SECONDS,
   voiceTrackFor16k,
   type DuckSpan,
@@ -682,11 +681,10 @@ async function renderLanguage(params: {
       const nextStart = nextSpoken ? nextSpoken.startTime : stored.videoDuration;
       const slot = seg.endTime - seg.startTime;
       const available = Math.max(slot, nextStart - seg.startTime - SEGMENT_GUARD_SECONDS);
-      // With lip-sync on, the line has to fit the speaker's mouth, not merely the gap before the next line.
-      const bounds = params.speechBounds.get(seg.segmentId);
-      const mouthSlot = Math.max(0.2, (bounds?.offset ?? seg.endTime) - (bounds?.onset ?? seg.startTime));
-      const fitLimit = stored.autoLipSync ? Math.min(available * MAX_COMPRESSION, mouthSlot * STRICT_MAX_TEMPO * 1.06) : available * MAX_COMPRESSION;
-      const fitTarget = stored.autoLipSync ? Math.min(available, mouthSlot * 1.12) : available;
+      // Words are only cut when the line would otherwise run into the next one. Fitting the mouth more
+      // tightly is left to pacing (planPlacements): shortening lines to match the lips dropped meaning.
+      const fitLimit = available * MAX_COMPRESSION;
+      const fitTarget = available;
       let spokenSeconds = playedSeconds(audio);
       let wasCondensed = false;
 

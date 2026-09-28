@@ -198,6 +198,9 @@
   0%, 100% { height: 6px; opacity: 0.5; }
   50% { height: 22px; opacity: 1; }
 }
+@media (prefers-reduced-motion: reduce) {
+  .wave-bar { animation: none; height: 14px; }
+}
 
 /* Mobile safe-area padding for the bottom tab bar */
 .safe-pb {
@@ -254,3 +257,57 @@
   100% { top: 100%; }
 }
 .animate-scan { animation: scanDown 2.8s linear infinite; }
+
+/* Dashboard hero: drifting brand glows, staggered entrance and the looping dub-pipeline illustration */
+@keyframes heroDrift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  50% { transform: translate(8%, 10%) scale(1.12); }
+}
+.hero-drift { animation: heroDrift 18s ease-in-out infinite; }
+.hero-drift-alt { animation: heroDrift 24s ease-in-out infinite reverse; }
+
+@keyframes heroRise {
+  from { opacity: 0; transform: translateY(16px); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: none; }
+}
+.hero-rise { animation: heroRise 0.8s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+/* The gradient repeats end-to-start, so sliding it one full width loops without a seam */
+@keyframes heroSheen {
+  from { background-position: 0% center; }
+  to { background-position: 200% center; }
+}
+.hero-word {
+  background-size: 200% auto;
+  animation: heroRise 0.7s cubic-bezier(0.22, 1, 0.36, 1) both, heroSheen 5s linear infinite;
+}
+
+/* Duration is set inline to the pipeline loop's length */
+@keyframes heroPlayLit {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+@keyframes heroPlayHead {
+  from { left: 0%; }
+  to { left: 100%; }
+}
+.hero-playhead-lit { animation: heroPlayLit 9s linear both; }
+.hero-playhead { animation: heroPlayHead 9s linear both; }
+
+@keyframes heroFlow {
+  0% { top: 0%; opacity: 0; }
+  20%, 80% { opacity: 1; }
+  100% { top: 100%; opacity: 0; }
+}
+.hero-flow-dot { animation: heroFlow 1.3s ease-in infinite; }
+
+@keyframes heroType {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+.hero-type { animation: heroType 1s cubic-bezier(0.22, 1, 0.36, 1) both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-drift, .hero-drift-alt, .hero-rise, .hero-word, .hero-playhead-lit, .hero-flow-dot, .hero-type { animation: none; }
+  .hero-playhead { display: none; }
+}

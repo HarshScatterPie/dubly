@@ -7,9 +7,7 @@ import React, { useState } from 'react';
 import {
   Video,
   Mic,
-  Sparkles,
   ArrowRight,
-  Plus,
   Play,
   Languages,
   Clock,
@@ -24,6 +22,7 @@ import { videoService } from '../services/videoService';
 import { ConfirmDialog } from './ConfirmDialog';
 import { projectProgress, targetsSummary } from '../lib/projectProgress';
 import { ProjectStatusBadge } from './ProjectStatusBadge';
+import { DashboardHero } from './DashboardHero';
 
 interface DashboardProps {
   projects: DubbingProject[];
@@ -45,45 +44,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
-      {/* Hero Section */}
-      <div className="relative overflow-hidden rounded-3xl glass-panel border border-[#E2E8F0] p-8 sm:p-12 text-center shadow-2xl">
-        {/* Ambient background glow */}
-        <div className="absolute -top-24 left-1/2 -translate-x-1/2 w-96 h-96 bg-[#F05637]/15 rounded-full blur-3xl pointer-events-none" />
-
-        <div className="relative z-10 max-w-3xl mx-auto space-y-5">
-          <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-[#F05637]/15 border border-[#F05637]/40 text-[#D94B2E] text-xs font-semibold tracking-wide shadow-sm">
-            <Sparkles className="w-3.5 h-3.5 text-[#F05637]" />
-            <span>Dubly Studio v2.5 · Powered by Neural Speech & Localization</span>
-          </div>
-
-          <h1 className="text-3xl sm:text-5xl font-extrabold tracking-tight text-[#0F172A] font-sans leading-tight">
-            Bring your content to <span className="text-transparent bg-clip-text bg-gradient-to-r from-coral-600 via-coral-500 to-teal-600">every language.</span>
-          </h1>
-
-          <p className="text-base sm:text-lg text-[#64748B] max-w-2xl mx-auto font-normal leading-relaxed">
-            Translate, dub and voice your content with AI. Preserve tone and pacing, and reach global audiences in 20+ languages.
-          </p>
-
-          <div className="pt-2 flex flex-wrap items-center justify-center gap-3">
-            <button
-              type="button"
-              onClick={() => onNavigate('dubbing')}
-              className="flex items-center gap-2.5 px-6 py-3 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white font-semibold text-sm shadow-xl shadow-[0_0_25px_rgba(240,86,55,0.35)] transition-all duration-200"
-            >
-              <Plus className="w-4 h-4" />
-              <span>+ Create new project</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => onNavigate('text-to-voice')}
-              className="flex items-center gap-2 px-5 py-3 rounded-xl bg-[#F8FAFC] hover:bg-[#E2E8F0] text-[#0F172A] text-sm font-semibold border border-[#E2E8F0] transition-all"
-            >
-              <Mic className="w-4 h-4 text-[#F05637]" />
-              <span>Script to Voiceover</span>
-            </button>
-          </div>
-        </div>
-      </div>
+      <DashboardHero projects={projects} onNavigate={onNavigate} />
 
       {/* Two Large Creation Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">

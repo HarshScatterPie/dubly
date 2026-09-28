@@ -584,6 +584,11 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           'info'
         );
       }
+      // Never a silent gap: a stretch the speech model could not transcribe is named, so it can be re-analyzed or filled in.
+      if (res.missingParts.length > 0) {
+        const spans = res.missingParts.map((p) => `${videoService.formatDuration(p.start)}–${videoService.formatDuration(p.end)}`).join(', ');
+        onShowToast('Part of the Speech Is Missing', `We could not transcribe ${spans}. Analyze the video again, or add those lines by hand.`, 'error');
+      }
     } catch (err) {
       onShowToast('Analysis Failed', (err as Error).message, 'error');
       setCurrentStep('upload');

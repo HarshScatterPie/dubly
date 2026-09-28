@@ -1,7 +1,7 @@
 import type { GlossaryEntry, SpeakerProfile, TranscriptSegment, Voice } from '../../src/types';
 import { isPerformanceTag, stripPerformanceTags } from './performance';
 import { getLanguageBcp47, getLanguageName } from './languageMeta';
-import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult } from './vertexClient';
+import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult, type TranscriptWindow } from './vertexClient';
 import type { TranslatableSegment, TranslationContext } from './translatePrompt';
 import { geminiTtsModels, geminiTtsUsable, googleSynthesizeSpeech, isGoogleTtsConfigured, type TtsEngine } from './googleTtsClient';
 import { env } from './env';
@@ -78,12 +78,12 @@ export async function routeTranscribe(
   targetLanguageCode: string,
   override: SttProvider,
   onChunkDone?: (done: number, total: number, language: string) => void | Promise<void>
-): Promise<{ provider: 'vertex'; language: string; segments: TranscriptSegment[]; speakers: Record<string, SpeakerProfile> }> {
+): Promise<{ provider: 'vertex'; language: string; segments: TranscriptSegment[]; speakers: Record<string, SpeakerProfile>; windows?: TranscriptWindow[] }> {
   if (!isVertexConfigured()) {
     throw new Error('No speech-to-text provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
   }
   const result = await vertexTranscribe(filePath, onChunkDone);
-  return { provider: 'vertex', language: result.language, segments: toTranscriptSegments(result.segments), speakers: result.speakers ?? {} };
+  return { provider: 'vertex', language: result.language, segments: toTranscriptSegments(result.segments), speakers: result.speakers ?? {}, windows: result.windows };
 }
 
 export async function routeTranslateSegments(

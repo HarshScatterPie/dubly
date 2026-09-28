@@ -27,7 +27,7 @@ import { rateLimit } from '../lib/rateLimit';
 import { limits, rateRules } from '../lib/limits';
 import { acquireHeavySlot } from '../lib/heavyWork';
 import { routeTranscribe, routeTranslateSegments } from '../lib/modelRouter';
-import { alignSegmentsToSpeech, detectSpeechRegions, retimeWords } from '../lib/forcedAlign';
+import { alignSegmentsWithinWindows, detectSpeechRegions, retimeWords } from '../lib/forcedAlign';
 import { isCtcAlignAvailable, refineTimingsWithCtc, warmCtcModel } from '../lib/ctcAlign';
 import { describeTranscriptHealth, sanitizeTranscript } from '../lib/transcriptSanitizer';
 import { costEstimate, createCostMeter, recordStt, summarizeCost } from '../lib/costMeter';
@@ -332,7 +332,7 @@ export const ANALYSIS_FAILED_MESSAGE = 'Analysis failed. Please try again.';
 
 export interface TranscriptionOutcome {
   projectPatch: Partial<StoredProject>;
-  result: { detectedLanguage: string; removedSegments: number; sanitizeNote: string };
+  result: { detectedLanguage: string; removedSegments: number; sanitizeNote: string; missingParts?: { start: number; end: number }[] };
 }
 
 // Analyzes the video as a job: `Prefer: respond-async` gets 202 and a job id to poll, otherwise the request waits and answers as before.
@@ -446,7 +446,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
 
     const settings = await getSettings(job.userId);
     await report(12, 'Listening to the speech');
-    const { language, segments: rawSegments, provider: sttProviderUsed, speakers: heardSpeakers } = await routeTranscribe(
+    const { language, segments: rawSegments, provider: sttProviderUsed, speakers: heardSpeakers, windows } = await routeTranscribe(
       audioLocalPath,
       stored.targetLanguage,
       settings.sttProvider,
@@ -487,7 +487,8 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
       const regions = await detectSpeechRegions(audioLocalPath, probe.durationSeconds);
       if (regions.length > 0) {
         // Aligns the sanitized lines; aligning rawSegments put the removed filler loops back and dragged every real line off its speech.
-        timedSegments = alignSegmentsToSpeech(cleanSegments, regions).map(retimeWords);
+        // Chunk by chunk, so a chunk that came back short cannot drag the lines of every other chunk across its gap.
+        timedSegments = alignSegmentsWithinWindows(cleanSegments, regions, windows).map(retimeWords);
       }
     } catch (err) {
       console.error('[projects] speech alignment failed, keeping provider timings', err);
@@ -530,7 +531,13 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
         currentProcessingMessage: '',
       },
       // Surfaced so the UI can say what happened rather than silently showing fewer lines than the model returned.
-      result: { detectedLanguage: getLanguageName(detectedSourceLanguage), removedSegments: hallucinated, sanitizeNote },
+      result: {
+        detectedLanguage: getLanguageName(detectedSourceLanguage),
+        removedSegments: hallucinated,
+        sanitizeNote,
+        // Stretches of audio that could not be transcribed even after a retry; the user is told rather than left with a gap.
+        missingParts: (windows || []).filter((w) => !w.transcribed).map((w) => ({ start: Math.round(w.start), end: Math.round(w.end) })),
+      },
     };
   } finally {
     releaseSlot?.();

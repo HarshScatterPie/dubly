@@ -217,6 +217,36 @@ export function alignSegmentsToSpeech<T extends AlignableSegment>(segments: T[],
 }
 
 /**
+ * Re-times segments chunk by chunk: each transcribed stretch of audio (see vertexTranscribe's
+ * windows) is aligned only against the speech inside that stretch.
+ *
+ * Aligning the whole transcript against the whole timeline assumes the transcript covers all
+ * of the speech. When one chunk came back empty or short, that assumption broke badly: the
+ * remaining lines were spread over the gap too, so sentences said at 0:43 were placed at
+ * 0:10 and the opening speech seemed to vanish. Within a window, a missing chunk simply
+ * leaves its stretch without lines, and every other line stays where it was said.
+ */
+export function alignSegmentsWithinWindows<T extends AlignableSegment>(
+  segments: T[],
+  regions: SpeechRegion[],
+  windows: { start: number; end: number }[] | undefined
+): T[] {
+  if (!windows || windows.length < 2) return alignSegmentsToSpeech(segments, regions);
+  const out: T[] = [];
+  windows.forEach((window, i) => {
+    const from = i === 0 ? -Infinity : window.start;
+    const to = i === windows.length - 1 ? Infinity : window.end;
+    const lines = segments.filter((s) => s.startTime >= from && s.startTime < to);
+    if (!lines.length) return;
+    const speech = regions
+      .map((r) => ({ start: Math.max(r.start, window.start), end: Math.min(r.end, i === windows.length - 1 ? r.end : window.end) }))
+      .filter((r) => r.end - r.start >= 0.15);
+    out.push(...alignSegmentsToSpeech(lines, speech));
+  });
+  return out;
+}
+
+/**
  * More speech regions than lines — the usual case, since one spoken sentence is several
  * breath groups. Each line takes a contiguous run of regions, so it spans its own internal
  * breathing pauses while still starting and ending on real speech.

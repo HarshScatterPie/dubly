@@ -72,6 +72,7 @@ export class ProjectService {
     speakerProfiles: Record<string, SpeakerProfile>;
     removedSegments: number;
     sanitizeNote: string;
+    missingParts: { start: number; end: number }[];
   }> {
     // Runs as a background job on the server; this waits for it by polling instead of holding one request open for minutes.
     const { jobId } = await apiPost<{ jobId: string }>(`/api/projects/${projectId}/transcribe`, undefined, { Prefer: 'respond-async' });
@@ -83,7 +84,10 @@ export class ProjectService {
     const job = await this.waitForJob(projectId, jobId);
     if (job.status !== 'completed') throw new Error(job.message || 'Analysis failed. Please try again.');
     const project = await this.get(projectId);
-    const result = { ...project, ...(job.result as { detectedLanguage: string; removedSegments?: number; sanitizeNote?: string }) };
+    const result = {
+      ...project,
+      ...(job.result as { detectedLanguage: string; removedSegments?: number; sanitizeNote?: string; missingParts?: { start: number; end: number }[] }),
+    };
     return {
       sourceLanguageCode: result.sourceLanguage,
       transcriptSegments: result.transcriptSegments,
@@ -94,6 +98,7 @@ export class ProjectService {
       speakerProfiles: result.speakerProfiles || {},
       removedSegments: result.removedSegments || 0,
       sanitizeNote: result.sanitizeNote || '',
+      missingParts: result.missingParts || [],
     };
   }
 

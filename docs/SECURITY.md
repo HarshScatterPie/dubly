@@ -67,7 +67,7 @@
 |---|---|---|
 | Google Cloud (Firebase Auth, Firestore, Cloud Storage) | Account, project data, uploaded and generated media | Always |
 | Google Vertex AI (Gemini) | The video's audio (speech-to-text), transcript and translation text (translation, condensing) | Analysis, translation, dubbing |
-| Google Cloud Text-to-Speech | Translated text | Dubbing, text-to-voice (Chirp 3 HD and premium voices) |
+| Google Cloud Text-to-Speech | Translated text | Dubbing, text-to-voice (Gemini 2.5 Flash, Chirp 3 HD and premium voices) |
 | Google Gemini API (Developer API with `GEMINI_API_KEY`, else Vertex AI) | Translated text and its delivery direction | Dubbing, text-to-voice (Gemini 3.8 voices) |
 
 - **Ownership and access:** uploaded content belongs to the workspace; its members can access it, and share-link holders can access the one dubbed video for 24 hours.

@@ -16,6 +16,7 @@ const ENGINE_CLASS: Record<VoiceEngine, string> = {
   'gemini-flash-lite': 'bg-sky-50 text-sky-700 border-sky-200',
   'gemini-flash': 'bg-violet-50 text-violet-700 border-violet-200',
   chirp: 'bg-blue-50 text-blue-600 border-blue-200',
+  'gemini-2.5-flash': 'bg-teal-50 text-teal-700 border-teal-200',
 };
 
 export const VoiceEngineBadge: React.FC<{ engine: VoiceEngine; locked?: boolean; compact?: boolean }> = ({ engine, locked = false, compact = false }) => (

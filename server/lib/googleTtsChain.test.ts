@@ -31,8 +31,10 @@ import { googleSynthesizeSpeech, resetGeminiTtsStateForTests, ttsRouteFor } from
 const LITE = 'gemini-3.8-flash-lite-tts';
 const FLASH = 'gemini-3.8-flash-tts';
 const PREMIUM = 'gemini-3.1-flash-tts-preview';
+const CLOUD = 'gemini-2.5-flash-tts';
 const STARTER: VoiceEngine[] = ['gemini-flash-lite'];
 const ENTERPRISE: VoiceEngine[] = ['gemini-flash-lite', 'gemini-flash', 'chirp'];
+const CLOUD_ENTERPRISE: VoiceEngine[] = ['gemini-2.5-flash', 'chirp'];
 
 const httpError = (status: number, name: string) => Object.assign(new Error(`${status} ${name}: nope`), { status });
 const cloudModelOf = (request: { voice: { modelName?: string } }) => request.voice.modelName;
@@ -63,6 +65,43 @@ describe('voice engine routes', () => {
     expect(ttsRouteFor('gemini-flash', { engines: ENTERPRISE })).toEqual({ gemini: [FLASH, LITE], chirp: 'fallback' });
     expect(ttsRouteFor('gemini-flash-lite', { engines: ENTERPRISE })).toEqual({ gemini: [LITE], chirp: 'fallback' });
     expect(ttsRouteFor('chirp', { engines: ENTERPRISE })).toEqual({ gemini: [FLASH, LITE], chirp: 'first' });
+  });
+
+  it('voices Gemini 2.5 Flash on Cloud TTS with Chirp 3 HD behind it, and never adds the premium model', () => {
+    expect(ttsRouteFor('gemini-2.5-flash', { engines: CLOUD_ENTERPRISE, premium: true })).toEqual({ gemini: [CLOUD], chirp: 'fallback' });
+    expect(ttsRouteFor('chirp', { engines: CLOUD_ENTERPRISE })).toEqual({ gemini: [CLOUD], chirp: 'first' });
+  });
+});
+
+describe('Gemini 2.5 Flash on Cloud TTS', () => {
+  const route = () => ttsRouteFor('gemini-2.5-flash', { engines: CLOUD_ENTERPRISE });
+
+  it('sends the persona, the model and the direction to Cloud TTS', async () => {
+    const result = await googleSynthesizeSpeech('नमस्ते', 'hi-IN', 'Kore', 'female', 'Speak warmly.', route());
+    expect(result).toEqual({ audio: Buffer.from(CLOUD), engine: 'gemini', model: CLOUD });
+    expect(mocks.synthesize.mock.calls[0][0].voice).toEqual({ languageCode: 'hi-IN', name: 'Kore', modelName: CLOUD });
+    expect(mocks.synthesize.mock.calls[0][0].input).toEqual({ text: 'नमस्ते', prompt: 'Speak warmly.' });
+    expect(mocks.gemini).not.toHaveBeenCalled();
+  });
+
+  it('reads a dialect Cloud TTS refuses under its related language, still with a Gemini voice', async () => {
+    const result = await googleSynthesizeSpeech('का हाल बा', 'bho-IN', 'Kore', 'female', '', route(), 'hi-IN');
+    expect(result.model).toBe(CLOUD);
+    expect(mocks.synthesize.mock.calls[0][0].voice).toEqual({ languageCode: 'hi-IN', name: 'Kore', modelName: CLOUD });
+  });
+
+  it('uses the Urdu and Arabic locales Gemini voices accept', async () => {
+    await googleSynthesizeSpeech('آپ کیسے ہیں', 'ur-IN', 'Kore', 'female', '', route());
+    await googleSynthesizeSpeech('كيف حالك', 'ar-SA', 'Kore', 'female', '', route());
+    expect(mocks.synthesize.mock.calls.map(([request]) => request.voice.languageCode)).toEqual(['ur-PK', 'ar-EG']);
+  });
+
+  it('hands a line in a language with no Cloud TTS voice back to the caller when out of quota, instead of failing on Chirp', async () => {
+    mocks.synthesize.mockRejectedValue(Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded'), { code: 8 }));
+    await expect(googleSynthesizeSpeech('ନମସ୍କାର', 'or-IN', 'Kore', 'female', '', route())).rejects.toThrow(/RESOURCE_EXHAUSTED/);
+    // The caller's retry still reaches Gemini, though the model is paused for languages Chirp can take.
+    mocks.synthesize.mockImplementation(async (request: any) => [{ audioContent: Buffer.from(cloudModelOf(request) ?? 'chirp') }]);
+    expect((await googleSynthesizeSpeech('ନମସ୍କାର', 'or-IN', 'Kore', 'female', '', route())).model).toBe(CLOUD);
   });
 });
 

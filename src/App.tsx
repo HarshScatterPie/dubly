@@ -111,10 +111,10 @@ export default function App() {
   const [usage, setUsage] = useState<UserUsageStats>(EMPTY_USAGE);
   // Plan-gated screens wait for the real plan instead of treating the placeholder as Starter.
   const usageLoaded = usage !== EMPTY_USAGE;
-  // How much allowance a dubbed minute uses with this user's paid extras, as the server will charge it.
-  const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(usageLoaded && usage.paidExtrasAllowed, preferences ?? DEFAULT_PREFERENCES));
   // Voices locked by the plan are marked only once the plan is known; the server enforces it either way.
   const voiceEngines = usageLoaded ? usage.voiceEngines : VOICE_ENGINES;
+  // How much allowance a dubbed minute uses with this user's paid extras, as the server will charge it.
+  const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(usageLoaded && usage.paidExtrasAllowed, preferences ?? DEFAULT_PREFERENCES, voiceEngines));
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);

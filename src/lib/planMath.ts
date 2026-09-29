@@ -1,4 +1,5 @@
-import type { PaidExtra, UserPreferences } from '../types';
+import type { PaidExtra, UserPreferences, VoiceEngine } from '../types';
+import { hasGeminiVoices, premiumVoicesOffered } from './voiceEngines';
 
 export const PAID_EXTRAS: PaidExtra[] = ['aiReview', 'premiumVoices', 'paceRetakes'];
 
@@ -6,13 +7,14 @@ export type PaidExtrasChoice = Record<PaidExtra, boolean>;
 
 export const NO_EXTRAS: PaidExtrasChoice = { aiReview: false, premiumVoices: false, paceRetakes: false };
 
-// The extras a dub really gets: none on a plan without them, and premium voices and re-takes only with expressive voices, the only engine they change.
-export function effectiveExtras(allowed: boolean, prefs: Pick<UserPreferences, PaidExtra | 'expressiveVoices'>): PaidExtrasChoice {
+// The extras a dub really gets: none on a plan without them, re-takes only with expressive Gemini voices, and premium voices only on top of Gemini 3.8 ones.
+export function effectiveExtras(allowed: boolean, prefs: Pick<UserPreferences, PaidExtra | 'expressiveVoices'>, engines: readonly VoiceEngine[]): PaidExtrasChoice {
   if (!allowed) return { ...NO_EXTRAS };
+  const expressiveGemini = prefs.expressiveVoices && hasGeminiVoices(engines);
   return {
     aiReview: Boolean(prefs.aiReview),
-    premiumVoices: Boolean(prefs.premiumVoices && prefs.expressiveVoices),
-    paceRetakes: Boolean(prefs.paceRetakes && prefs.expressiveVoices),
+    premiumVoices: Boolean(prefs.premiumVoices && expressiveGemini && premiumVoicesOffered(engines)),
+    paceRetakes: Boolean(prefs.paceRetakes && expressiveGemini),
   };
 }
 

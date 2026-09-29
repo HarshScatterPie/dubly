@@ -19,6 +19,7 @@ const GEMINI_TTS_PER_1M_CHARS_USD: Record<string, number> = {
   [env.geminiTtsLiteModel]: 1.75 * 12 + 0.25 * 1, // gemini-3.8-flash-lite-tts: $1 in / $12 audio out
   [env.geminiTtsFlashModel]: 1.75 * 18 + 0.25 * 1, // gemini-3.8-flash-tts: $1 in / $18 audio out
   [env.geminiTtsPremiumModel]: 1.75 * 20 + 0.25 * 1, // gemini-3.1-flash-tts-preview: $1 in / $20 audio out
+  [env.geminiTtsCloudModel]: 1.75 * 10 + 0.25 * 0.5, // gemini-2.5-flash-tts: $0.50 in / $10 audio out
 };
 const GEMINI_AUDIO_TOKENS_PER_SECOND = 32;
 

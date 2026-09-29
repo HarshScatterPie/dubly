@@ -44,7 +44,7 @@ export interface Language {
  * The Google model that voices a built-in voice. It decides how the voice sounds, what it
  * costs, and which plans may use it (Plan.voiceEngines).
  */
-export type VoiceEngine = 'gemini-flash-lite' | 'gemini-flash' | 'chirp';
+export type VoiceEngine = 'gemini-flash-lite' | 'gemini-flash' | 'chirp' | 'gemini-2.5-flash';
 
 export interface Voice {
   id: string;

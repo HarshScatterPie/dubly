@@ -10,3 +10,5 @@ if (!process.env.GCLOUD_PROJECT.startsWith('demo-')) {
 }
 // Set before server/.env is read (dotenv never overrides a variable that exists), so no test can send real email through a developer's SMTP.
 for (const name of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM']) process.env[name] = '';
+// Tests see the Gemini 3.8 voice engines, whatever the developer's server/.env says; the other settings are tested by switching env.ttsEngine.
+process.env.TTS_ENGINE = 'gemini';

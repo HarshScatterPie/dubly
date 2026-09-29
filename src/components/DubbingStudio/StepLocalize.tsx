@@ -21,8 +21,10 @@ import {
   TranslationStyle,
   Voice,
   VoiceEmotion,
+  VoiceEngine,
 } from '../../types';
 import { LANGUAGES, VOICES } from '../../data/mockData';
+import { languageVoiced, VOICE_ENGINES } from '../../lib/voiceEngines';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { resolveVoice, type VoiceSelection } from '../../lib/voiceResolution';
 import { DeliveryInput, DeliveryTag, insertTagAtCursor, needsReview, PerformanceTagPicker, QaFlagBadges, ReviewFilterToggle } from '../LineReview';
@@ -57,6 +59,8 @@ interface StepLocalizeProps {
   voiceSelection: VoiceSelection;
   voiceCatalog: Voice[];
   voiceEmotion: VoiceEmotion;
+  /** The voice engines the workspace's plan includes; languages none of them speaks are not offered. */
+  voiceEngines?: VoiceEngine[];
 }
 
 export const StepLocalize: React.FC<StepLocalizeProps> = ({
@@ -82,6 +86,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
   voiceSelection,
   voiceCatalog,
   voiceEmotion,
+  voiceEngines = VOICE_ENGINES,
 }) => {
   const [selectedFilter, setSelectedFilter] = useState<'all' | 'indian' | 'global' | 'asian'>('indian');
   const [searchQuery, setSearchQuery] = useState('');
@@ -105,6 +110,8 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
     .filter((l): l is Language => Boolean(l));
 
   const filteredLanguages = LANGUAGES.filter((l) => {
+    // A language no voice can speak right now is not offered, but one already ticked stays so it can be unticked.
+    if (!targetLanguageCodes.includes(l.code) && !languageVoiced(l.code, voiceEngines)) return false;
     const matchesFilter =
       selectedFilter === 'all' || l.category === selectedFilter;
     const matchesSearch =

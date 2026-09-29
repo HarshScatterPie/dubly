@@ -4,6 +4,7 @@ import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { VOICES, LANGUAGES } from '../../src/data/mockData';
 import { effectiveExtras } from '../../src/lib/planMath';
+import { languageVoiced } from '../../src/lib/voiceEngines';
 import { routeSynthesizeSpeech } from '../lib/modelRouter';
 import { buildStylePrompt } from '../lib/speechStyle';
 import { applySpokenForms } from '../lib/glossary';
@@ -41,6 +42,10 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
   const jobDir = path.join(tmpDir, 'tts', randomUUID());
   try {
     const [settings, glossary, plan] = await Promise.all([getSettings(req.uid!), getGlossary(req.workspaceId!), planForWorkspace(req.workspaceId!)]);
+    if (!languageVoiced(targetLanguageCode, plan.voiceEngines)) {
+      res.status(400).json({ error: `No voice can speak ${langMeta?.name || targetLanguageCode} right now.`, code: 'LANGUAGE_NOT_VOICED' });
+      return;
+    }
     const { audio, provider } = await routeSynthesizeSpeech(
       // The workspace's pronunciations apply here as in a dub, so a preview is how the render will sound.
       applySpokenForms(text, glossary),
@@ -53,7 +58,7 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
         // Same direction a dub gives the line, so a preview sounds like the render.
         style: buildStylePrompt(emotion, delivery),
         expressive: settings.preferences.expressiveVoices,
-        premium: effectiveExtras(plan.paidExtras, settings.preferences).premiumVoices,
+        premium: effectiveExtras(plan.paidExtras, settings.preferences, plan.voiceEngines).premiumVoices,
       }
     );
     const shaped = await applyPitchSpeed(audio, pitch ?? 1, speed ?? 1, jobDir);

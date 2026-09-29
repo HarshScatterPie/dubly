@@ -1042,6 +1042,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           voiceSelection={pendingVoiceSelection}
           voiceCatalog={VOICES}
           voiceEmotion={voiceEmotion}
+          voiceEngines={voiceEngines}
         />
       )}
 
@@ -1104,6 +1105,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
               onOpenWorkspace={() => onOpenWorkspace(completedProject)}
               onShowToast={onShowToast}
               defaultBurnCaptions={prefs.burnCaptions}
+              voiceEngines={voiceEngines}
             />
           )
         )

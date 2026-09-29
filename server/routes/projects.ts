@@ -37,7 +37,9 @@ import { tmpDir } from '../lib/paths';
 import { HttpError } from '../lib/httpError';
 import { requireAdmin } from '../lib/auth';
 import { SAMPLE_VIDEOS, VOICES } from '../../src/data/mockData';
-import type { LocalizedSegment, SpeakerProfile, TranscriptSegment } from '../../src/types';
+import type { LocalizedSegment, SpeakerProfile, TranscriptSegment, Voice } from '../../src/types';
+import { voiceAllowed } from '../../src/lib/voiceEngines';
+import { planForWorkspace } from '../lib/plans';
 import { castVoices, profilesForSpeakers } from '../lib/speakerProfiles';
 import { acceptHeardPerformance } from '../lib/performance';
 import { log } from '../lib/log';
@@ -76,7 +78,9 @@ import { withRetakeInfo } from '../lib/retake';
 function resolveSpeakers(
   segments: TranscriptSegment[],
   heard: Record<string, SpeakerProfile>,
-  preferredVoiceId: string
+  preferredVoiceId: string,
+  // The voices the workspace's plan can use.
+  voices: Voice[]
 ): {
   segments: TranscriptSegment[];
   speakersCount: number;
@@ -92,7 +96,7 @@ function resolveSpeakers(
     segments,
     speakersCount: distinct.length,
     // Cast by who is actually talking: a voice of the speaker's own gender, distinct per speaker.
-    speakerVoiceMap: distinct.length > 1 ? castVoices(distinct, speakerProfiles, VOICES, preferredVoiceId) : {},
+    speakerVoiceMap: distinct.length > 1 ? castVoices(distinct, speakerProfiles, voices, preferredVoiceId) : {},
     speakerProfiles,
   };
 }
@@ -515,7 +519,13 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
     }
 
     await report(97, 'Identifying speakers');
-    const { segments, speakersCount, speakerVoiceMap, speakerProfiles } = resolveSpeakers(timedSegments, heardSpeakers, stored.selectedVoiceId);
+    const { voiceEngines } = await planForWorkspace(job.workspaceId);
+    const { segments, speakersCount, speakerVoiceMap, speakerProfiles } = resolveSpeakers(
+      timedSegments,
+      heardSpeakers,
+      stored.selectedVoiceId,
+      VOICES.filter((v) => voiceAllowed(v, voiceEngines))
+    );
 
     const wordsCount = segments.reduce((sum, s) => sum + s.wordsCount, 0);
     return {

@@ -3,7 +3,7 @@ import { readdir, rm, stat } from 'node:fs/promises';
 import { tmpDir } from './paths';
 
 // Scratch areas that per-request work creates entries in; anything older than the cutoff there is left over from a crash.
-const SCRATCH_SUBDIRS = ['jobs', 'uploads', 'tts', 'voice-uploads', 'voice-jobs', 'clone'];
+const SCRATCH_SUBDIRS = ['jobs', 'uploads', 'tts'];
 export const DEFAULT_TMP_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 // Deletes server/tmp scratch entries (and loose top-level files) older than maxAgeMs, except paths in keep; returns what was removed.

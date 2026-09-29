@@ -39,11 +39,9 @@ export const Header: React.FC<HeaderProps> = ({
       case 'dashboard':
         return { title: 'Studio Overview', subtitle: 'Global AI Dubbing & Voice Workspace' };
       case 'dubbing':
-        return { title: 'Video Dubbing Studio', subtitle: 'Translate existing speech into 20+ languages' };
+        return { title: 'Video Dubbing Studio', subtitle: 'Translate existing speech into 40+ languages and Indian dialects' };
       case 'text-to-voice':
         return { title: 'Text-to-Voice Studio', subtitle: 'Generate humanlike voiceovers from raw scripts' };
-      case 'my-voices':
-        return { title: 'My Voices', subtitle: 'Record once, then dub in your own voice in any language' };
       case 'workspace':
         return { title: 'Project Workspace', subtitle: 'Multi-stage timeline and transcript editor' };
       case 'history':

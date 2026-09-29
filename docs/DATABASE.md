@@ -19,7 +19,7 @@ Firestore, in the Firebase project shared with ScatterStudio. The backend reache
 | `jobIdempotency/{sha256(ws\|project\|key)}` | `{ jobId, createdAt }` | jobs.ts |
 | `invites/{sha256(token)}` | `workspaceId, invitedEmail, role, status (pending\|accepted\|revoked), expiresAt, acceptedBy …` | workspaces.ts |
 | `shares/{sha256(token)}` | `workspaceId, projectId, languageCode, storagePath, expiresAt, revokedAt?` (older links: keyed by the raw token) | share.ts |
-| `users/{uid}/voices/{voiceId}` | Cloned voice: `sampleStoragePath` (must be `users/{uid}/voices/{uuid}/sample.wav`) | customVoices.ts |
+| `users/{uid}/voices/{voiceId}` | Legacy: cloned voices from before voice cloning was removed. Nothing reads or writes them any more; safe to delete with their `users/{uid}/voices/*` samples in Storage | — |
 | `users/{uid}/meta/settings` | Provider choices, plus `preferences` (the user's dubbing defaults, see API.md → settings) | projectRepo.ts |
 
 **Line fields.** A `TranscriptSegment` may carry `delivery` (how the line is said, heard during transcription). A `LocalizedSegment` may carry `delivery` (voice direction, editable), `qaFlags` (review flags) and `renderKey` (fingerprint of what its last render spoke). The server owns `renderKey`, render flags and slot timings: when lines are saved it keeps its own values for them and recomputes the text flags ([lineReview.ts](../server/lib/lineReview.ts)).

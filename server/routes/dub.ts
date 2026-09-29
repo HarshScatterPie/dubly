@@ -82,9 +82,9 @@ import { isSeparationAvailable, SEPARATION_MODEL, separateStems } from '../lib/a
 import { getLanguageName } from '../lib/languageMeta';
 import { tmpDir } from '../lib/paths';
 import { resolveVoice, type VoiceSelection } from '../lib/voiceResolution';
-import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
+import { usableVoiceId } from '../../src/data/preferences';
 import { VOICES } from '../../src/data/mockData';
-import type { GlossaryEntry, LocalizedSegment, QaFlag, RenderReport, TranscriptSegment, Voice } from '../../src/types';
+import type { GlossaryEntry, LocalizedSegment, QaFlag, RenderReport, TranscriptSegment, Voice, VoiceEngine } from '../../src/types';
 import { schemas, validateBody } from '../lib/validation';
 import { getGlossary } from '../lib/glossaryStore';
 import { applySpokenForms, requiredRendering } from '../lib/glossary';
@@ -136,8 +136,9 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     separateBackground: sepBg,
     languages: requestedLanguages,
   } = req.body || {};
-  const finalVoiceId = voiceId || stored.selectedVoiceId;
-  const voice = (await voiceCatalogFor(uid, VOICES)).find((v) => v.id === finalVoiceId);
+  // A project saved with a voice that no longer exists (a removed cloned voice) moves to the default voice.
+  const finalVoiceId = voiceId || usableVoiceId(stored.selectedVoiceId);
+  const voice = VOICES.find((v) => v.id === finalVoiceId);
   if (!voice) {
     res.status(400).json({ error: `Unknown voice id: ${finalVoiceId}` });
     return;
@@ -582,8 +583,8 @@ async function renderLanguage(params: {
   jobDir: string;
   costMeter: ReturnType<typeof createCostMeter>;
   voiceSelection: VoiceSelection;
-  voiceCatalog: (typeof VOICES)[number][];
-  loadCloneReference: (voiceId: string) => Promise<{ audioPath: string; transcript?: string }>;
+  // The engines the workspace's plan includes; a line whose voice is on another engine is voiced as the same persona on an allowed one.
+  voiceEngines: VoiceEngine[];
   ttsProvider: ProviderSettings['ttsProvider'];
   expressiveVoices: boolean;
   glossary: GlossaryEntry[];
@@ -634,11 +635,10 @@ async function renderLanguage(params: {
   interface LineTake {
     index: number;
     audio: Buffer;
-    engine: 'gemini' | 'chirp' | 'clone';
+    engine: 'gemini' | 'chirp';
     speechText: string;
     style: string;
     voice: Voice;
-    cloneReference?: { audioPath: string; transcript?: string };
     available: number;
     condensed: boolean;
     sourceDb: number | null;
@@ -646,17 +646,17 @@ async function renderLanguage(params: {
   }
   const takes: LineTake[] = [];
 
-  const synthesizeLine = async (speechText: string, voice: Voice, cloneReference: LineTake['cloneReference'], style: string, take = 0) => {
+  const synthesizeLine = async (speechText: string, voice: Voice, style: string, take = 0) => {
     const result = await routeSynthesizeSpeech(applySpokenForms(speechText, params.glossary), voice, languageCode, params.ttsProvider, {
-      cloneReference,
+      engines: params.voiceEngines,
       style,
       expressive: params.expressiveVoices,
       take,
       premium: params.premiumVoices,
     });
-    recordTts(costMeter, result.engine === 'gemini' ? 'gemini-tts' : result.provider, speechText.length, result.fromCache);
-    const engine: LineTake['engine'] = result.provider === 'clone' ? 'clone' : (result.engine ?? 'chirp');
-    return { audio: result.audio, engine };
+    // Priced per model: Chirp 3 HD and each Gemini model bill differently.
+    recordTts(costMeter, result.model ?? 'chirp', speechText.length, result.fromCache);
+    return { audio: result.audio, engine: result.engine };
   };
   // How long a take will actually play once the user's pitch and speed are applied.
   const playedSeconds = (audio: Buffer) => effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
@@ -669,12 +669,11 @@ async function renderLanguage(params: {
     if (seg.translatedText.trim().length > 0) {
       // Resolved per line, not once per render: the voice can differ by speaker as well
       // as by language, and both are only known here.
-      const voice = resolveVoice(params.voiceSelection, languageCode, seg.speaker, params.voiceCatalog);
-      const cloneReference = isClonedVoiceId(voice.id) ? await params.loadCloneReference(voice.id) : undefined;
+      const voice = resolveVoice(params.voiceSelection, languageCode, seg.speaker);
       // The project's overall emotion plus how the original line was delivered.
       const style = buildStylePrompt(stored.voiceEmotion, seg.delivery);
       let speechText = speechScript[seg.id] || seg.translatedText;
-      let { audio, engine } = await synthesizeLine(speechText, voice, cloneReference, style);
+      let { audio, engine } = await synthesizeLine(speechText, voice, style);
 
       // The room this line has before the next one starts; past it the voices overlap and the dub drifts off the picture.
       const nextSpoken = finalSegments.slice(i + 1).find((s) => s.translatedText.trim().length > 0);
@@ -692,7 +691,7 @@ async function renderLanguage(params: {
       const pace = params.paceRetakes && engine === 'gemini' ? paceRequest(spokenSeconds, slot, available, spokenSeconds > 0 ? getWavDurationSeconds(audio) / spokenSeconds : 1) : null;
       if (pace) {
         try {
-          const paced = await synthesizeLine(speechText, voice, cloneReference, `${style} ${pace.direction}`.trim());
+          const paced = await synthesizeLine(speechText, voice, `${style} ${pace.direction}`.trim());
           const pacedSeconds = playedSeconds(paced.audio);
           if (pace.accept(pacedSeconds, spokenSeconds)) {
             audio = paced.audio;
@@ -711,7 +710,7 @@ async function renderLanguage(params: {
             const condensedSpeech = isHinglish
               ? (await vertexHinglishToSpeechScript([{ id: seg.id, text: condensed }]))[seg.id] || condensed
               : condensed;
-            const retake = await synthesizeLine(condensedSpeech, voice, cloneReference, style);
+            const retake = await synthesizeLine(condensedSpeech, voice, style);
             if (getWavDurationSeconds(retake.audio) < getWavDurationSeconds(audio)) {
               console.log(`[dub] ${languageCode} ${seg.id}: condensed to fit ${fitTarget.toFixed(1)}s slot (was ${spokenSeconds.toFixed(1)}s)`);
               audio = retake.audio;
@@ -726,7 +725,7 @@ async function renderLanguage(params: {
           console.error(`[dub] condensing ${seg.id} failed, keeping the full line`, err);
         }
       }
-      takes.push({ index: i, audio, engine, speechText, style, voice, cloneReference, available, condensed: wasCondensed, sourceDb: null });
+      takes.push({ index: i, audio, engine, speechText, style, voice, available, condensed: wasCondensed, sourceDb: null });
     }
     await params.onProgress(
       segments.length ? ((i + 1) / segments.length) * 0.6 : 0.6,
@@ -770,7 +769,7 @@ async function renderLanguage(params: {
       t.directorNote = describeVerdict(verdict);
       if (t.engine === 'chirp') continue;
       try {
-        const retake = await synthesizeLine(t.speechText, t.voice, t.cloneReference, retakeStyle(t.style, verdict), 1);
+        const retake = await synthesizeLine(t.speechText, t.voice, retakeStyle(t.style, verdict), 1);
         retakes.push({ take: t, audio: retake.audio });
       } catch (err) {
         console.error(`[dub] retake of ${finalSegments[t.index].id} failed, keeping the first take`, err);
@@ -988,22 +987,17 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
   const { workspaceId, projectId, userId: uid } = job;
   const stored = await getStoredProject(workspaceId, projectId);
   if (!stored) throw new Error('Project disappeared mid-pipeline');
-  // The user's cloned voices are part of their catalog, so a project dubbed in the user's
-  // own voice resolves here just like one using a built-in voice.
-  const voiceCatalog = await voiceCatalogFor(uid, VOICES);
-  if (!voiceCatalog.some((v) => v.id === stored.selectedVoiceId)) {
-    throw new Error(`Unknown voice id: ${stored.selectedVoiceId}`);
-  }
   // Every layer the user can have set: a voice for a given speaker in a given language, a
   // voice for a language, a voice for a speaker across languages, and the global default.
-  // `resolveVoice` walks them most-specific-first for each individual line.
+  // `resolveVoice` walks them most-specific-first for each individual line; an id that no
+  // longer exists falls back to the project's voice, and that to the default voice.
   const voiceSelection: VoiceSelection = {
     languageSpeakerVoiceMap: stored.languageSpeakerVoiceMap,
     languageVoiceMap: stored.languageVoiceMap,
     speakerVoiceMap: stored.speakerVoiceMap,
-    selectedVoiceId: stored.selectedVoiceId,
+    selectedVoiceId: usableVoiceId(stored.selectedVoiceId),
   };
-  const settings = await getSettings(uid);
+  const [settings, plan] = await Promise.all([getSettings(uid), planForWorkspace(workspaceId)]);
   const glossary = await getGlossary(workspaceId);
 
   // Decided (and charged for) when the job was created.
@@ -1013,8 +1007,6 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
   const jobDir = jobDirFor(job.id);
   await mkdir(jobDir, { recursive: true });
   const costMeter = createCostMeter();
-  // One download per cloned voice for the whole render, not one per line.
-  const loadCloneReference = createReferenceLoader(uid, jobDir);
   // Held open across languages and closed before the job directory is removed.
   let sourceSpeech: WavSlicer | null = null;
   let vocalsSpeech: WavSlicer | null = null;
@@ -1093,8 +1085,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           jobDir,
           costMeter,
           voiceSelection,
-          voiceCatalog,
-          loadCloneReference,
+          voiceEngines: plan.voiceEngines,
           ttsProvider: settings.ttsProvider,
           // The choice of whoever started the dub.
           expressiveVoices: settings.preferences.expressiveVoices,

@@ -41,7 +41,7 @@ describe('project progress', () => {
     const dubbing = projectProgress(
       fresh({ transcriptSegments: transcript, localizedSegments: [line], status: 'processing', activeJobId: 'j', selectedVoiceId: 'google-hi-aoede' })
     );
-    expect(dubbing).toMatchObject({ stage: 'dubbing', running: true, voiceName: 'Ritu (Google Chirp3-HD)' });
+    expect(dubbing).toMatchObject({ stage: 'dubbing', running: true, voiceName: 'Ritu (Chirp 3 HD)' });
   });
 
   it('tells an analysis in progress apart from a dub in progress', () => {

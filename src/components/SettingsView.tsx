@@ -23,11 +23,11 @@ import {
 } from 'lucide-react';
 import type { NavigationTab, PaidExtra, TranslationStyle, UserPreferences, UserUsageStats, Voice, VoiceEmotion } from '../types';
 import { allowanceRate, effectiveExtras } from '../lib/planMath';
+import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../lib/voiceEngines';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { DEFAULT_PREFERENCES } from '../data/preferences';
 import { useAuth } from '../context/AuthContext';
 import { settingsService } from '../services/settingsService';
-import { voiceCloneService } from '../services/voiceCloneService';
 import { textToSpeechService } from '../services/textToSpeechService';
 import type { WorkspaceInfo } from '../services/workspaceService';
 import { apiGet } from '../lib/apiClient';
@@ -142,7 +142,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
     return `${what} Uses your monthly limit faster: each dubbed minute counts as ${Math.round((1 + rate) * 100) / 100} min while it is on.`;
   };
   const [saving, setSaving] = useState(false);
-  const [customVoices, setCustomVoices] = useState<Voice[]>([]);
+  // Until the plan is known nothing is shown locked; the server applies the plan either way.
+  const voiceEngines = usageLoaded ? usage.voiceEngines : VOICE_ENGINES;
   const [engines, setEngines] = useState<{ lipSyncAvailable: boolean; separationAvailable: boolean } | null>(null);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [device, setDevice] = useState<DevicePrefs>(loadDevicePrefs);
@@ -157,10 +158,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   }, [preferences]);
 
   useEffect(() => {
-    voiceCloneService
-      .list()
-      .then((res) => setCustomVoices(res.voices.map((v) => voiceCloneService.toVoice(v))))
-      .catch(() => setCustomVoices([]));
     apiGet<{ lipSyncAvailable: boolean; separationAvailable: boolean }>('/api/health')
       .then(setEngines)
       .catch(() => setEngines({ lipSyncAvailable: false, separationAvailable: false }));
@@ -169,7 +166,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   const saved = preferences ?? DEFAULT_PREFERENCES;
   const isDirty = JSON.stringify(saved) !== JSON.stringify(draft);
   const update = (patch: Partial<UserPreferences>) => setDraft((prev) => ({ ...prev, ...patch }));
-  const allVoices = [...customVoices, ...VOICES];
   const hasPassword = Boolean(user?.providerData.some((p) => p.providerId === 'password'));
   const signInMethod = hasPassword ? 'Email and password' : user?.providerData.some((p) => p.providerId === 'google.com') ? 'Google' : 'Single sign-on';
   const displayName = profile?.name || user?.displayName || user?.email?.split('@')[0] || 'You';
@@ -414,29 +410,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
 
           {/* Voice */}
           <Section id="voice" title="Voice" subtitle="The voice and performance new dubs start with" Icon={Mic}>
-            <Row stacked title="Default voice" hint="Used for every language until you pick another in the studio. Your cloned voices are listed first.">
+            <Row
+              stacked
+              title="Default voice"
+              hint={`Used for every language until you pick another in the studio.${
+                voiceEngines.length < VOICE_ENGINES.length ? ` Your ${usage.activePlan} plan uses ${voiceEngines.map((e) => VOICE_ENGINE_INFO[e].label).join(' and ')} voices; the others need Enterprise.` : ''
+              }`}
+            >
               <div className="flex gap-2">
                 <select value={draft.defaultVoiceId} onChange={(e) => update({ defaultVoiceId: e.target.value })} className={inputClass} aria-label="Default voice">
-                  {customVoices.length > 0 && (
-                    <optgroup label="My voices">
-                      {customVoices.map((v) => (
-                        <option key={v.id} value={v.id}>
-                          {v.name}
-                        </option>
-                      ))}
-                    </optgroup>
-                  )}
-                  <optgroup label="Dubly voices">
-                    {VOICES.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} · {v.accent} · {v.gender}
-                      </option>
-                    ))}
-                  </optgroup>
+                  {VOICE_ENGINES.map((engine) => {
+                    const locked = !voiceEngines.includes(engine);
+                    return (
+                      <optgroup key={engine} label={`${VOICE_ENGINE_INFO[engine].label}${locked ? ' · Enterprise' : ''}`}>
+                        {VOICES.filter((v) => v.engine === engine).map((v) => (
+                          <option key={v.id} value={v.id} disabled={locked}>
+                            {v.name.replace(/\s*\(.*\)$/, '')} · {v.accent} · {v.gender}
+                          </option>
+                        ))}
+                      </optgroup>
+                    );
+                  })}
                 </select>
                 {(() => {
-                  const voice = allVoices.find((v) => v.id === draft.defaultVoiceId);
-                  if (!voice) return null;
+                  const voice = VOICES.find((v) => v.id === draft.defaultVoiceId);
+                  if (!voice || !voiceAllowed(voice, voiceEngines)) return null;
                   const playing = previewingVoiceId === voice.id;
                   return (
                     <button
@@ -542,7 +540,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
               hint={
                 extrasAllowed && !draft.expressiveVoices
                   ? 'Needs Expressive voices, under Voice.'
-                  : extraHint('premiumVoices', 'Voices lines with Google’s newer Gemini voice model: richer delivery, and it performs sighs as well as laughs.')
+                  : extraHint('premiumVoices', 'Gemini voices try Gemini 3.1 Flash TTS first: the richest delivery, and it performs sighs as well as laughs.')
               }
             >
               <Toggle
@@ -614,7 +612,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
               {[
                 { tab: 'team' as NavigationTab, label: 'Team', Icon: Users },
                 { tab: 'glossary' as NavigationTab, label: 'Glossary', Icon: BookA },
-                { tab: 'my-voices' as NavigationTab, label: 'My voices', Icon: Mic },
                 { tab: 'usage' as NavigationTab, label: 'Usage', Icon: BarChart3 },
               ].map(({ tab, label, Icon }) => (
                 <button key={tab} type="button" onClick={() => onNavigate(tab)} className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] hover:bg-[#F8FAFC]">

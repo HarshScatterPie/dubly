@@ -32,7 +32,7 @@ describe('user preferences', () => {
   it('replace a saved voice the catalog no longer has with a real one, so a dub is never refused for it', async () => {
     const user = await createUser('oldvoice@settings.test');
     const res = await api.call('PUT', '/api/settings', { token: user.token, body: { preferences: { defaultVoiceId: 'riya' } } });
-    expect(res.body.preferences.defaultVoiceId).toBe('google-hi-aoede');
+    expect(res.body.preferences.defaultVoiceId).toBe('gemini-lite-aoede');
   });
 
   it('are private to each user', async () => {

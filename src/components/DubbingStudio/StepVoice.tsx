@@ -17,12 +17,14 @@ import {
   Clapperboard,
   Music,
   ScanFace,
+  Lock,
 } from 'lucide-react';
-import { FaceScan, SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion } from '../../types';
+import { FaceScan, SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion, VoiceEngine } from '../../types';
 import { VOICES, LANGUAGES } from '../../data/mockData';
+import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../../lib/voiceEngines';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { StickyActionBar } from './StickyActionBar';
-import { VoiceProviderBadge } from '../VoiceProviderBadge';
+import { VoiceEngineBadge } from '../VoiceEngineBadge';
 import { lipSyncEstimate } from './LipSyncPrompt';
 
 interface StepVoiceProps {
@@ -30,8 +32,8 @@ interface StepVoiceProps {
   targetLanguageCode: string;
   /** Every language this dub will render into. Each gets its own voice. */
   targetLanguageCodes?: string[];
-  /** The user's cloned voices, offered alongside the built-in catalog. */
-  customVoices?: Voice[];
+  /** The engines the workspace's plan includes; voices on the others are shown locked. */
+  voiceEngines?: VoiceEngine[];
   /** Which of those languages the picker below is configuring. */
   voiceLanguageCode?: string;
   onSelectVoiceLanguage?: (code: string) => void;
@@ -67,7 +69,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   selectedVoiceId,
   targetLanguageCode,
   targetLanguageCodes,
-  customVoices = [],
+  voiceEngines = VOICE_ENGINES,
   voiceLanguageCode,
   onSelectVoiceLanguage,
   voiceSpeed,
@@ -97,6 +99,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   onShowToast,
 }) => {
   const [selectedCategory, setSelectedCategory] = useState<VoiceCategory | 'all'>('all');
+  const [selectedEngine, setSelectedEngine] = useState<VoiceEngine | 'all'>('all');
   const [activePlayingVoiceId, setActivePlayingVoiceId] = useState<string | null>(null);
 
   // Everything on this screen configures one language at a time: the voice, the
@@ -124,19 +127,33 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
     { id: 'empathetic', label: 'Empathetic', icon: '🤝' },
   ];
 
-  // The user's own voices lead the list: they are the ones a returning user is looking
-  // for, and there are only ever a handful of them against a catalog of thousands.
-  const availableVoices = [...customVoices, ...VOICES];
+  const availableVoices = VOICES;
+  const isLocked = (voice: Voice) => !voiceAllowed(voice, voiceEngines);
+  const allLocked = voiceEngines.length < VOICE_ENGINES.length;
 
-  // The user's own voices first, then voices native to the language being set, so the likely pick is at the top.
-  const nativeRank = (voice: Voice) => (voice.provider === 'clone' ? 0 : voice.languageCode === activeLanguageCode ? 1 : 2);
+  // Voices the plan can use first, then voices native to the language being set, so the likely pick is at the top.
+  const rank = (voice: Voice) => (isLocked(voice) ? 2 : 0) + (voice.languageCode === activeLanguageCode ? 0 : 1);
   const filteredVoices = availableVoices
     .filter((voice) => selectedCategory === 'all' || voice.category === selectedCategory)
-    .sort((a, b) => nativeRank(a) - nativeRank(b));
+    .filter((voice) => selectedEngine === 'all' || voice.engine === selectedEngine)
+    .sort((a, b) => rank(a) - rank(b));
   const [showAdvanced, setShowAdvanced] = useState(false);
+
+  const handleSelectVoice = (voice: Voice) => {
+    if (isLocked(voice)) {
+      onShowToast?.(`${VOICE_ENGINE_INFO[voice.engine].label} is an Enterprise voice`, 'Your plan includes Gemini 3.8 Flash-Lite voices. Upgrade to Enterprise to use this one.', 'info');
+      return;
+    }
+    onSelectVoice(voice.id);
+  };
 
   const handlePlayVoicePreview = async (e: React.MouseEvent, voice: Voice) => {
     e.stopPropagation();
+    // A locked voice would be previewed by a different engine, which would misrepresent it.
+    if (isLocked(voice)) {
+      handleSelectVoice(voice);
+      return;
+    }
 
     if (activePlayingVoiceId === voice.id) {
       textToSpeechService.stopPlayback();
@@ -173,7 +190,9 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           <p className="text-xs text-slate-400 mt-0.5">
             {allTargetLangs.length > 1
               ? 'Every language gets its own voice — switch language below to set the others'
-              : 'Select high-fidelity Google Cloud Chirp3-HD neural voices, or use your own cloned voice'}
+              : allLocked
+                ? 'Gemini 3.8 Flash-Lite voices speak every Indian language and dialect. Gemini 3.8 Flash and Chirp 3 HD voices come with Enterprise.'
+                : 'Gemini 3.8 Flash-Lite, Gemini 3.8 Flash and Chirp 3 HD voices, for every Indian language and dialect'}
           </p>
         </div>
 
@@ -252,11 +271,20 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
                     onChange={(e) => onSelectVoiceForSpeaker?.(label, e.target.value)}
                     className="w-full px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E8F0] text-xs text-[#0F172A] font-medium focus:outline-none focus:border-coral-400"
                   >
-                    {availableVoices.map((v) => (
-                      <option key={v.id} value={v.id}>
-                        {v.name} ({v.gender === 'male' ? 'M' : 'F'}) · {v.accent}
-                      </option>
-                    ))}
+                    {VOICE_ENGINES.map((engine) => {
+                      const locked = !voiceEngines.includes(engine);
+                      return (
+                        <optgroup key={engine} label={`${VOICE_ENGINE_INFO[engine].label}${locked ? ' · Enterprise' : ''}`}>
+                          {availableVoices
+                            .filter((v) => v.engine === engine)
+                            .map((v) => (
+                              <option key={v.id} value={v.id} disabled={locked}>
+                                {v.name.replace(/\s*\(.*\)$/, '')} ({v.gender === 'male' ? 'M' : 'F'}) · {v.accent}
+                              </option>
+                            ))}
+                        </optgroup>
+                      );
+                    })}
                   </select>
                 </div>
               );
@@ -288,22 +316,56 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
         </span>
       </div>
 
+      {/* Engine Tabs: which Google model voices the line */}
+      <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar pb-1 -mt-5">
+        {(['all', ...VOICE_ENGINES] as const).map((engine) => {
+          const locked = engine !== 'all' && !voiceEngines.includes(engine);
+          return (
+            <button
+              key={engine}
+              type="button"
+              onClick={() => setSelectedEngine(engine)}
+              title={engine === 'all' ? undefined : VOICE_ENGINE_INFO[engine].description}
+              className={`flex items-center gap-1 px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all ${
+                selectedEngine === engine
+                  ? 'bg-[#F05637] text-white shadow-sm'
+                  : 'bg-[#F8FAFC] text-[#64748B] hover:text-[#0F172A] border border-[#E2E8F0]'
+              }`}
+            >
+              {locked && <Lock className="w-3 h-3" />}
+              {engine === 'all' ? 'All engines' : VOICE_ENGINE_INFO[engine].label}
+              {locked && <span className="text-[10px] font-normal opacity-80">· Enterprise</span>}
+            </button>
+          );
+        })}
+      </div>
+
       {/* Large Voice Cards Grid */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {filteredVoices.map((voice) => {
           const isSelected = selectedVoiceId === voice.id;
           const isPlayingThis = activePlayingVoiceId === voice.id;
+          const locked = isLocked(voice);
 
           return (
             <div
               key={voice.id}
-              onClick={() => onSelectVoice(voice.id)}
-              className={`group relative overflow-hidden rounded-2xl p-5 border cursor-pointer transition-all duration-200 flex flex-col justify-between ${
-                isSelected
-                  ? 'bg-[#FFF4F1] border-[#F05637] shadow-[0_0_20px_rgba(240,86,55,0.3)] ring-1 ring-[#F05637]'
-                  : 'glass-panel border-[#E2E8F0] hover:border-[#CBD5E1] hover:bg-[#F8FAFC]'
+              onClick={() => handleSelectVoice(voice)}
+              aria-disabled={locked}
+              title={locked ? `${VOICE_ENGINE_INFO[voice.engine].label} voices are available on the Enterprise plan` : undefined}
+              className={`group relative overflow-hidden rounded-2xl p-5 border transition-all duration-200 flex flex-col justify-between ${
+                locked
+                  ? 'glass-panel border-dashed border-[#CBD5E1] opacity-60 cursor-not-allowed'
+                  : isSelected
+                    ? 'bg-[#FFF4F1] border-[#F05637] shadow-[0_0_20px_rgba(240,86,55,0.3)] ring-1 ring-[#F05637] cursor-pointer'
+                    : 'glass-panel border-[#E2E8F0] hover:border-[#CBD5E1] hover:bg-[#F8FAFC] cursor-pointer'
               }`}
             >
+              {locked && (
+                <span className="absolute top-3 right-14 flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-[#0F172A] text-white text-[10px] font-semibold">
+                  <Lock className="w-3 h-3" /> Enterprise
+                </span>
+              )}
               {/* Header: Avatar + Info */}
               <div className="space-y-3">
                 <div className="flex items-start justify-between">
@@ -342,7 +404,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
                 <div>
                   <div className="flex items-center gap-2">
                     <h4 className="text-base font-bold text-[#0F172A] tracking-tight">
-                      {voice.name}
+                      {voice.name.replace(/\s*\(.*\)$/, '')}
                     </h4>
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-[#E2E8F0] text-[#0F172A] border border-[#CBD5E1]">
                       {voice.gender === 'male' ? 'Male' : 'Female'}
@@ -360,7 +422,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
 
                 {/* Single Provider Badge & Tags */}
                 <div className="flex flex-wrap items-center gap-1.5 pt-1">
-                  <VoiceProviderBadge provider={voice.provider} />
+                  <VoiceEngineBadge engine={voice.engine} locked={locked} />
                   {voice.tags.map((tag, idx) => (
                     <span
                       key={idx}

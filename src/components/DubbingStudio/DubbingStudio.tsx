@@ -21,8 +21,8 @@ import {
   TranscriptSegment,
   TranslationStyle,
   UserPreferences,
-  Voice,
   VoiceEmotion,
+  VoiceEngine,
 } from '../../types';
 import { SAMPLE_VIDEOS, LANGUAGES, VOICES } from '../../data/mockData';
 import { StepUpload } from './StepUpload';
@@ -36,8 +36,8 @@ import { speechToTextService, type TranscriptionResult } from '../../services/sp
 import { translationService } from '../../services/translationService';
 import { videoService } from '../../services/videoService';
 import { projectService } from '../../services/projectService';
-import { voiceCloneService } from '../../services/voiceCloneService';
-import { DEFAULT_PREFERENCES, DEFAULT_VOICE_ID } from '../../data/preferences';
+import { DEFAULT_PREFERENCES } from '../../data/preferences';
+import { VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../../lib/voiceEngines';
 import { notifyWorkDone } from '../../lib/devicePrefs';
 import type { StudioStatus } from '../../lib/studioSession';
 import { projectProgress } from '../../lib/projectProgress';
@@ -60,6 +60,8 @@ interface DubbingStudioProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   /** The user's saved defaults; a new dub starts from them. */
   preferences?: UserPreferences | null;
+  /** The voice engines the workspace's plan includes. */
+  voiceEngines?: VoiceEngine[];
   /** A project to reopen where it left off, e.g. after the page was reloaded. */
   resumeProject?: DubbingProject | null;
   /** Reports what the studio is doing, for the mini player shown while the user is on another screen. */
@@ -82,10 +84,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   onOpenWorkspace,
   onShowToast,
   preferences,
+  voiceEngines = VOICE_ENGINES,
   resumeProject,
   onStatusChange,
 }) => {
   const prefs = preferences ?? DEFAULT_PREFERENCES;
+  // The voices this workspace can dub with; automatic picks come only from these.
+  const planVoices = React.useMemo(() => VOICES.filter((v) => voiceAllowed(v, voiceEngines)), [voiceEngines]);
   // Only a brand-new dub takes the default languages; a reopened project keeps its own.
   const startsFresh = !initialProject && !resumeProject;
   // Check if we start with an initial sample
@@ -180,7 +185,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const [languageVoiceMap, setLanguageVoiceMap] = useState<Record<string, string>>({});
   const [languageSpeakerVoiceMap, setLanguageSpeakerVoiceMap] = useState<Record<string, Record<string, string>>>({});
   const [voiceLanguageCode, setVoiceLanguageCode] = useState<string>(prefs.defaultTargetLanguages[0] || 'hi');
-  const [customVoices, setCustomVoices] = useState<Voice[]>([]);
   const [voiceSpeed, setVoiceSpeed] = useState<number>(prefs.voiceSpeed);
   const [voicePitch, setVoicePitch] = useState<number>(1.0);
   const [voiceEmotion, setVoiceEmotion] = useState<VoiceEmotion>(prefs.voiceEmotion);
@@ -194,18 +198,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const lipSyncAskedRef = useRef(false);
   const faceScanRequestedRef = useRef<string | null>(null);
 
+  // A saved default on an engine the plan does not include becomes the same persona on one it does.
   React.useEffect(() => {
-    // The user's cloned voices are offered right alongside the catalog in StepVoice.
-    voiceCloneService
-      .list()
-      .then((res) => {
-        const voices = res.voices.map((v) => voiceCloneService.toVoice(v));
-        setCustomVoices(voices);
-        // A default pointing at a cloned voice that has since been deleted would be refused by the dub.
-        setSelectedVoiceId((current) => (current.startsWith('cloned:') && !voices.some((v) => v.id === current) ? DEFAULT_VOICE_ID : current));
-      })
-      .catch(() => setCustomVoices([]));
-  }, []);
+    setSelectedVoiceId((current) => {
+      const voice = VOICES.find((v) => v.id === current);
+      return voice ? voiceForPlan(voice, voiceEngines, VOICES).id : current;
+    });
+  }, [voiceEngines]);
 
   React.useEffect(() => {
     apiGet<{ lipSyncAvailable: boolean; separationAvailable: boolean }>('/api/health')
@@ -655,12 +654,12 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       const next = { ...prev };
       for (const code of targetLanguageCodes) {
         if (next[code]) continue;
-        const nativeVoice = defaultVoiceFor(code, gender);
+        const nativeVoice = defaultVoiceFor(code, gender, planVoices);
         if (nativeVoice) next[code] = nativeVoice.id;
       }
       return next;
     });
-    const matchingVoice = defaultVoiceFor(targetLanguageCode, gender);
+    const matchingVoice = defaultVoiceFor(targetLanguageCode, gender, planVoices);
     if (matchingVoice) setSelectedVoiceId(matchingVoice.id);
     setVoiceLanguageCode((current) => (targetLanguageCodes.includes(current) ? current : targetLanguageCode));
     setCurrentStep('voice');
@@ -893,8 +892,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   };
 
   const targetLang = LANGUAGES.find((l) => l.code === targetLanguageCode) || LANGUAGES[0];
-  const selectedVoice =
-    [...customVoices, ...VOICES].find((v) => v.id === voiceForLanguage(voiceLanguageCode)) || VOICES[0];
+  const selectedVoice = VOICES.find((v) => v.id === voiceForLanguage(voiceLanguageCode)) || VOICES[0];
   const wordsCount = transcriptSegments.reduce((sum, s) => sum + s.wordsCount, 0);
 
   // Tells the app what is happening here, so the mini player can show it while the user is on another screen.
@@ -1042,7 +1040,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           onContinueToVoice={handleContinueToVoice}
           onShowToast={onShowToast}
           voiceSelection={pendingVoiceSelection}
-          voiceCatalog={[...customVoices, ...VOICES]}
+          voiceCatalog={VOICES}
           voiceEmotion={voiceEmotion}
         />
       )}
@@ -1052,7 +1050,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           selectedVoiceId={voiceForLanguage(voiceLanguageCode)}
           targetLanguageCode={targetLanguageCode}
           targetLanguageCodes={targetLanguageCodes}
-          customVoices={customVoices}
+          voiceEngines={voiceEngines}
           voiceLanguageCode={voiceLanguageCode}
           onSelectVoiceLanguage={setVoiceLanguageCode}
           voiceForLanguage={voiceForLanguage}

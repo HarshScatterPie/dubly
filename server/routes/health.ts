@@ -3,9 +3,7 @@ import { getProviderStatus } from '../lib/modelRouter';
 import { isLipSyncAvailable } from '../lib/lipSync';
 import { isSeparationAvailable } from '../lib/audioSeparation';
 import { isFaceScanAvailable } from '../lib/faceScan';
-import { installedCloneEngines, isVoiceCloneAvailable } from '../lib/voiceClone';
 import { isCtcAlignAvailable } from '../lib/ctcAlign';
-import { isSpaceCloneConfigured } from '../lib/spaceClone';
 
 export const healthRouter = Router();
 
@@ -16,9 +14,6 @@ healthRouter.get('/', (_req, res) => {
     lipSyncAvailable: isLipSyncAvailable(),
     faceScanAvailable: isFaceScanAvailable(),
     separationAvailable: isSeparationAvailable(),
-    voiceCloneAvailable: isVoiceCloneAvailable() || isSpaceCloneConfigured(),
-    voiceCloneOnGpuSpace: isSpaceCloneConfigured(),
-    voiceCloneEngines: installedCloneEngines(),
     forcedAlignAvailable: isCtcAlignAvailable(),
   });
 });

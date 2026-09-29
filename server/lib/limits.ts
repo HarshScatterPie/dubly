@@ -38,7 +38,6 @@ export const rateRules = {
   dubPerUser: rule('DUB_PER_HOUR', 30, HOUR),
   dubPerWorkspace: rule('DUB_PER_WORKSPACE_HOUR', 90, HOUR),
   ttsPerUser: rule('TTS_PER_HOUR', 200, HOUR),
-  voiceClonePerUser: rule('VOICE_CLONE_PER_HOUR', 10, HOUR),
   exportPerUser: rule('EXPORT_PER_HOUR', 30, HOUR),
   importSamplePerUser: rule('IMPORT_SAMPLE_PER_HOUR', 20, HOUR),
   uploadPerUser: rule('UPLOAD_PER_HOUR', 30, HOUR),

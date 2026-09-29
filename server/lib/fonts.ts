@@ -61,13 +61,15 @@ export async function captionRenderEnv(): Promise<NodeJS.ProcessEnv> {
   }
 }
 
-type Script = 'devanagari' | 'bengali' | 'gurmukhi' | 'gujarati' | 'tamil' | 'telugu' | 'kannada' | 'malayalam' | 'arabic' | 'japanese' | 'korean' | 'chinese' | 'thai' | 'latin';
+type Script = 'devanagari' | 'bengali' | 'gurmukhi' | 'gujarati' | 'oriya' | 'tamil' | 'telugu' | 'kannada' | 'malayalam' | 'olchiki' | 'arabic' | 'japanese' | 'korean' | 'chinese' | 'thai' | 'latin';
 
 const SCRIPT_RANGES: [Script, RegExp][] = [
   ['devanagari', /[\u0900-\u097F]/g],
   ['bengali', /[\u0980-\u09FF]/g],
   ['gurmukhi', /[\u0A00-\u0A7F]/g],
   ['gujarati', /[\u0A80-\u0AFF]/g],
+  ['oriya', /[\u0B00-\u0B7F]/g],
+  ['olchiki', /[\u1C50-\u1C7F]/g],
   ['tamil', /[\u0B80-\u0BFF]/g],
   ['telugu', /[\u0C00-\u0C7F]/g],
   ['kannada', /[\u0C80-\u0CFF]/g],
@@ -101,10 +103,12 @@ const WINDOWS_FAMILY: Record<Script, string> = {
   bengali: 'Nirmala UI',
   gurmukhi: 'Nirmala UI',
   gujarati: 'Nirmala UI',
+  oriya: 'Nirmala UI',
   tamil: 'Nirmala UI',
   telugu: 'Nirmala UI',
   kannada: 'Nirmala UI',
   malayalam: 'Nirmala UI',
+  olchiki: 'Nirmala UI',
   arabic: 'Segoe UI',
   japanese: 'Yu Gothic UI',
   korean: 'Malgun Gothic',
@@ -117,10 +121,12 @@ const NOTO_FAMILY: Record<Script, string> = {
   bengali: 'Noto Sans Bengali',
   gurmukhi: 'Noto Sans Gurmukhi',
   gujarati: 'Noto Sans Gujarati',
+  oriya: 'Noto Sans Oriya',
   tamil: 'Noto Sans Tamil',
   telugu: 'Noto Sans Telugu',
   kannada: 'Noto Sans Kannada',
   malayalam: 'Noto Sans Malayalam',
+  olchiki: 'Noto Sans Ol Chiki',
   arabic: 'Noto Sans Arabic',
   japanese: 'Noto Sans CJK JP',
   korean: 'Noto Sans CJK KR',

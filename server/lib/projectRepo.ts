@@ -227,10 +227,11 @@ const DEFAULT_USAGE: UserUsageStats = {
   paidExtrasAllowed: false,
   extraRates: DEFAULT_PLANS.starter.extraRates,
   teamInvites: false,
+  voiceEngines: DEFAULT_PLANS.starter.voiceEngines,
 };
 
 // Taken from the workspace's plan on every read, never trusted from (or written to) the usage document.
-const PLAN_FIELDS = ['minutesLimit', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites'] as const;
+const PLAN_FIELDS = ['minutesLimit', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites', 'voiceEngines'] as const;
 
 // Minutes reset on the 1st of every month, India time, since that is where the team and its users are.
 const USAGE_TIME_ZONE = 'Asia/Kolkata';
@@ -266,6 +267,7 @@ function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
     paidExtrasAllowed: plan.paidExtras,
     extraRates: plan.extraRates,
     teamInvites: plan.teamInvites,
+    voiceEngines: plan.voiceEngines,
   };
 }
 

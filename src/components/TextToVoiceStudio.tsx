@@ -5,7 +5,6 @@
 
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Mic,
   Sparkles,
   Play,
   Pause,
@@ -18,11 +17,10 @@ import {
   ArrowRight,
   Languages,
 } from 'lucide-react';
-import { Language, Voice, VoiceEmotion } from '../types';
+import { Language, Voice, VoiceEmotion, VoiceEngine } from '../types';
 import { LANGUAGES, VOICES, SAMPLE_VIDEOS } from '../data/mockData';
-import { voiceCloneService } from '../services/voiceCloneService';
-import { VoiceCloneStudio } from './VoiceCloneStudio';
-import { VoiceProviderBadge } from './VoiceProviderBadge';
+import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../lib/voiceEngines';
+import { VoiceEngineBadge } from './VoiceEngineBadge';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { textToSpeechService } from '../services/textToSpeechService';
 import { renderService } from '../services/renderService';
@@ -30,33 +28,33 @@ import { renderService } from '../services/renderService';
 interface TextToVoiceStudioProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   onSendToDubbingWithAudio?: (script: string, voiceId: string, sampleVideoId?: string) => void;
+  /** The voice engines the workspace's plan includes; the other voices are shown locked. */
+  voiceEngines?: VoiceEngine[];
 }
 
 export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
   onShowToast,
   onSendToDubbingWithAudio,
+  voiceEngines = VOICE_ENGINES,
 }) => {
   const [scriptText, setScriptText] = useState<string>(
     'Welcome to Dubly. With our state-of-the-art neural voice engine, you can turn any written script into broadcast-quality speech with natural breathing, authentic emotion, and perfect cadence.'
   );
   const [selectedLanguageCode, setSelectedLanguageCode] = useState<string>('en');
-  const [selectedVoiceId, setSelectedVoiceId] = useState<string>('alex');
-  // The user's own cloned voices, loaded once and merged into the picker below so they
-  // are chosen exactly like a catalog voice.
-  const [customVoices, setCustomVoices] = useState<Voice[]>([]);
-  const [showCloneStudio, setShowCloneStudio] = useState<boolean>(false);
+  const [selectedVoiceId, setSelectedVoiceId] = useState<string>('gemini-lite-kore');
 
-  const reloadCustomVoices = React.useCallback(() => {
-    voiceCloneService
-      .list()
-      .then((res) => setCustomVoices(res.voices.map((v) => voiceCloneService.toVoice(v))))
-      .catch(() => setCustomVoices([]));
-  }, []);
-
-  React.useEffect(() => reloadCustomVoices(), [reloadCustomVoices]);
-
-  /** Your voices first — a returning user is looking for those, not for voice #400. */
-  const availableVoices = React.useMemo(() => [...customVoices, ...VOICES], [customVoices]);
+  // Voices the plan can use first; the others follow, locked.
+  const isLocked = (voice: Voice) => !voiceAllowed(voice, voiceEngines);
+  const availableVoices = React.useMemo(
+    () => [...VOICES].sort((a, b) => Number(!voiceAllowed(a, voiceEngines)) - Number(!voiceAllowed(b, voiceEngines))),
+    [voiceEngines]
+  );
+  // A pick on an engine the plan lacks (a preset, say) becomes the same persona on one it has.
+  const choosableVoiceId = (id: string) => {
+    const voice = VOICES.find((v) => v.id === id);
+    return voice ? voiceForPlan(voice, voiceEngines, VOICES).id : id;
+  };
+  useEffect(() => setSelectedVoiceId((current) => choosableVoiceId(current)), [voiceEngines]);
   const [speed, setSpeed] = useState<number>(1.0);
   const [pitch, setPitch] = useState<number>(1.0);
   const [emotion, setEmotion] = useState<VoiceEmotion>('friendly');
@@ -88,25 +86,25 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
     {
       title: 'Tech Keynote Launch',
       lang: 'en',
-      voice: 'google-en-fenrir',
+      voice: 'gemini-lite-fenrir',
       text: 'Today marks a giant leap forward. Dubly enables every creator and enterprise to localize high-definition video across twenty-eight languages in seconds.',
     },
     {
       title: 'Hindi Storytelling & Podcast',
       lang: 'hi',
-      voice: 'google-hi-aoede',
+      voice: 'gemini-lite-aoede',
       text: 'नमस्ते दोस्तों! आज हम बात करेंगे कि कैसे आर्टिफिशियल इंटेलिजेंस हमारे वीडियो और पॉडकास्ट को दुनिया के हर कोने तक पहुँचा रहा है।',
     },
     {
       title: 'Tamil Tech Review',
       lang: 'ta',
-      voice: 'google-ta-orus',
+      voice: 'gemini-lite-orus',
       text: 'வணக்கம் நண்பர்களே! இந்த வீடியோவில் நாம் புத்தம் புதிய AI வீடியோ மொழிபெயர்ப்பு தொழில்நுட்பத்தைப் பற்றி விரிவாகப் பார்க்கப் போகிறோம்.',
     },
     {
       title: 'Spanish Brand Story',
       lang: 'es',
-      voice: 'google-en-fenrir',
+      voice: 'gemini-lite-fenrir',
       text: 'Bienvenidos a una experiencia transformadora. Nuestro compromiso es derribar las barreras del idioma para conectar a millones de personas.',
     },
   ];
@@ -114,7 +112,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
   const handleApplyPreset = (preset: typeof scriptPresets[0]) => {
     setScriptText(preset.text);
     setSelectedLanguageCode(preset.lang);
-    setSelectedVoiceId(preset.voice);
+    setSelectedVoiceId(choosableVoiceId(preset.voice));
     setGeneratedAudioUrl(null);
     onShowToast('Preset Applied', `${preset.title} script loaded.`, 'info');
   };
@@ -415,7 +413,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                 onChange={(e) => {
                   setSelectedLanguageCode(e.target.value);
                   setGeneratedAudioUrl(null);
-                  const matchingVoice = availableVoices.find((v) => v.languageCode === e.target.value);
+                  const matchingVoice = availableVoices.find((v) => !isLocked(v) && v.languageCode === e.target.value);
                   if (matchingVoice) setSelectedVoiceId(matchingVoice.id);
                 }}
                 className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] text-xs font-semibold focus:outline-none focus:border-[#F05637]"
@@ -439,43 +437,29 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                 </span>
               </div>
 
-              {/* Clone-your-voice entry point: the reason a user comes to this panel at
-                  all is usually to hear their own voice, so it sits above the catalog. */}
-              <button
-                type="button"
-                onClick={() => setShowCloneStudio(true)}
-                className="w-full flex items-center gap-2.5 p-3 rounded-2xl border border-dashed border-[#F05637]/50 bg-[#F05637]/5 hover:bg-[#F05637]/10 text-left transition-colors"
-              >
-                <span className="w-8 h-8 shrink-0 rounded-full bg-[#F05637]/15 text-[#D94B2E] flex items-center justify-center">
-                  <Mic className="w-4 h-4" />
-                </span>
-                <span className="min-w-0">
-                  <span className="text-xs font-bold text-[#0F172A] block">
-                    {customVoices.length > 0 ? 'Manage your cloned voices' : 'Use my own voice'}
-                  </span>
-                  <span className="text-[10px] text-[#64748B] block">
-                    {customVoices.length > 0
-                      ? `${customVoices.length} saved · record another or delete one`
-                      : 'Record 5–30 seconds once, then speak any language in your voice'}
-                  </span>
-                </span>
-              </button>
-
               <div className="space-y-2 max-h-64 overflow-y-auto pr-1 custom-scrollbar">
                 {availableVoices.map((v) => {
                   const isSelected = selectedVoiceId === v.id;
                   const isPreviewing = previewingVoiceId === v.id;
+                  const locked = isLocked(v);
                   return (
                     <div
                       key={v.id}
                       onClick={() => {
+                        if (locked) {
+                          onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, 'Your plan includes Gemini 3.8 Flash-Lite voices. Upgrade to Enterprise to use this one.', 'info');
+                          return;
+                        }
                         setSelectedVoiceId(v.id);
                         setGeneratedAudioUrl(null);
                       }}
-                      className={`flex items-center justify-between p-3 rounded-2xl border cursor-pointer transition-all ${
-                        isSelected
-                          ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637] shadow-[0_0_15px_rgba(240,86,55,0.3)]'
-                          : 'bg-[#F8FAFC] border-[#E2E8F0] hover:bg-[#E2E8F0]'
+                      aria-disabled={locked}
+                      className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${
+                        locked
+                          ? 'bg-[#F8FAFC] border-dashed border-[#CBD5E1] opacity-60 cursor-not-allowed'
+                          : isSelected
+                            ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637] shadow-[0_0_15px_rgba(240,86,55,0.3)] cursor-pointer'
+                            : 'bg-[#F8FAFC] border-[#E2E8F0] hover:bg-[#E2E8F0] cursor-pointer'
                       }`}
                     >
                       <div className="flex items-center gap-3">
@@ -486,14 +470,14 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                         />
                         <div>
                           <div className="flex items-center gap-2">
-                            <span className="text-xs font-bold text-[#0F172A]">{v.name}</span>
+                            <span className="text-xs font-bold text-[#0F172A]">{v.name.replace(/\s*\(.*\)$/, '')}</span>
                             <span className="text-[10px] px-1.5 py-0.2 rounded bg-[#E2E8F0] text-[#64748B] font-mono">
                               {v.gender}
                             </span>
                           </div>
                           <span className="text-[11px] text-[#D94B2E] block">{v.accent}</span>
                           <div className="flex items-center gap-1 mt-1">
-                            <VoiceProviderBadge provider={v.provider} compact />
+                            <VoiceEngineBadge engine={v.engine} locked={locked} compact />
                           </div>
                         </div>
                       </div>
@@ -501,6 +485,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                       <div className="flex items-center gap-2">
                         <button
                           type="button"
+                          disabled={locked}
                           onClick={(e) => handlePreviewVoice(e, v)}
                           className="p-1.5 rounded-lg text-[#64748B] hover:text-[#0F172A] hover:bg-[#E2E8F0] transition-colors"
                           title="Preview Quote"
@@ -635,23 +620,6 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
         </div>
       )}
 
-      {showCloneStudio && (
-        <div
-          className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 backdrop-blur-sm p-4 sm:p-8"
-          onClick={() => setShowCloneStudio(false)}
-        >
-          <div
-            className="w-full max-w-2xl rounded-3xl bg-white border border-[#E2E8F0] shadow-2xl p-6 my-auto"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <VoiceCloneStudio
-              onShowToast={onShowToast}
-              onVoicesChanged={reloadCustomVoices}
-              onClose={() => setShowCloneStudio(false)}
-            />
-          </div>
-        </div>
-      )}
     </div>
   );
 };

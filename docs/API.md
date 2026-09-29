@@ -24,7 +24,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | GET | `/api/healthz` | Public liveness check: `{ ok: true }` |
 | GET | `/api/health` | Provider and optional-engine availability |
 | GET | `/api/profile` | Name, role and workspace from the shared ScatterStudio profile (whitelisted fields only) |
-| GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews with Chirp3-HD |
+| GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews steadily, without delivery direction or performed laughs and sighs |
 | POST | `/api/profile/sign-out-everywhere` | Revokes every session of the caller's account, this one included (`204`); their tokens are refused from then on |
 | GET | `/api/bootstrap` | Everything the app opens with, in one response: `{ workspace, preferences, usage, projects, profile }` (same shapes as the separate endpoints). The client caches it per account in the browser and refreshes it on every visit |
 | GET | `/api/usage` | Monthly minutes (used, limit, reset time), storage measured from the bucket, and the workspace plan: `activePlan`, `planId`, `paidExtrasAllowed`, `extraRates`, `teamInvites` |
@@ -76,10 +76,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | DELETE | `/api/projects/:id/shares/:shareId` | Turn a link off. Its page stops at once; any video URL already copied from it lasts at most 2 more hours |
 | GET | `/api/share/:token` | **Public** HTML watch page. `404` unknown, `410` expired or turned off. Limited per IP |
 
-### Voices and text-to-voice
+### Text-to-voice
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/voices` | The caller's cloned voices (only those whose sample lives in the caller's own folder) |
-| POST | `/api/voices` | multipart `sample` (≤ 25 MB, 5–120 s audio, checked by content) plus `name?`, `gender?`, `languageCode?` |
-| DELETE | `/api/voices/:id` | Deletes the voice, and its sample only when the sample is in the caller's own folder |
-| POST | `/api/tts/generate` | `{ text, voiceId, languageCode?, speed?, pitch?, emotion?, delivery? }` → a WAV data URL. `emotion` and `delivery` direct the voice as a dub would. No length limit beyond the 2 MB body |
+| POST | `/api/tts/generate` | `{ text, voiceId, languageCode?, speed?, pitch?, emotion?, delivery? }` → a WAV data URL. `emotion` and `delivery` direct the voice as a dub would. A voice on an engine the workspace's plan lacks is voiced as the same persona on one it has. No length limit beyond the 2 MB body |

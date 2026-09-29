@@ -12,11 +12,14 @@ export const env = {
   vertexGeminiLocation: process.env.VERTEX_GEMINI_LOCATION || 'global',
   geminiSttModel: process.env.GEMINI_STT_MODEL || 'gemini-3.5-flash-lite',
   geminiTranslateModel: process.env.GEMINI_TRANSLATE_MODEL || 'gemini-3.5-flash-lite',
-  // `gemini` voices lines with emotion and delivery direction; `chirp` is the plain Chirp3-HD voice it falls back to.
+  // `gemini` voices each line on its voice's own engine; `chirp` is an operator override that voices every line with plain Chirp3-HD.
   ttsEngine: (process.env.TTS_ENGINE === 'chirp' ? 'chirp' : 'gemini') as 'gemini' | 'chirp',
-  // The standard (GA) Gemini-TTS model every expressive line uses.
-  geminiTtsModel: process.env.GEMINI_TTS_MODEL || 'gemini-2.5-flash-tts',
-  // Tried first for users who turned on premium voices, at about twice the voice cost. Verified on Cloud TTS (2026-09-24): performs [laughing] and [sigh]; 3.8 is not served there yet.
+  // The models behind the Gemini 3.8 Flash-Lite and Gemini 3.8 Flash voices, served by the Gemini API's Interactions endpoint.
+  geminiTtsLiteModel: process.env.GEMINI_TTS_LITE_MODEL || 'gemini-3.8-flash-lite-tts',
+  geminiTtsFlashModel: process.env.GEMINI_TTS_FLASH_MODEL || 'gemini-3.8-flash-tts',
+  // With a key, Gemini 3.8 voices go to the Gemini Developer API (where 3.8 TTS is documented); without one, to Vertex AI on the service account.
+  geminiApiKey: process.env.GEMINI_API_KEY || '',
+  // Tried first for users who turned on premium voices. Verified on Cloud TTS (2026-09-24): performs [laughing] and [sigh]; 3.8 is not served there yet.
   geminiTtsPremiumModel: process.env.GEMINI_TTS_PREMIUM_MODEL || 'gemini-3.1-flash-tts-preview',
   // Listens to rendered lines next to the originals for the AI review (dubDirector.ts).
   geminiReviewModel: process.env.GEMINI_REVIEW_MODEL || 'gemini-3.5-flash-lite',
@@ -30,8 +33,4 @@ export const env = {
   smtpUser: process.env.SMTP_USER || '',
   smtpPass: process.env.SMTP_PASS || '',
   mailFrom: process.env.MAIL_FROM || '',
-  // Optional voice-cloning worker on a Hugging Face ZeroGPU Space. Set both and
-  // cloning runs there instead of on this machine's CPU.
-  hfSpaceUrl: process.env.HF_SPACE_URL || '',
-  hfToken: process.env.HF_TOKEN || '',
 };

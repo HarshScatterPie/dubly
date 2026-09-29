@@ -16,8 +16,9 @@ export function mainSpeakerGender(segments: TranscriptSegment[], profiles: Recor
 }
 
 // A starting voice for a language: native to it and, when known, of the main speaker's gender (every persona speaks every language).
+// Pass only the voices the plan can use, so the pick is never a locked one.
 export function defaultVoiceFor(languageCode: string, gender?: 'male' | 'female', catalog: Voice[] = VOICES): Voice | undefined {
-  const native = catalog.filter((v) => v.provider !== 'clone' && v.languageCode === languageCode);
+  const native = catalog.filter((v) => v.languageCode === languageCode);
   if (!gender) return native[0];
-  return native.find((v) => v.gender === gender) ?? catalog.find((v) => v.provider !== 'clone' && v.gender === gender) ?? native[0];
+  return native.find((v) => v.gender === gender) ?? catalog.find((v) => v.gender === gender) ?? native[0];
 }

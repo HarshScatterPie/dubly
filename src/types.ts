@@ -7,7 +7,6 @@ export type NavigationTab =
   | 'dashboard'
   | 'dubbing'
   | 'text-to-voice'
-  | 'my-voices'
   | 'history'
   | 'workspace'
   | 'team'
@@ -33,7 +32,19 @@ export interface Language {
   category: 'indian' | 'global' | 'asian';
   isPopular?: boolean;
   bcp47: string; // for speech synthesis
+  /**
+   * Set on a dialect or regional language with no word-timing model of its own: the forced
+   * aligner uses this related language's model, which shares its script (e.g. 'hi' for
+   * Bhojpuri). Voices still speak the dialect itself.
+   */
+  baseCode?: string;
 }
+
+/**
+ * The Google model that voices a built-in voice. It decides how the voice sounds, what it
+ * costs, and which plans may use it (Plan.voiceEngines).
+ */
+export type VoiceEngine = 'gemini-flash-lite' | 'gemini-flash' | 'chirp';
 
 export interface Voice {
   id: string;
@@ -49,29 +60,12 @@ export interface Voice {
   tags: string[];
   pitch: number;
   speed: number;
-  /** Dedicated provider powering this voice. `clone` means it is the user's own voice, synthesized locally from their recording. */
-  provider: 'vertex' | 'clone';
+  provider: 'vertex';
+  engine: VoiceEngine;
   providerVoice: {
-    vertex?: string;
-    /** The cloned voice's own id — the reference recording is looked up from it at synthesis time. */
-    clone?: string;
+    /** The persona's Google voice name (e.g. "Charon"), shared by Gemini-TTS and Chirp3-HD. */
+    vertex: string;
   };
-}
-
-/**
- * A voice the user created by uploading a recording of themselves, cloned zero-shot at
- * synthesis time rather than trained. Lives per-user, alongside the shared catalog.
- */
-export interface CustomVoice {
-  id: string;
-  name: string;
-  gender: 'male' | 'female' | 'non-binary';
-  /** The language the sample was recorded in — clones speak other languages too, this is just what it was captured in. */
-  languageCode: string;
-  /** What the sample says. Transcribed on upload, because one of the engines needs it to align the reference. */
-  sampleTranscript: string;
-  sampleAudioUrl?: string;
-  createdAt: string;
 }
 
 export interface TranscriptWord {
@@ -347,6 +341,8 @@ export interface UserUsageStats {
   extraRates: Record<PaidExtra, number>;
   /** Whether this plan lets the workspace invite teammates. */
   teamInvites: boolean;
+  /** The voice engines this plan can use; voices of the others are shown locked. */
+  voiceEngines: VoiceEngine[];
 }
 
 export type PlanId = 'starter' | 'enterprise';
@@ -361,4 +357,6 @@ export interface Plan {
   extraRates: Record<PaidExtra, number>;
   /** Whether workspace admins can invite teammates; without it the workspace is its owner alone. */
   teamInvites: boolean;
+  /** The voice engines (models) the workspace's dubs and previews may use. */
+  voiceEngines: VoiceEngine[];
 }

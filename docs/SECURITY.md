@@ -23,7 +23,6 @@
   - Every call has a timeout (5 min for quick operations, 120 min for renders), and ffprobe runs with a 60 s timeout.
   - Production uses the Debian package, security-patched through the image; local development uses ffmpeg 6.1 from `ffmpeg-static`.
 - **Storage:** stored names come from server-generated IDs (`workspaces/{ws}/projects/{id}/source.<ext from content>`).
-- **Cloned voices:** a voice is used, listed or signed only if its sample path is exactly `users/{caller}/voices/{uuid}/sample.wav` (`server/lib/customVoices.ts`).
 - **No server-side fetching of user URLs:** sample import takes a sample ID from a server list. The download is also checked: HTTPS only, allow-listed host, public IPs after DNS, no redirects, a timeout and a byte cap (`server/lib/safeDownload.ts`).
 
 ## Signed URLs and sharing
@@ -36,7 +35,7 @@
 - **Errors:** a single error format. Unplanned server errors never reach clients, only the log (with `request_id`).
 - **Headers:**
   - Enforced: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, and HSTS on HTTPS.
-  - The app's CSP ships as **Report-Only**. **To enforce it:** walk through sign-in, upload, analysis, translation, dubbing, export, share, voice cloning and text-to-voice with the browser console open. Add any legitimate source that gets reported to `APP_CSP` in `server/app.ts`, then rename the header to `Content-Security-Policy`.
+  - The app's CSP ships as **Report-Only**. **To enforce it:** walk through sign-in, upload, analysis, translation, dubbing, export, share and text-to-voice with the browser console open. Add any legitimate source that gets reported to `APP_CSP` in `server/app.ts`, then rename the header to `Content-Security-Policy`.
 - **CORS** allows only `WEB_ORIGIN`. Authentication is a bearer token (no cookies), so CSRF doesn't apply.
 
 ## Secrets
@@ -44,7 +43,7 @@
 |---|---|---|
 | GCP service account (Vertex, TTS) | Production: **none** with `CREDENTIALS_MODE=adc` (the VM or Cloud Run service account). Development: `gcp-service-account.json` in `CREDENTIALS_DIR` | Create a new key in IAM → replace the file → restart → delete the old key. With ADC there's nothing to rotate |
 | Firebase Admin service account | Same, via `firebase-service-account.json` or ADC (`FIREBASE_PROJECT_ID` required) | Same |
-| `HF_TOKEN` (optional cloning) | `server/.env` or `DUBLY_ENV_FILE` | Revoke and reissue at huggingface.co → Settings → Access Tokens → restart |
+| `GEMINI_API_KEY` (optional, Gemini 3.8 voices) | `server/.env` or `DUBLY_ENV_FILE` | Create a new key in Google AI Studio → replace it → restart → delete the old key |
 | Firebase web API key | Frontend bundle (public by design) | Not secret. In the GCP console, restrict it to the Dubly and ScatterStudio origins |
 
 - **Never committed:** `.env*` (except `.env.example`), `server/credentials/` and key files are gitignored. CI runs a secret scan (TruffleHog) over the full history.
@@ -56,7 +55,7 @@
 ## Data retention (implemented)
 | Data | Kept |
 |---|---|
-| Projects, their media, cloned voices | Until deleted. Deleting a project removes its documents, every file in its storage folder and its share links |
+| Projects and their media | Until deleted. Deleting a project removes its documents, every file in its storage folder and its share links |
 | Server scratch files | ≤ 6 hours (sweeper), and removed right after each job normally |
 | TTS audio cache (server disk) | Least recently used, capped at 1.5 GB; **not** removed when a project is deleted |
 | Share links / invitations / idempotency keys / finished jobs | 7 days past expiry / 30 days past expiry / 2 days / 180 days |
@@ -68,11 +67,11 @@
 |---|---|---|
 | Google Cloud (Firebase Auth, Firestore, Cloud Storage) | Account, project data, uploaded and generated media | Always |
 | Google Vertex AI (Gemini) | The video's audio (speech-to-text), transcript and translation text (translation, condensing) | Analysis, translation, dubbing |
-| Google Cloud Text-to-Speech | Translated text | Dubbing, text-to-voice |
-| Hugging Face Space at `HF_SPACE_URL` | Voice sample audio and the text to speak | Only if configured and a cloned voice is used |
+| Google Cloud Text-to-Speech | Translated text | Dubbing, text-to-voice (Chirp 3 HD and premium voices) |
+| Google Gemini API (Developer API with `GEMINI_API_KEY`, else Vertex AI) | Translated text and its delivery direction | Dubbing, text-to-voice (Gemini 3.8 voices) |
 
 - **Ownership and access:** uploaded content belongs to the workspace; its members can access it, and share-link holders can access the one dubbed video for 24 hours.
-- **Model training:** Dubly doesn't use content for training. Whether Google or the Space operator may use it is governed by **their** terms and your agreements with them. Google Cloud's published terms for Vertex AI say customer data isn't used to train its models without permission. Confirm that against your own contract before telling customers. The Hugging Face Space's data handling depends on who operates it; treat it as a third party.
+- **Model training:** Dubly doesn't use content for training. Whether Google may use it is governed by **its** terms and your agreements with it. Google Cloud's published terms for Vertex AI say customer data isn't used to train its models without permission; the Gemini Developer API's paid-tier terms say the same, but its free tier may use content, so production must use a billed key. Confirm that against your own contract before telling customers.
 
 ## Dependency posture
 - `npm audit --omit=dev` reports **0 high/critical** issues. CI fails on high.

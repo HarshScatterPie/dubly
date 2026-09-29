@@ -9,9 +9,8 @@
 | Data | Where | Can it be rebuilt? | Protection |
 |---|---|---|---|
 | Workspaces, members, invites, projects (metadata + `content/transcript` + `languages/{code}`), jobs, shares | Firestore: `workspaces/**`, `workspaceMembership/*`, `invites/*`, `jobs/*`, `jobIdempotency/*`, `shares/*` | No | Point-in-time recovery + scheduled exports |
-| Cloned voices, per-user settings | Firestore: `users/{uid}/voices/*`, `users/{uid}/meta/*` | No | Same as above |
+| Per-user settings | Firestore: `users/{uid}/meta/*` | No | Same as above |
 | Source videos, dubbed audio and video, thumbnails, caption renders | Storage: `workspaces/{ws}/projects/{id}/*` | Renders can be redone (they cost minutes and provider spend); **source uploads cannot** | Soft delete / object versioning |
-| Voice samples | Storage: `users/{uid}/voices/*/sample.wav` | No | Same as above |
 | Scratch files, TTS cache | Server disk: `server/tmp`, `server/cache` | Yes, disposable | None needed |
 | Service-account keys, `server/.env` | Server disk (see docs/SECURITY.md) | Can be re-issued | Kept in a secret manager, never only on the server |
 | Application | Git + Docker image | Yes | GitHub, CI-built image |

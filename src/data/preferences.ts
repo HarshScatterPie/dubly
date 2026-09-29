@@ -1,12 +1,12 @@
 import type { UserPreferences } from '../types';
 import { VOICES } from './mockData';
 
-// Ritu, a Hindi Chirp3-HD voice. The old default, 'riya', named a voice the catalog no longer has, so dubs using it were refused.
-export const DEFAULT_VOICE_ID = 'google-hi-aoede';
+// Ritu on Gemini 3.8 Flash-Lite, the engine every plan has. The old default, 'riya', named a voice the catalog no longer has, so dubs using it were refused.
+export const DEFAULT_VOICE_ID = 'gemini-lite-aoede';
 
-// A saved voice that no longer exists falls back to the default rather than failing the dub; cloned voices are checked where the user's list is known.
+// A saved voice that no longer exists (a removed cloned voice, say) falls back to the default rather than failing the dub.
 export function usableVoiceId(id: string | undefined): string {
-  return id && (id.startsWith('cloned:') || VOICES.some((v) => v.id === id)) ? id : DEFAULT_VOICE_ID;
+  return id && VOICES.some((v) => v.id === id) ? id : DEFAULT_VOICE_ID;
 }
 
 // What a user gets before they change anything; shared by the server (stored settings) and the client (settings page, studio).

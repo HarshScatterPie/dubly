@@ -25,9 +25,10 @@ import {
   Volume2,
   Wand2,
 } from 'lucide-react';
-import { DubbingProject, LocalizedSegment, Voice } from '../types';
+import { DubbingProject, LocalizedSegment, Voice, VoiceEngine } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
-import { voiceCloneService } from '../services/voiceCloneService';
+import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../lib/voiceEngines';
+import { VoiceEngineBadge } from './VoiceEngineBadge';
 import { projectService } from '../services/projectService';
 import { VideoPlayer } from './VideoPlayer';
 import { textToSpeechService } from '../services/textToSpeechService';
@@ -49,6 +50,8 @@ interface ProjectWorkspaceProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   /** Allowance used per dubbed minute with the user's paid extras (1 with none), so estimates match what is charged. */
   allowanceRate?: number;
+  /** The voice engines the workspace's plan includes; the other voices are shown locked. */
+  voiceEngines?: VoiceEngine[];
   /** Opens the studio on this project to add languages, without re-uploading. */
   onDubMoreLanguages?: (project: DubbingProject) => void;
   /** The user's saved default for captioned downloads. */
@@ -59,6 +62,7 @@ type Tab = 'overview' | 'translation' | 'transcript' | 'voice' | 'export';
 
 export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   allowanceRate = 1,
+  voiceEngines = VOICE_ENGINES,
   project,
   onBack,
   onUpdateProject,
@@ -86,19 +90,11 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const [isRedubbing, setIsRedubbing] = useState<boolean>(false);
   const [redubProgress, setRedubProgress] = useState<number>(0);
   const [redubMessage, setRedubMessage] = useState<string>('');
-  const [customVoices, setCustomVoices] = useState<Voice[]>([]);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [editDelivery, setEditDelivery] = useState('');
   const [reviewOnly, setReviewOnly] = useState(false);
   // The language whose edited lines are being re-rendered, with the run's progress.
   const [retake, setRetake] = useState<{ language: string; progress: number; message: string } | null>(null);
-
-  useEffect(() => {
-    voiceCloneService
-      .list()
-      .then((res) => setCustomVoices(res.voices.map((v) => voiceCloneService.toVoice(v))))
-      .catch(() => setCustomVoices([]));
-  }, []);
 
   // The project list leaves out which edited lines are waiting for a render, so the full project is loaded on open.
   useEffect(() => {
@@ -111,9 +107,13 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
 
   const languages = useMemo(() => dubbedLanguagesOf(project), [project]);
   const active = languages.find((l) => l.code === viewLanguage) || languages[0];
-  const sourceLang = LANGUAGES.find((l) => l.code === project.sourceLanguage) || LANGUAGES[10];
-  /** The user's cloned voices first, then the shared catalog — same order as the studio. */
-  const availableVoices = [...customVoices, ...VOICES];
+  const sourceLang = LANGUAGES.find((l) => l.code === project.sourceLanguage) || LANGUAGES.find((l) => l.code === 'en')!;
+  const availableVoices = VOICES;
+  // Voices the plan can use first; the others are listed after them, locked.
+  const pickerVoices = useMemo(
+    () => [...VOICES].sort((a, b) => Number(!voiceAllowed(a, voiceEngines)) - Number(!voiceAllowed(b, voiceEngines))),
+    [voiceEngines]
+  );
   const projectLanguages = languages.map((l) => l.code);
   const readyCount = languages.filter((l) => l.videoUrl).length;
 
@@ -710,16 +710,25 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
           )}
 
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
-            {availableVoices.map((v) => {
+            {pickerVoices.map((v) => {
               const isSelected = activeVoiceId === v.id;
               const isRendered = savedVoiceForLanguage(voiceLanguage) === v.id;
               const isPreviewing = previewingVoiceId === v.id;
+              const locked = !voiceAllowed(v, voiceEngines);
               return (
                 <div
                   key={v.id}
-                  onClick={() => !isRedubbing && setPendingVoiceId(v.id)}
-                  className={`p-4 rounded-2xl border transition-all ${isRedubbing ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'} ${
-                    isSelected ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637]' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
+                  onClick={() => {
+                    if (isRedubbing) return;
+                    if (locked) {
+                      onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, 'Your plan includes Gemini 3.8 Flash-Lite voices. Upgrade to Enterprise to use this one.', 'info');
+                      return;
+                    }
+                    setPendingVoiceId(v.id);
+                  }}
+                  aria-disabled={locked}
+                  className={`p-4 rounded-2xl border transition-all ${isRedubbing || locked ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'} ${
+                    isSelected ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637]' : locked ? 'bg-white border-dashed border-[#CBD5E1]' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
                   }`}
                 >
                   <div className="flex items-center gap-3">
@@ -731,12 +740,15 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                       </span>
                     )}
                     <div className="min-w-0 flex-1">
-                      <h4 className="text-xs font-bold text-[#0F172A] truncate">{v.name}</h4>
+                      <h4 className="text-xs font-bold text-[#0F172A] truncate">{v.name.replace(/\s*\(.*\)$/, '')}</h4>
                       <span className="text-[11px] text-[#D94B2E] block truncate">{v.accent}</span>
-                      <p className="text-[10px] text-[#94A3B8] line-clamp-1 mt-0.5">{v.description}</p>
+                      <span className="mt-1 inline-block">
+                        <VoiceEngineBadge engine={v.engine} locked={locked} compact />
+                      </span>
                     </div>
                     <button
                       type="button"
+                      disabled={locked}
                       onClick={(e) => handlePreviewVoice(e, v)}
                       title={`Preview ${v.name}`}
                       className={`w-8 h-8 shrink-0 rounded-full flex items-center justify-center transition-colors ${

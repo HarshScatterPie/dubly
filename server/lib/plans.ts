@@ -1,8 +1,9 @@
 import type { PaidExtra, Plan, PlanId } from '../../src/types';
 import { PAID_EXTRAS } from '../../src/lib/planMath';
+import { isVoiceEngine, VOICE_ENGINES } from '../../src/lib/voiceEngines';
 import { db } from './firebaseAdmin';
 
-// Written to Firestore the first time each plan is read, then owned there: edit dublyPlans/{id} to change a limit, a rate or invites.
+// Written to Firestore the first time each plan is read, then owned there: edit dublyPlans/{id} to change a limit, a rate, invites or voice engines.
 export const DEFAULT_PLANS: Record<PlanId, Plan> = {
   starter: {
     id: 'starter',
@@ -11,6 +12,8 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     paidExtras: false,
     extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
     teamInvites: false,
+    // Gemini 3.8 Flash and Chirp 3 HD voices are shown to Starter workspaces, locked.
+    voiceEngines: ['gemini-flash-lite'],
   },
   enterprise: {
     id: 'enterprise',
@@ -19,6 +22,7 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     paidExtras: true,
     extraRates: { aiReview: 0.25, premiumVoices: 0.5, paceRetakes: 0.25 },
     teamInvites: true,
+    voiceEngines: [...VOICE_ENGINES],
   },
 };
 
@@ -44,6 +48,7 @@ export function toPlan(id: PlanId, data: Record<string, unknown> | undefined): P
   const base = DEFAULT_PLANS[id];
   const minutes = Number(data?.minutesPerMonth);
   const rates = (data?.extraRates ?? {}) as Record<string, unknown>;
+  const engines = Array.isArray(data?.voiceEngines) ? [...new Set(data.voiceEngines.filter(isVoiceEngine))] : [];
   return {
     id,
     name: typeof data?.name === 'string' && data.name.trim() ? data.name.trim() : base.name,
@@ -56,6 +61,8 @@ export function toPlan(id: PlanId, data: Record<string, unknown> | undefined): P
       })
     ) as Record<PaidExtra, number>,
     teamInvites: typeof data?.teamInvites === 'boolean' ? data.teamInvites : base.teamInvites,
+    // A plan left with no usable engine could not voice anything, so an empty or unreadable list keeps the built-in one.
+    voiceEngines: engines.length ? engines : base.voiceEngines,
   };
 }
 

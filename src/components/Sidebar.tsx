@@ -9,7 +9,6 @@ import {
   LayoutDashboard,
   Video,
   Mic,
-  UserRound,
   FolderKanban,
   History,
   BarChart3,
@@ -38,9 +37,6 @@ const NAV = [
   { id: 'dashboard' as NavigationTab, label: 'Dashboard', Icon: LayoutDashboard },
   { id: 'dubbing' as NavigationTab, label: 'Video Dubbing', Icon: Video },
   { id: 'text-to-voice' as NavigationTab, label: 'Text to Voice', Icon: Mic },
-  // A voice is recorded once and reused across every project, so it belongs at the top
-  // level rather than buried in the studio that happened to create it.
-  { id: 'my-voices' as NavigationTab, label: 'My Voices', Icon: UserRound },
   { id: 'workspace' as NavigationTab, label: 'Active Studio', Icon: FolderKanban },
   { id: 'history' as NavigationTab, label: 'History', Icon: History },
 ];

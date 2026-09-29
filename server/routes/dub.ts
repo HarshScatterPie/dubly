@@ -73,6 +73,7 @@ import { lineGainsDb } from '../lib/levelMatch';
 import { stripPerformanceTags } from '../lib/performance';
 import { planForWorkspace } from '../lib/plans';
 import { allowanceRate, effectiveExtras, NO_EXTRAS, type PaidExtrasChoice } from '../../src/lib/planMath';
+import { languageVoiced } from '../../src/lib/voiceEngines';
 import { isVertexConfigured, vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
 import { buildKaraokeAss } from '../lib/captions';
 import { toSrt } from '../../src/lib/captionCues';
@@ -180,6 +181,7 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     res.status(400).json({ error: 'Translate the video before dubbing' });
     return;
   }
+  if (await refuseUnvoiced(res, workspaceId, languagesToRender)) return;
   // Paid extras the starter switched on (and their plan allows) make each dubbed minute use more of the allowance.
   const { extras, rate } = await chargedExtras(workspaceId, uid);
   const minutesPerLanguage = (stored.videoDuration / 60) * rate;
@@ -209,8 +211,18 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
 // The extras a dub started now gets under the workspace plan, and how fast they make it use the allowance.
 async function chargedExtras(workspaceId: string, uid: string): Promise<{ extras: PaidExtrasChoice; rate: number }> {
   const [plan, settings] = await Promise.all([planForWorkspace(workspaceId), getSettings(uid)]);
-  const extras = effectiveExtras(plan.paidExtras, settings.preferences);
+  const extras = effectiveExtras(plan.paidExtras, settings.preferences, plan.voiceEngines);
   return { extras, rate: allowanceRate(plan.extraRates, extras) };
+}
+
+// Languages no voice the workspace can use speaks (Odia and Santali with Chirp 3 HD alone) are refused before anything is charged.
+async function refuseUnvoiced(res: Response, workspaceId: string, languageCodes: string[]): Promise<boolean> {
+  const { voiceEngines } = await planForWorkspace(workspaceId);
+  const unvoiced = languageCodes.filter((code) => !languageVoiced(code, voiceEngines));
+  if (unvoiced.length === 0) return false;
+  const names = unvoiced.map(getLanguageName).join(' and ');
+  res.status(400).json({ error: `No voice can speak ${names} right now. Remove it from this project to dub the other languages.`, code: 'LANGUAGE_NOT_VOICED' });
+  return true;
 }
 
 // Job, project ownership and minute reservation are one transaction: a double click or a second teammate gets a 409, never a second charge.
@@ -258,6 +270,7 @@ dubRouter.post('/:id/languages/:code/retake', refuseWhenDraining, dubLimit, asyn
     res.status(400).json({ error: `Nothing changed in ${getLanguageName(languageCode)} since its last render.`, code: 'NOTHING_TO_RETAKE' });
     return;
   }
+  if (await refuseUnvoiced(res, workspaceId, [languageCode])) return;
 
   const { extras, rate } = await chargedExtras(workspaceId, req.uid!);
   const minutes = Math.round(plan.minutes * rate * 10) / 10;

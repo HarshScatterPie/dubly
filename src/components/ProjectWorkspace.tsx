@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import { DubbingProject, LocalizedSegment, Voice, VoiceEngine } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
-import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../lib/voiceEngines';
+import { enginesLabel, listedEngines, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../lib/voiceEngines';
 import { VoiceEngineBadge } from './VoiceEngineBadge';
 import { projectService } from '../services/projectService';
 import { VideoPlayer } from './VideoPlayer';
@@ -110,10 +110,10 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
   const sourceLang = LANGUAGES.find((l) => l.code === project.sourceLanguage) || LANGUAGES.find((l) => l.code === 'en')!;
   const availableVoices = VOICES;
   // Voices the plan can use first; the others are listed after them, locked.
-  const pickerVoices = useMemo(
-    () => [...VOICES].sort((a, b) => Number(!voiceAllowed(a, voiceEngines)) - Number(!voiceAllowed(b, voiceEngines))),
-    [voiceEngines]
-  );
+  const pickerVoices = useMemo(() => {
+    const shownEngines = listedEngines(voiceEngines);
+    return VOICES.filter((v) => shownEngines.includes(v.engine)).sort((a, b) => Number(!voiceAllowed(a, voiceEngines)) - Number(!voiceAllowed(b, voiceEngines)));
+  }, [voiceEngines]);
   const projectLanguages = languages.map((l) => l.code);
   const readyCount = languages.filter((l) => l.videoUrl).length;
 
@@ -721,7 +721,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                   onClick={() => {
                     if (isRedubbing) return;
                     if (locked) {
-                      onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, 'Your plan includes Gemini 3.8 Flash-Lite voices. Upgrade to Enterprise to use this one.', 'info');
+                      onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, `Your plan includes ${enginesLabel(voiceEngines)} voices. Upgrade to Enterprise to use this one.`, 'info');
                       return;
                     }
                     setPendingVoiceId(v.id);

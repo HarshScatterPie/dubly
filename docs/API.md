@@ -59,7 +59,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | POST | `/api/projects/:id/translate` | `{ targetLanguageCodes (≤ 10), style?, adaptExpressions?, regenerate? }` |
 | PATCH | `/api/projects/:id/languages/:code/segments` | `{ localizedSegments }`: edited lines for one language (`translatedText`, `delivery`). The server keeps its own `renderKey`, render flags and slot timings for existing lines and recomputes `qaFlags` |
 | POST | `/api/projects/:id/languages/:code/retake` | Re-renders one language after line edits, charging only the lines whose fingerprint changed since its last render (in 0.1-minute steps, at least 0.1, never more than a full re-dub). Header `Idempotency-Key`. `202 { jobId, changedLines, minutes }`. `400 NOTHING_TO_RETAKE`, `400 RETAKE_UNAVAILABLE` (rendered before line fingerprints existed: re-dub instead), plus the dub errors |
-| POST | `/api/projects/:id/dub` | Voice choices plus `languages?`. Header `Idempotency-Key` (recommended). `202 { status, jobId }`. `409 JOB_ALREADY_RUNNING`, `403 QUOTA_EXCEEDED`, `400 VIDEO_DURATION_UNKNOWN`. The dub may wait in the queue (the project message says so) |
+| POST | `/api/projects/:id/dub` | Voice choices plus `languages?`. Header `Idempotency-Key` (recommended). `202 { status, jobId }`. `409 JOB_ALREADY_RUNNING`, `403 QUOTA_EXCEEDED`, `400 VIDEO_DURATION_UNKNOWN`, `400 LANGUAGE_NOT_VOICED` (a language no voice the server offers speaks, such as Santali without Gemini 3.8 voices). The dub may wait in the queue (the project message says so) |
 | POST | `/api/projects/:id/export-video` | `{ languageCode?, captions? }` → `{ url }`. Captioned renders are made once and cached |
 
 ### Jobs
@@ -79,4 +79,4 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 ### Text-to-voice
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/api/tts/generate` | `{ text, voiceId, languageCode?, speed?, pitch?, emotion?, delivery? }` → a WAV data URL. `emotion` and `delivery` direct the voice as a dub would. A voice on an engine the workspace's plan lacks is voiced as the same persona on one it has. No length limit beyond the 2 MB body |
+| POST | `/api/tts/generate` | `{ text, voiceId, languageCode?, speed?, pitch?, emotion?, delivery? }` → a WAV data URL. `emotion` and `delivery` direct the voice as a dub would. A voice on an engine the workspace's plan lacks is voiced as the same persona on one it has. `400 LANGUAGE_NOT_VOICED` for a language no available voice speaks. No length limit beyond the 2 MB body |

@@ -6,8 +6,9 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
 import { CheckCircle2, Clapperboard, Clock, ExternalLink, Languages, Mic, Monitor, Plus, RefreshCw, Share2 } from 'lucide-react';
-import { DubbingProject } from '../../types';
+import { DubbingProject, VoiceEngine } from '../../types';
 import { LANGUAGES, VOICES } from '../../data/mockData';
+import { languageVoiced, VOICE_ENGINES } from '../../lib/voiceEngines';
 import { VideoPlayer } from '../VideoPlayer';
 import { ShareDialog } from '../ShareDialog';
 import { loadDevicePrefs } from '../../lib/devicePrefs';
@@ -22,6 +23,8 @@ interface StepExportProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   /** Whether downloads start with captions burned in (the user's saved default). */
   defaultBurnCaptions?: boolean;
+  /** The voice engines the workspace's plan includes; languages none of them speaks are not offered. */
+  voiceEngines?: VoiceEngine[];
 }
 
 export const StepExport: React.FC<StepExportProps> = ({
@@ -31,6 +34,7 @@ export const StepExport: React.FC<StepExportProps> = ({
   onOpenWorkspace,
   onShowToast,
   defaultBurnCaptions = false,
+  voiceEngines = VOICE_ENGINES,
 }) => {
   const rootRef = useRef<HTMLDivElement>(null);
   const [activeTrack, setActiveTrack] = useState<'dubbed' | 'original'>('dubbed');
@@ -49,7 +53,7 @@ export const StepExport: React.FC<StepExportProps> = ({
   const voiceName = VOICES.find((v) => v.id === voiceId)?.name.replace(/\s*\(.*\)$/, '') || 'AI voice';
   const readyCount = languages.filter((l) => l.videoUrl).length;
   const lipSynced = languages.some((l) => l.report?.lipSync === 'applied');
-  const moreLanguages = LANGUAGES.filter((l) => !languages.some((d) => d.code === l.code) && l.code !== project.sourceLanguage);
+  const moreLanguages = LANGUAGES.filter((l) => !languages.some((d) => d.code === l.code) && l.code !== project.sourceLanguage && languageVoiced(l.code, voiceEngines));
 
   useEffect(() => {
     // Only on screen and only if the user wants it: the studio also finishes, or is restored, while hidden behind another screen.

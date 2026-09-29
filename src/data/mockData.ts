@@ -259,7 +259,7 @@ function initialsAvatar(name: string, index: number): string {
   return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
 }
 
-const ID_PREFIX: Record<Exclude<VoiceEngine, 'chirp'>, string> = { 'gemini-flash-lite': 'gemini-lite', 'gemini-flash': 'gemini-flash' };
+const ID_PREFIX: Record<Exclude<VoiceEngine, 'chirp'>, string> = { 'gemini-flash-lite': 'gemini-lite', 'gemini-flash': 'gemini-flash', 'gemini-2.5-flash': 'gemini-25' };
 
 function voiceOf(persona: Persona, index: number, engine: VoiceEngine): Voice {
   const slug = persona.voice.toLowerCase();
@@ -283,7 +283,7 @@ function voiceOf(persona: Persona, index: number, engine: VoiceEngine): Voice {
   };
 }
 
-// Every persona on every engine, cheapest engine first: VOICES[0] is the fallback voice, and it must be one every plan can use.
+// Every persona on every engine. VOICES[0] is the fallback voice; the server voices it as the same persona on an engine the plan has.
 // Chirp3-HD voices keep their original ids (e.g. "google-hi-charon") because saved projects reference them.
 export const VOICES: Voice[] = VOICE_ENGINES.flatMap((engine) => PERSONAS.map((persona, index) => voiceOf(persona, index, engine)));
 

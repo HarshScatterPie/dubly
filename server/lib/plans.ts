@@ -1,7 +1,8 @@
-import type { PaidExtra, Plan, PlanId } from '../../src/types';
+import type { PaidExtra, Plan, PlanId, VoiceEngine } from '../../src/types';
 import { PAID_EXTRAS } from '../../src/lib/planMath';
-import { isVoiceEngine, VOICE_ENGINES } from '../../src/lib/voiceEngines';
+import { CLOUD_ENGINES, GEMINI_API_ENGINES, isVoiceEngine } from '../../src/lib/voiceEngines';
 import { db } from './firebaseAdmin';
+import { env } from './env';
 
 // Written to Firestore the first time each plan is read, then owned there: edit dublyPlans/{id} to change a limit, a rate, invites or voice engines.
 export const DEFAULT_PLANS: Record<PlanId, Plan> = {
@@ -22,7 +23,7 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     paidExtras: true,
     extraRates: { aiReview: 0.25, premiumVoices: 0.5, paceRetakes: 0.25 },
     teamInvites: true,
-    voiceEngines: [...VOICE_ENGINES],
+    voiceEngines: [...GEMINI_API_ENGINES],
   },
 };
 
@@ -66,16 +67,35 @@ export function toPlan(id: PlanId, data: Record<string, unknown> | undefined): P
   };
 }
 
+// The engines this server voices with, whatever a plan lists: TTS_ENGINE picks Google Cloud's (the default), Chirp 3 HD alone, or Gemini 3.8.
+export function offeredVoiceEngines(): VoiceEngine[] {
+  if (env.ttsEngine === 'chirp') return ['chirp'];
+  return [...(env.ttsEngine === 'gemini' ? GEMINI_API_ENGINES : CLOUD_ENGINES)];
+}
+
+// A plan engine this server does not offer becomes the closest one it does: a Gemini engine stays Gemini where there is one, anything else becomes Chirp 3 HD.
+function offeredEngineFor(engine: VoiceEngine, offered: VoiceEngine[]): VoiceEngine {
+  if (offered.includes(engine)) return engine;
+  const gemini = engine !== 'chirp' ? offered.find((e) => e !== 'chirp') : undefined;
+  return gemini ?? (offered.includes('chirp') ? 'chirp' : offered[0]);
+}
+
+// The plan as it applies on this server, e.g. Enterprise's Gemini 3.8 voices becoming Gemini 2.5 Flash while only Cloud TTS is offered.
+export function withOfferedEngines(plan: Plan): Plan {
+  const offered = offeredVoiceEngines();
+  return { ...plan, voiceEngines: [...new Set(plan.voiceEngines.map((engine) => offeredEngineFor(engine, offered)))] };
+}
+
 export async function getPlan(id: PlanId): Promise<Plan> {
   const hit = planCache.get(id);
-  if (hit && Date.now() - hit.at < CACHE_MS) return hit.plan;
+  if (hit && Date.now() - hit.at < CACHE_MS) return withOfferedEngines(hit.plan);
   const ref = plansCol().doc(id);
   const snap = await ref.get();
   // create() never overwrites, so a copy an operator (or another request) wrote first always stands.
   if (!snap.exists) await ref.create(DEFAULT_PLANS[id]).catch(() => undefined);
   const plan = toPlan(id, snap.exists ? snap.data() : undefined);
   planCache.set(id, { plan, at: Date.now() });
-  return plan;
+  return withOfferedEngines(plan);
 }
 
 export async function workspacePlanId(workspaceId: string): Promise<PlanId> {

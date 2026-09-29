@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { FaceScan, SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion, VoiceEngine } from '../../types';
 import { VOICES, LANGUAGES } from '../../data/mockData';
-import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../../lib/voiceEngines';
+import { enginesLabel, hasGeminiVoices, listedEngines, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../../lib/voiceEngines';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { StickyActionBar } from './StickyActionBar';
 import { VoiceEngineBadge } from '../VoiceEngineBadge';
@@ -127,9 +127,10 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
     { id: 'empathetic', label: 'Empathetic', icon: '🤝' },
   ];
 
-  const availableVoices = VOICES;
+  const shownEngines = listedEngines(voiceEngines);
+  const availableVoices = VOICES.filter((voice) => shownEngines.includes(voice.engine));
   const isLocked = (voice: Voice) => !voiceAllowed(voice, voiceEngines);
-  const allLocked = voiceEngines.length < VOICE_ENGINES.length;
+  const allLocked = voiceEngines.length < shownEngines.length;
 
   // Voices the plan can use first, then voices native to the language being set, so the likely pick is at the top.
   const rank = (voice: Voice) => (isLocked(voice) ? 2 : 0) + (voice.languageCode === activeLanguageCode ? 0 : 1);
@@ -141,7 +142,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
 
   const handleSelectVoice = (voice: Voice) => {
     if (isLocked(voice)) {
-      onShowToast?.(`${VOICE_ENGINE_INFO[voice.engine].label} is an Enterprise voice`, 'Your plan includes Gemini 3.8 Flash-Lite voices. Upgrade to Enterprise to use this one.', 'info');
+      onShowToast?.(`${VOICE_ENGINE_INFO[voice.engine].label} is an Enterprise voice`, `Your plan includes ${enginesLabel(voiceEngines)} voices. Upgrade to Enterprise to use this one.`, 'info');
       return;
     }
     onSelectVoice(voice.id);
@@ -190,9 +191,15 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           <p className="text-xs text-slate-400 mt-0.5">
             {allTargetLangs.length > 1
               ? 'Every language gets its own voice — switch language below to set the others'
-              : allLocked
-                ? 'Gemini 3.8 Flash-Lite voices speak every Indian language and dialect. Gemini 3.8 Flash and Chirp 3 HD voices come with Enterprise.'
-                : 'Gemini 3.8 Flash-Lite, Gemini 3.8 Flash and Chirp 3 HD voices, for every Indian language and dialect'}
+              : !hasGeminiVoices(voiceEngines)
+                ? 'Chirp 3 HD voices from Google Cloud. Dialects are read by a related language’s voice, such as Bhojpuri by a Hindi voice.'
+                : shownEngines.includes('gemini-2.5-flash')
+                  ? allLocked
+                    ? 'Gemini 2.5 Flash voices follow emotion and delivery. Chirp 3 HD voices come with Enterprise.'
+                    : 'Gemini 2.5 Flash voices follow emotion and delivery; Chirp 3 HD voices read steadily. Dialects use a related language’s voice.'
+                : allLocked
+                  ? 'Gemini 3.8 Flash-Lite voices speak every Indian language and dialect. Gemini 3.8 Flash and Chirp 3 HD voices come with Enterprise.'
+                  : 'Gemini 3.8 Flash-Lite, Gemini 3.8 Flash and Chirp 3 HD voices, for every Indian language and dialect'}
           </p>
         </div>
 
@@ -271,7 +278,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
                     onChange={(e) => onSelectVoiceForSpeaker?.(label, e.target.value)}
                     className="w-full px-2.5 py-1.5 rounded-lg bg-white border border-[#E2E8F0] text-xs text-[#0F172A] font-medium focus:outline-none focus:border-coral-400"
                   >
-                    {VOICE_ENGINES.map((engine) => {
+                    {shownEngines.map((engine) => {
                       const locked = !voiceEngines.includes(engine);
                       return (
                         <optgroup key={engine} label={`${VOICE_ENGINE_INFO[engine].label}${locked ? ' · Enterprise' : ''}`}>
@@ -312,13 +319,13 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           ))}
         </div>
         <span className="text-[10px] text-[#94A3B8] font-mono whitespace-nowrap">
-          Showing {filteredVoices.length} of {VOICES.length} voices
+          Showing {filteredVoices.length} of {availableVoices.length} voices
         </span>
       </div>
 
       {/* Engine Tabs: which Google model voices the line */}
       <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar pb-1 -mt-5">
-        {(['all', ...VOICE_ENGINES] as const).map((engine) => {
+        {(['all', ...shownEngines] as const).map((engine) => {
           const locked = engine !== 'all' && !voiceEngines.includes(engine);
           return (
             <button

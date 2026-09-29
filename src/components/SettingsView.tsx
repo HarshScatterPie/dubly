@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import type { NavigationTab, PaidExtra, TranslationStyle, UserPreferences, UserUsageStats, Voice, VoiceEmotion } from '../types';
 import { allowanceRate, effectiveExtras } from '../lib/planMath';
-import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../lib/voiceEngines';
+import { enginesLabel, hasGeminiVoices, languageVoiced, listedEngines, premiumVoicesOffered, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../lib/voiceEngines';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { DEFAULT_PREFERENCES } from '../data/preferences';
 import { useAuth } from '../context/AuthContext';
@@ -134,16 +134,23 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   const { user, profile, signOut } = useAuth();
   const [draft, setDraft] = useState<UserPreferences>(preferences ?? DEFAULT_PREFERENCES);
   const extrasAllowed = usageLoaded && usage.paidExtrasAllowed;
+  // Until the plan is known nothing is shown locked; the server applies the plan either way.
+  const voiceEngines = usageLoaded ? usage.voiceEngines : VOICE_ENGINES;
+  const shownEngines = listedEngines(voiceEngines);
+  // Delivery direction and re-takes only change Gemini voices; premium voices only Gemini 3.8 ones.
+  const geminiVoices = hasGeminiVoices(voiceEngines);
+  const premiumOffered = premiumVoicesOffered(voiceEngines);
+  // A saved default on an engine the plan lacks is shown as the persona a dub will really use.
+  const savedDefaultVoice = VOICES.find((v) => v.id === draft.defaultVoiceId);
+  const defaultVoice = savedDefaultVoice && voiceForPlan(savedDefaultVoice, voiceEngines, VOICES);
   // The same rate the server charges a dub at, from the plan's rates and what is switched on right now.
-  const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(extrasAllowed, draft));
+  const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(extrasAllowed, draft, voiceEngines));
   const extraHint = (extra: PaidExtra, what: string) => {
     const rate = usage.extraRates[extra] ?? 0;
     if (!extrasAllowed || rate <= 0) return what;
     return `${what} Uses your monthly limit faster: each dubbed minute counts as ${Math.round((1 + rate) * 100) / 100} min while it is on.`;
   };
   const [saving, setSaving] = useState(false);
-  // Until the plan is known nothing is shown locked; the server applies the plan either way.
-  const voiceEngines = usageLoaded ? usage.voiceEngines : VOICE_ENGINES;
   const [engines, setEngines] = useState<{ lipSyncAvailable: boolean; separationAvailable: boolean } | null>(null);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [device, setDevice] = useState<DevicePrefs>(loadDevicePrefs);
@@ -370,6 +377,8 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
               <div className="flex flex-wrap gap-1.5">
                 {LANGUAGES.map((lang) => {
                   const selected = draft.defaultTargetLanguages.includes(lang.code);
+                  // A language no voice can speak right now is not offered, but one already ticked stays so it can be unticked.
+                  if (!selected && !languageVoiced(lang.code, voiceEngines)) return null;
                   return (
                     <button
                       key={lang.code}
@@ -414,12 +423,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
               stacked
               title="Default voice"
               hint={`Used for every language until you pick another in the studio.${
-                voiceEngines.length < VOICE_ENGINES.length ? ` Your ${usage.activePlan} plan uses ${voiceEngines.map((e) => VOICE_ENGINE_INFO[e].label).join(' and ')} voices; the others need Enterprise.` : ''
+                voiceEngines.length < shownEngines.length ? ` Your ${usage.activePlan} plan uses ${enginesLabel(voiceEngines)} voices; the others need Enterprise.` : ''
               }`}
             >
               <div className="flex gap-2">
-                <select value={draft.defaultVoiceId} onChange={(e) => update({ defaultVoiceId: e.target.value })} className={inputClass} aria-label="Default voice">
-                  {VOICE_ENGINES.map((engine) => {
+                <select value={defaultVoice?.id ?? draft.defaultVoiceId} onChange={(e) => update({ defaultVoiceId: e.target.value })} className={inputClass} aria-label="Default voice">
+                  {shownEngines.map((engine) => {
                     const locked = !voiceEngines.includes(engine);
                     return (
                       <optgroup key={engine} label={`${VOICE_ENGINE_INFO[engine].label}${locked ? ' · Enterprise' : ''}`}>
@@ -433,7 +442,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
                   })}
                 </select>
                 {(() => {
-                  const voice = VOICES.find((v) => v.id === draft.defaultVoiceId);
+                  const voice = defaultVoice;
                   if (!voice || !voiceAllowed(voice, voiceEngines)) return null;
                   const playing = previewingVoiceId === voice.id;
                   return (
@@ -483,8 +492,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
                 <span className="text-xs font-bold text-[#0F172A] w-12 text-right">{draft.voiceSpeed.toFixed(2)}×</span>
               </div>
             </Row>
-            <Row title="Expressive voices" hint="Voices follow the emotion and each line's delivery. Turn off for steadier, more uniform narration.">
-              <Toggle label="Expressive voices" checked={draft.expressiveVoices} onChange={(v) => update({ expressiveVoices: v })} />
+            <Row
+              title="Expressive voices"
+              hint={
+                geminiVoices
+                  ? "Voices follow the emotion and each line's delivery. Turn off for steadier, more uniform narration."
+                  : 'Only Gemini voices follow emotion and delivery. The Chirp 3 HD voices in use now read every line in the same steady way.'
+              }
+            >
+              <Toggle label="Expressive voices" checked={geminiVoices && draft.expressiveVoices} disabled={!geminiVoices} onChange={(v) => update({ expressiveVoices: v })} />
             </Row>
           </Section>
 
@@ -538,30 +554,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
             <Row
               title="Premium voices"
               hint={
-                extrasAllowed && !draft.expressiveVoices
-                  ? 'Needs Expressive voices, under Voice.'
-                  : extraHint('premiumVoices', 'Gemini voices try Gemini 3.1 Flash TTS first: the richest delivery, and it performs sighs as well as laughs.')
+                extrasAllowed && !premiumOffered
+                  ? 'Only for Gemini 3.8 voices, which are not in use right now.'
+                  : extrasAllowed && !draft.expressiveVoices
+                    ? 'Needs Expressive voices, under Voice.'
+                    : extraHint('premiumVoices', 'Gemini voices try Gemini 3.1 Flash TTS first: the richest delivery, and it performs sighs as well as laughs.')
               }
             >
               <Toggle
                 label="Premium voices"
-                checked={extrasAllowed && draft.premiumVoices}
-                disabled={!extrasAllowed || !draft.expressiveVoices}
+                checked={extrasAllowed && premiumOffered && draft.premiumVoices}
+                disabled={!extrasAllowed || !premiumOffered || !draft.expressiveVoices}
                 onChange={(v) => update({ premiumVoices: v })}
               />
             </Row>
             <Row
               title="Natural-timing re-takes"
               hint={
-                extrasAllowed && !draft.expressiveVoices
-                  ? 'Needs Expressive voices, under Voice.'
-                  : extraHint('paceRetakes', 'When a line does not fit its gap, the voice records it again faster or slower instead of the audio being stretched.')
+                extrasAllowed && !geminiVoices
+                  ? 'Only for Gemini voices, which are not available right now.'
+                  : extrasAllowed && !draft.expressiveVoices
+                    ? 'Needs Expressive voices, under Voice.'
+                    : extraHint('paceRetakes', 'When a line does not fit its gap, the voice records it again faster or slower instead of the audio being stretched.')
               }
             >
               <Toggle
                 label="Natural-timing re-takes"
-                checked={extrasAllowed && draft.paceRetakes}
-                disabled={!extrasAllowed || !draft.expressiveVoices}
+                checked={extrasAllowed && geminiVoices && draft.paceRetakes}
+                disabled={!extrasAllowed || !geminiVoices || !draft.expressiveVoices}
                 onChange={(v) => update({ paceRetakes: v })}
               />
             </Row>

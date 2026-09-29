@@ -19,7 +19,7 @@ import {
 } from 'lucide-react';
 import { Language, Voice, VoiceEmotion, VoiceEngine } from '../types';
 import { LANGUAGES, VOICES, SAMPLE_VIDEOS } from '../data/mockData';
-import { VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../lib/voiceEngines';
+import { enginesLabel, languageVoiced, listedEngines, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../lib/voiceEngines';
 import { VoiceEngineBadge } from './VoiceEngineBadge';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { textToSpeechService } from '../services/textToSpeechService';
@@ -45,10 +45,10 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
 
   // Voices the plan can use first; the others follow, locked.
   const isLocked = (voice: Voice) => !voiceAllowed(voice, voiceEngines);
-  const availableVoices = React.useMemo(
-    () => [...VOICES].sort((a, b) => Number(!voiceAllowed(a, voiceEngines)) - Number(!voiceAllowed(b, voiceEngines))),
-    [voiceEngines]
-  );
+  const availableVoices = React.useMemo(() => {
+    const shownEngines = listedEngines(voiceEngines);
+    return VOICES.filter((v) => shownEngines.includes(v.engine)).sort((a, b) => Number(!voiceAllowed(a, voiceEngines)) - Number(!voiceAllowed(b, voiceEngines)));
+  }, [voiceEngines]);
   // A pick on an engine the plan lacks (a preset, say) becomes the same persona on one it has.
   const choosableVoiceId = (id: string) => {
     const voice = VOICES.find((v) => v.id === id);
@@ -418,7 +418,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                 }}
                 className="w-full p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-[#0F172A] text-xs font-semibold focus:outline-none focus:border-[#F05637]"
               >
-                {LANGUAGES.map((lang) => (
+                {LANGUAGES.filter((lang) => languageVoiced(lang.code, voiceEngines)).map((lang) => (
                   <option key={lang.code} value={lang.code}>
                     {lang.flag} {lang.name} ({lang.nativeName})
                   </option>
@@ -447,7 +447,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                       key={v.id}
                       onClick={() => {
                         if (locked) {
-                          onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, 'Your plan includes Gemini 3.8 Flash-Lite voices. Upgrade to Enterprise to use this one.', 'info');
+                          onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, `Your plan includes ${enginesLabel(voiceEngines)} voices. Upgrade to Enterprise to use this one.`, 'info');
                           return;
                         }
                         setSelectedVoiceId(v.id);

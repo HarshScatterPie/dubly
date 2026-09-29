@@ -9,10 +9,12 @@ import { silenceWav } from './audioUtils';
 import { geminiSpeechSynthesize } from './geminiSpeech';
 
 /**
- * Speech synthesis for the three voice engines a built-in voice can have:
+ * Speech synthesis for the voice engines a built-in voice can have:
  *
  * - Gemini 3.8 Flash-Lite and Gemini 3.8 Flash, through the Gemini API (geminiSpeech.ts),
  *   which speak every Indian language and dialect and follow emotion and delivery.
+ * - Gemini 2.5 Flash, through Google Cloud Text-to-Speech on the service account, which follows
+ *   emotion and delivery in the languages Cloud TTS accepts for Gemini voices.
  * - Chirp 3 HD, through Google Cloud Text-to-Speech (the GA service), a steady voice for the
  *   languages it covers. Cloud TTS also serves the premium Gemini 3.1 model.
  *
@@ -116,6 +118,11 @@ async function resolveVoice(
   return resolved;
 }
 
+// Whether Cloud TTS has any voice at all for the language; with none, only a Gemini voice can speak it.
+async function hasAnyVoice(bcp47: string): Promise<boolean> {
+  return (await voicesForLanguage(bcp47)).voices.length > 0;
+}
+
 export type TtsEngine = 'gemini' | 'chirp';
 
 /** How one line may be voiced: the Gemini models to try, best first, and where Chirp3-HD comes in. */
@@ -141,9 +148,11 @@ export function ttsRouteFor(engine: VoiceEngine, opts: { premium?: boolean; engi
   const has = (e: VoiceEngine) => opts.engines.includes(e);
   const lite = has('gemini-flash-lite') ? [env.geminiTtsLiteModel] : [];
   const flash = has('gemini-flash') ? [env.geminiTtsFlashModel] : [];
+  const cloud = has('gemini-2.5-flash') ? [env.geminiTtsCloudModel] : [];
   const premium = opts.premium ? [env.geminiTtsPremiumModel] : [];
   const unique = (models: string[]) => [...new Set(models.filter(Boolean))];
-  if (engine === 'chirp') return { gemini: unique([...flash, ...lite]), chirp: 'first' };
+  if (engine === 'chirp') return { gemini: unique([...flash, ...lite, ...cloud]), chirp: 'first' };
+  if (engine === 'gemini-2.5-flash') return { gemini: unique([env.geminiTtsCloudModel]), chirp: 'fallback' };
   if (engine === 'gemini-flash') return { gemini: unique([...premium, env.geminiTtsFlashModel, ...lite]), chirp: 'fallback' };
   return { gemini: unique([...premium, env.geminiTtsLiteModel]), chirp: 'fallback' };
 }
@@ -168,16 +177,28 @@ export function resetGeminiTtsStateForTests(): void {
   geminiRefusals.clear();
 }
 
-// Gemini voices on Cloud TTS do not accept every locale Chirp3-HD does; verified: bn-IN is refused, bn-BD is served.
-const GEMINI_LOCALES: Record<string, string> = { 'bn-IN': 'bn-BD' };
+// Gemini voices on Cloud TTS do not accept every locale Chirp3-HD does; verified: bn-IN, ur-IN and ar-SA are refused, bn-BD, ur-PK and ar-EG are served.
+const GEMINI_LOCALES: Record<string, string> = { 'bn-IN': 'bn-BD', 'ur-IN': 'ur-PK', 'ar-SA': 'ar-EG' };
+
+// Locales Gemini voices on Cloud TTS refuse outright (gemini-2.5-flash-tts, checked 2026-09-29); their lines are read by the related language's Gemini voice.
+const CLOUD_GEMINI_REFUSED = new Set([
+  'as-IN', 'ks-IN', 'mni-IN', 'sat-IN', 'sa-IN', 'doi-IN', 'brx-IN', 'bho-IN', 'bgc-IN',
+  'raj-IN', 'awa-IN', 'mag-IN', 'hne-IN', 'bns-IN', 'gbm-IN', 'kfy-IN', 'tcy-IN', 'lus-IN',
+]);
 
 export function geminiLocaleFor(bcp47: string): string {
   return GEMINI_LOCALES[bcp47] ?? bcp47;
 }
 
-// Only the premium model is served by Cloud TTS; the 3.8 models are on the Gemini API.
+/** The locale a Gemini voice on Cloud TTS reads a line under: its own, else its related language's (Hindi for Bhojpuri), else none. */
+export function cloudGeminiLocale(bcp47: string, relatedBcp47?: string): string | null {
+  if (!CLOUD_GEMINI_REFUSED.has(bcp47)) return geminiLocaleFor(bcp47);
+  return relatedBcp47 && !CLOUD_GEMINI_REFUSED.has(relatedBcp47) ? geminiLocaleFor(relatedBcp47) : null;
+}
+
+// The Gemini 2.5 Flash and premium models are served by Cloud TTS; the 3.8 models are on the Gemini API.
 function servedByCloudTts(model: string): boolean {
-  return model === env.geminiTtsPremiumModel;
+  return model === env.geminiTtsPremiumModel || model === env.geminiTtsCloudModel;
 }
 
 function fitsCloudGemini(text: string, style: string): boolean {
@@ -226,11 +247,11 @@ function toBuffer(audio: Uint8Array | string | null | undefined, voiceName: stri
   return Buffer.isBuffer(audio) ? audio : Buffer.from(audio as Uint8Array);
 }
 
-// The premium model on Cloud TTS; the persona is passed as is and the model does the language.
-async function cloudGeminiSynthesize(model: string, text: string, bcp47: string, voiceName: string, style: string): Promise<Buffer> {
+// A Gemini model on Cloud TTS, under a locale it accepts (see cloudGeminiLocale); the persona is passed as is.
+async function cloudGeminiSynthesize(model: string, text: string, locale: string, voiceName: string, style: string): Promise<Buffer> {
   const [response] = await getClient().synthesizeSpeech({
     input: style ? { text, prompt: style } : { text },
-    voice: { languageCode: geminiLocaleFor(bcp47), name: voiceName, modelName: model },
+    voice: { languageCode: locale, name: voiceName, modelName: model },
     audioConfig: { audioEncoding: 'LINEAR16', sampleRateHertz: 24000 },
   });
   return toBuffer(response.audioContent, `${model}/${voiceName}`);
@@ -277,17 +298,22 @@ export async function googleSynthesizeSpeech(
   // A Chirp 3 HD voice speaks its own languages itself; Gemini stands in for the rest, where it sounds native.
   if (route.gemini.length === 0 || (route.chirp === 'first' && (await hasChirpVoice(bcp47)))) return chirp();
 
-  for (const model of usableGeminiTtsModels(route, bcp47)) {
+  // With no Cloud TTS voice to fall back on (Odia), a paused model is still tried, and running out of quota goes back to the caller, whose retry waits for it to refill.
+  const onlyGemini = !(await hasAnyVoice(bcp47)) && !(chirpFallbackBcp47 && (await hasAnyVoice(chirpFallbackBcp47)));
+  let quotaError: unknown = null;
+  for (const model of onlyGemini ? route.gemini : usableGeminiTtsModels(route, bcp47)) {
     const cloud = servedByCloudTts(model);
-    if (cloud && !fitsCloudGemini(text, style)) continue;
+    const locale = cloud ? cloudGeminiLocale(bcp47, chirpFallbackBcp47) : bcp47;
+    if (!locale || (cloud && !fitsCloudGemini(text, style))) continue;
     try {
       const audio = cloud
-        ? await cloudGeminiSynthesize(model, text, bcp47, preferredVoiceName, style)
+        ? await cloudGeminiSynthesize(model, text, locale, preferredVoiceName, style)
         : await geminiSpeechSynthesize(model, text, preferredVoiceName, style);
       geminiRefusals.delete(`${model}|${bcp47}`);
       return { audio, engine: 'gemini', model };
     } catch (err) {
       if (isQuotaError(err)) {
+        quotaError = err;
         geminiPausedUntil.set(model, Date.now() + GEMINI_QUOTA_PAUSE_MS);
         log.warn('tts_engine_fallback', { engine: 'gemini', model, reason: 'quota', pauseMs: GEMINI_QUOTA_PAUSE_MS }, `[tts] ${model} out of quota; skipping it for ${GEMINI_QUOTA_PAUSE_MS / 1000}s`);
       } else if (isRefusal(err)) {
@@ -301,5 +327,6 @@ export async function googleSynthesizeSpeech(
       }
     }
   }
+  if (onlyGemini && quotaError) throw quotaError;
   return chirp();
 }

@@ -1,14 +1,14 @@
-import type { GlossaryEntry, SpeakerProfile, TranscriptSegment, Voice } from '../../src/types';
+import type { GlossaryEntry, SpeakerProfile, TranscriptSegment, Voice, VoiceEngine } from '../../src/types';
 import { isPerformanceTag, stripPerformanceTags } from './performance';
-import { getLanguageBcp47, getLanguageName } from './languageMeta';
+import { getLanguageBcp47, getLanguageName, toolLanguageCode } from './languageMeta';
 import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult, type TranscriptWindow } from './vertexClient';
 import type { TranslatableSegment, TranslationContext } from './translatePrompt';
-import { geminiTtsModels, geminiTtsUsable, googleSynthesizeSpeech, isGoogleTtsConfigured, type TtsEngine } from './googleTtsClient';
-import { env } from './env';
+import { googleSynthesizeSpeech, isGoogleTtsConfigured, ttsRouteFor, usableGeminiTtsModels, type TtsEngine } from './googleTtsClient';
+import { isGeminiSpeechConfigured } from './geminiSpeech';
 import { readTtsCache, ttsCacheKey, writeTtsCache } from './ttsCache';
-import { getWavDurationSeconds, silenceWav, trimSilence } from './audioUtils';
-import { canCloneInLanguage, isVoiceCloneAvailable, synthesizeClonedSpeech } from './voiceClone';
-import { canSpaceCloneLanguage, isSpaceCloneConfigured, synthesizeViaSpace } from './spaceClone';
+import { trimSilence } from './audioUtils';
+import { voiceForPlan } from '../../src/lib/voiceEngines';
+import { VOICES } from '../../src/data/mockData';
 import { log } from './log';
 
 // Every provider here is Google's own (Vertex AI / Gemini for STT + translation, Google
@@ -103,29 +103,6 @@ export async function routeTranslateSegments(
   return { provider: 'vertex', translations };
 }
 
-const CLONE_MAX_ATTEMPTS = 3;
-// Rough speaking-rate bounds in seconds per character, loose enough to cover every supported script.
-const MIN_SECONDS_PER_CHAR = 0.025;
-const MAX_SECONDS_PER_CHAR = 0.2;
-
-function expectedSpeechRange(text: string): [number, number] {
-  const chars = text.replace(/\s+/g, '').length;
-  return [chars * MIN_SECONDS_PER_CHAR, chars * MAX_SECONDS_PER_CHAR + 1];
-}
-
-function isPlausibleSpeechLength(audio: Buffer, text: string): boolean {
-  const duration = getWavDurationSeconds(audio);
-  if (duration <= 0) return true;
-  const [min, max] = expectedSpeechRange(text);
-  return duration >= min && duration <= max;
-}
-
-function lengthError(audio: Buffer, text: string): number {
-  const duration = getWavDurationSeconds(audio);
-  const [min, max] = expectedSpeechRange(text);
-  return duration < min ? min - duration : duration > max ? duration - max : 0;
-}
-
 // Cleans text the voice would otherwise read literally or stumble on: stage directions, stray quotes, missing final punctuation. Performance tags are kept for the voice to act.
 export function normalizeTextForSpeech(raw: string): string {
   let text = raw
@@ -145,127 +122,68 @@ export function normalizeTextForSpeech(raw: string): string {
 
 export async function routeSynthesizeSpeech(
   rawText: string,
-  voice: Voice,
+  requestedVoice: Voice,
   targetLanguageCode: string,
   override: TtsProvider,
   opts: {
-    /**
-     * The user's own recording, required only when `voice` is one of their cloned voices.
-     * Passed in rather than looked up here so this module stays free of storage concerns.
-     */
-    cloneReference?: { audioPath: string; transcript?: string };
-    // Emotion and delivery direction for Gemini-TTS (see speechStyle.ts); cloned voices and Chirp3-HD ignore it.
+    // The engines the workspace's plan includes. A voice on any other engine is voiced as the same persona on an allowed one.
+    engines: readonly VoiceEngine[];
+    // Emotion and delivery direction for Gemini voices (see speechStyle.ts); Chirp3-HD ignores it.
     style?: string;
-    // The user's choice between expressive (Gemini-TTS) and standard (Chirp3-HD) voices.
+    // Off: steady, uniform reads, with no delivery direction and no performed laughs or sighs.
     expressive?: boolean;
     // Above 0, a new performance of the same line (cache bypassed); used for AI-review retakes.
     take?: number;
     // The user turned on premium voices (paid extra); without it a premium take is neither made nor served from cache.
     premium?: boolean;
-  } = {}
-): Promise<{ provider: 'vertex' | 'clone'; engine?: TtsEngine; audio: Buffer; fromCache: boolean }> {
-  const { cloneReference, style = '', expressive = true, take = 0, premium = false } = opts;
-  const spokenText = normalizeTextForSpeech(rawText) || rawText.trim();
-  // Only Gemini-TTS performs tags; with standard voices chosen they are dropped here so they never reach Chirp3-HD.
-  const text = expressive ? spokenText : stripPerformanceTags(spokenText);
-  // A cloned voice is the user's own voice: substituting a stock voice for it would be
-  // silently wrong in a way they would only notice after the render. So this path either
-  // produces their voice or fails loudly, with no provider fallback.
-  if (voice.provider === 'clone') {
-    if (!cloneReference) throw new Error(`No reference recording available for cloned voice ${voice.id}`);
-    // Cloning engines would read a tag aloud, so they get the plain words.
-    const text = stripPerformanceTags(spokenText);
-    // A line that is only a laugh has no words for a cloned voice; a beat of silence keeps its place.
-    if (!/[\p{L}\p{N}]/u.test(text)) return { provider: 'clone', audio: silenceWav(0.3, 24000), fromCache: false };
-
-    // Same model either way; the only question is whose hardware runs it. A configured
-    // Space wins because it has a GPU and this host, in the common case, does not.
-    const viaSpace = isSpaceCloneConfigured() && canSpaceCloneLanguage(targetLanguageCode);
-    const viaLocal = isVoiceCloneAvailable() && canCloneInLanguage(targetLanguageCode);
-    if (!viaSpace && !viaLocal) {
-      throw new Error(
-        isSpaceCloneConfigured() || isVoiceCloneAvailable()
-          ? `No cloning engine available can speak ${targetLanguageCode}.`
-          : 'Voice cloning is not set up. Point HF_SPACE_URL at a cloning Space, or install chatterbox-tts locally.'
-      );
-    }
-
-    const cloneCacheKey = ttsCacheKey(['clone', voice.id, targetLanguageCode, text, ...(take > 0 ? [`take-${take}`] : [])]);
-    const cachedClone = await readTtsCache(cloneCacheKey);
-    if (cachedClone) return { provider: 'clone', audio: trimSilence(cachedClone), fromCache: true };
-
-    const synthesizeOnce = async (): Promise<Buffer> => {
-      if (viaSpace) {
-        try {
-          return await synthesizeViaSpace({
-            text,
-            referenceAudioPath: cloneReference.audioPath,
-            languageCode: targetLanguageCode,
-          });
-        } catch (err) {
-          // A Space can be asleep, queued behind other users, or out of daily quota. Those
-          // are all transient and local synthesis still produces the right voice, just
-          // slowly — so fall back rather than failing the render.
-          if (!viaLocal) throw err;
-          console.warn('[modelRouter] cloning Space unavailable, falling back to local', err);
-        }
-      }
-      return synthesizeClonedSpeech({
-        text,
-        referenceAudioPath: cloneReference.audioPath,
-        referenceText: cloneReference.transcript,
-        languageCode: targetLanguageCode,
-      });
-    };
-
-    // Generative cloning models sometimes babble past the text or cut off early; re-roll those takes.
-    let audio = trimSilence(await synthesizeOnce());
-    for (let attempt = 1; attempt < CLONE_MAX_ATTEMPTS && !isPlausibleSpeechLength(audio, text); attempt++) {
-      console.warn(`[modelRouter] cloned take ${attempt} has implausible length for its text, re-synthesizing`);
-      const retake = trimSilence(await synthesizeOnce());
-      if (isPlausibleSpeechLength(retake, text) || lengthError(retake, text) < lengthError(audio, text)) audio = retake;
-    }
-
-    await writeTtsCache(cloneCacheKey, audio);
-    return { provider: 'clone', audio, fromCache: false };
   }
+): Promise<{ provider: 'vertex'; engine: TtsEngine; model?: string; audio: Buffer; fromCache: boolean }> {
+  const { engines, expressive = true, take = 0, premium = false } = opts;
+  const style = expressive ? opts.style ?? '' : '';
+  const spokenText = normalizeTextForSpeech(rawText) || rawText.trim();
+  // Tags are only performed by expressive Gemini voices; Chirp3-HD strips them itself.
+  const text = expressive ? spokenText : stripPerformanceTags(spokenText);
 
-  if (!voice.providerVoice.vertex || !isGoogleTtsConfigured()) {
-    throw new Error('No text-to-speech provider is configured (set VERTEX_PROJECT_ID and provide gcp-service-account.json).');
+  const voice = voiceForPlan(requestedVoice, engines, VOICES);
+  const route = ttsRouteFor(voice.engine, { premium, engines });
+  if (!isGoogleTtsConfigured() && !isGeminiSpeechConfigured()) {
+    throw new Error('No text-to-speech provider is configured (set GEMINI_API_KEY, or provide gcp-service-account.json).');
   }
 
   // Identical input yields identical audio, and TTS is billed per character — so never
   // pay for the same synthesis twice (repeated lines, re-runs, or a retry after a
   // partway failure). Keyed on everything that can change the output.
-  // Each engine has its own entry: a Gemini take is reused whenever one exists, and a Chirp3-HD one only while Gemini is off.
   const bcp47 = getLanguageBcp47(targetLanguageCode);
+  // For a dialect Chirp3-HD does not speak, its related language's voices read the script (Hindi for Bhojpuri).
+  const baseCode = toolLanguageCode(targetLanguageCode);
+  const chirpFallbackBcp47 = baseCode !== targetLanguageCode ? getLanguageBcp47(baseCode) : undefined;
   // A retake asked for by the AI review must be a fresh performance, not the cached take it just rejected.
   const takeSuffix = take > 0 ? [`take-${take}`] : [];
   const chirpKey = ttsCacheKey([override, voice.id, targetLanguageCode, text, ...takeSuffix]);
   const geminiKeyFor = (model: string) => ttsCacheKey([override, 'gemini', model, voice.id, targetLanguageCode, style, text, ...takeSuffix]);
-  const geminiEnabled = expressive && env.ttsEngine === 'gemini';
-  if (geminiEnabled) {
-    for (const model of geminiTtsModels(premium)) {
-      const cachedGemini = await readTtsCache(geminiKeyFor(model));
-      if (cachedGemini) return { provider: 'vertex', engine: 'gemini', audio: trimSilence(cachedGemini), fromCache: true };
-    }
+  // Looked up in the order the route would voice the line: a Chirp 3 HD voice's own take first, a Gemini voice's models best first.
+  if (route.chirp === 'first') {
+    const cachedChirp = await readTtsCache(chirpKey);
+    if (cachedChirp) return { provider: 'vertex', engine: 'chirp', audio: trimSilence(cachedChirp), fromCache: true };
   }
-  if (!geminiEnabled || !geminiTtsUsable(bcp47, premium)) {
+  for (const model of route.gemini) {
+    const cachedGemini = await readTtsCache(geminiKeyFor(model));
+    if (cachedGemini) return { provider: 'vertex', engine: 'gemini', model, audio: trimSilence(cachedGemini), fromCache: true };
+  }
+  if (route.chirp === 'fallback' && usableGeminiTtsModels(route, bcp47).length === 0) {
     const cachedChirp = await readTtsCache(chirpKey);
     if (cachedChirp) return { provider: 'vertex', engine: 'chirp', audio: trimSilence(cachedChirp), fromCache: true };
   }
 
   for (let retry = 0; ; retry++) {
     try {
-      // Gemini-TTS through the GA Cloud TTS API (not the per-minute-capped preview model), with Chirp3-HD as its fallback.
-      const result = await googleSynthesizeSpeech(text, bcp47, voice.providerVoice.vertex, voice.gender, style, expressive, premium);
+      const result = await googleSynthesizeSpeech(text, bcp47, voice.providerVoice.vertex, voice.gender, style, route, chirpFallbackBcp47);
       const audio = trimSilence(result.audio);
-      await writeTtsCache(result.engine === 'gemini' && result.model && geminiEnabled ? geminiKeyFor(result.model) : chirpKey, audio);
-      return { provider: 'vertex', engine: result.engine, audio, fromCache: false };
+      await writeTtsCache(result.engine === 'gemini' && result.model ? geminiKeyFor(result.model) : chirpKey, audio);
+      return { provider: 'vertex', engine: result.engine, model: result.model, audio, fromCache: false };
     } catch (err) {
       // A dub synthesizes one clip per segment back-to-back, which is exactly the shape
-      // that trips per-minute quotas, and there's no second provider to fall through to
-      // any more. Wait transient failures out rather than failing the whole render.
+      // that trips per-minute quotas. Wait transient failures out rather than failing the whole render.
       if (isTransientTtsError(err) && retry < TTS_RETRY_BACKOFF_MS.length) {
         const waitMs = TTS_RETRY_BACKOFF_MS[retry];
         log.warn('provider_retry', { provider: 'google-tts', operation: 'synthesize', attempt: retry + 1, waitMs }, `[modelRouter] TTS failed (attempt ${retry + 1}/${TTS_RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms: ${(err as Error)?.message}`);

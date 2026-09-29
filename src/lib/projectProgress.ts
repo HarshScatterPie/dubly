@@ -69,7 +69,7 @@ export function projectProgress(p: DubbingProject): ProjectProgress {
     ...copy[stage],
     sourceLanguageName: analyzed ? languageName(p.sourceLanguage) : null,
     targetLanguageNames: translated.map(languageName),
-    voiceName: dubStarted ? voice?.name || (p.selectedVoiceId?.startsWith('cloned:') ? 'My voice' : 'Unknown voice') : null,
+    voiceName: dubStarted ? voice?.name || 'Unknown voice' : null,
   };
 }
 

@@ -1,11 +1,11 @@
 # Dubly
 
-AI video dubbing studio by ScatterPie. Upload a video (up to 60 minutes). Dubly transcribes it, translates it into up to 10 languages, voices every line with neural TTS (or a cloned voice), and renders the dubbed video. Teams share projects and a monthly minute allowance through workspaces.
+AI video dubbing studio by ScatterPie. Upload a video (up to 60 minutes). Dubly transcribes it, translates it into up to 10 of 45 languages (every major Indian language and dialect among them), voices every line with Google's Gemini 3.8 and Chirp 3 HD voices, and renders the dubbed video. Teams share projects and a monthly minute allowance through workspaces.
 
 - **Frontend:** React 19 + Vite + Tailwind, in `src/`
 - **Backend:** Express 4 on Node 24 (run with `tsx`), in `server/`. The same process also serves the built frontend.
 - **Data:** Firebase Auth, Firestore and Cloud Storage, in the Firebase project shared with ScatterStudio
-- **AI:** Vertex AI Gemini (speech-to-text, translation) and Google Cloud TTS. Voice cloning is optional, via a Hugging Face Space.
+- **AI:** Vertex AI Gemini (speech-to-text, translation), Gemini 3.8 Flash-Lite and Flash TTS (Gemini API), and Google Cloud TTS (Chirp 3 HD).
 - **Media:** ffmpeg (the OS package in Docker, the `ffmpeg-static` npm build locally)
 
 ## Local development

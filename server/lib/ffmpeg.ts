@@ -239,6 +239,9 @@ export function buildAtempoChain(factor: number): string {
 // ISO 639-2 codes for the audio track's language tag, so players list the dub by name.
 const ISO_639_2: Record<string, string> = {
   hi: 'hin', hinglish: 'hin', ta: 'tam', te: 'tel', bn: 'ben', mr: 'mar', gu: 'guj', kn: 'kan', ml: 'mal', pa: 'pan',
+  or: 'ori', ur: 'urd', as: 'asm', mai: 'mai', ne: 'nep', kok: 'kok', sd: 'snd', ks: 'kas', mni: 'mni', sat: 'sat', sa: 'san',
+  doi: 'doi', brx: 'brx', bho: 'bho', bgc: 'bgc', raj: 'raj', awa: 'awa', mag: 'mag', hne: 'hne', bns: 'bns', gbm: 'gbm', kfy: 'kfy',
+  tcy: 'tcy', lus: 'lus', en_in: 'eng',
   en: 'eng', es: 'spa', fr: 'fra', de: 'deu', pt: 'por', it: 'ita', ja: 'jpn', ko: 'kor', ar: 'ara', id: 'ind', zh: 'zho', ru: 'rus',
 };
 

@@ -46,7 +46,7 @@ export const StepExport: React.FC<StepExportProps> = ({
 
   const sourceLang = LANGUAGES.find((l) => l.code === project.sourceLanguage);
   const voiceId = (active && project.languageVoiceMap?.[active.code]) || project.selectedVoiceId;
-  const voiceName = VOICES.find((v) => v.id === voiceId)?.name.replace(/\s*\(.*\)$/, '') || (voiceId.startsWith('cloned:') ? 'Your cloned voice' : 'AI voice');
+  const voiceName = VOICES.find((v) => v.id === voiceId)?.name.replace(/\s*\(.*\)$/, '') || 'AI voice';
   const readyCount = languages.filter((l) => l.videoUrl).length;
   const lipSynced = languages.some((l) => l.report?.lipSync === 'applied');
   const moreLanguages = LANGUAGES.filter((l) => !languages.some((d) => d.code === l.code) && l.code !== project.sourceLanguage);

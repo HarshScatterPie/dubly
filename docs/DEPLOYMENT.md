@@ -47,7 +47,7 @@ docker build -t dubly:<git-sha> \
   --build-arg VITE_FIREBASE_MESSAGING_SENDER_ID=… --build-arg VITE_FIREBASE_APP_ID=… .
 ```
 - **Reproducibility:** `npm ci` from `package-lock.json`, and the base image is `node:24-trixie-slim`, which includes Debian's ffmpeg. For byte-for-byte rebuilds, pin the base image by digest (`--build-arg NODE_IMAGE=node:24-trixie-slim@sha256:…`), and tag images by git SHA.
-- **Not in the image:** the optional Python engines (CTC word timing, lip-sync, background separation, local voice cloning). They need a torch virtualenv, so without it those features report as unavailable and the app falls back as designed. Voice cloning can still run through `HF_SPACE_URL`.
+- **Not in the image:** the optional Python engines (CTC word timing, lip-sync, background separation). They need a torch virtualenv, so without it those features report as unavailable and the app falls back as designed.
 - **CI** (`.github/workflows/ci.yml`) builds the image on every push and PR, but **doesn't publish or deploy it**. Promotion to production is manual (below).
 
 ## Run
@@ -62,7 +62,7 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
   dubly:<git-sha>
 ```
 - **Credentials:** prefer `CREDENTIALS_MODE=adc` with the VM or Cloud Run service account (permissions are listed in SECURITY.md). If key files are unavoidable, mount them read-only: `-v /secure/dubly-credentials:/app/server/credentials:ro`. Never bake them into the image.
-- **Secret settings** such as `HF_TOKEN` come from the platform's secret manager as environment variables, or from a mounted env file with `DUBLY_ENV_FILE`.
+- **Secret settings** such as `GEMINI_API_KEY` and `SMTP_PASS` come from the platform's secret manager as environment variables, or from a mounted env file with `DUBLY_ENV_FILE`.
 - **Stop timeout:** `--stop-timeout` must be longer than `SHUTDOWN_GRACE_MS` (25 s). Docker's default of 10 s would kill the drain before it finishes.
 - **Health checks:** `GET /api/healthz` answers 200 as long as the process serves requests; the image's `HEALTHCHECK` uses it.
 - **Behind a proxy:** set `TRUST_PROXY` to the number of proxy hops, so per-IP limits see real client addresses and HSTS is sent.
@@ -74,12 +74,14 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `PORT` | 8787 | Listen port |
 | `WEB_ORIGIN` | http://localhost:3000 | The only CORS origin allowed |
 | `VERTEX_PROJECT_ID`, `VERTEX_GEMINI_LOCATION`, `GEMINI_STT_MODEL`, `GEMINI_TRANSLATE_MODEL` | —, global, gemini-3.5-flash-lite ×2 | AI providers |
-| `TTS_ENGINE`, `GEMINI_TTS_MODEL`, `GEMINI_TTS_PREMIUM_MODEL` | gemini, gemini-2.5-flash-tts, gemini-3.1-flash-tts-preview | `gemini` voices lines with emotion, delivery and performance tags through Gemini-TTS, falling back to Chirp3-HD on quota errors, refused languages or a withdrawn model. `chirp` always uses Chirp3-HD. The premium model is tried first only for users who turn on **Premium voices** (Settings → Paid extras; about twice the voice cost). Both Gemini models were verified on this project's Cloud TTS on 2026-09-24. Gemini 3.8 TTS is not served there yet |
+| `TTS_ENGINE` | gemini | `gemini` voices each line on its voice's own engine (Gemini 3.8 Flash-Lite, Gemini 3.8 Flash or Chirp 3 HD, as the workspace's plan allows). `chirp` is an operator override that voices every line with Chirp3-HD, on every plan |
+| `GEMINI_TTS_LITE_MODEL`, `GEMINI_TTS_FLASH_MODEL` | gemini-3.8-flash-lite-tts, gemini-3.8-flash-tts | The models behind the Gemini voices, called through the Gemini API (Cloud TTS does not serve 3.8 yet) |
+| `GEMINI_API_KEY` | — | **Needed for Gemini voices.** Sends Gemini 3.8 voices to the Gemini Developer API's Interactions endpoint (verified 2026-09-29: Flash-Lite and Flash, Hindi, Bhojpuri, Odia, Santali). Use a key on a billed project: a free-tier key runs out after about a dozen lines and its content may be used by Google. Unset, they go to Vertex AI (`VERTEX_PROJECT_ID`, service account) through `generateContent`, but on 2026-09-29 Vertex listed both 3.8 TTS models without serving them (Interactions: "Unsupported model interaction"; generateContent: 404 in global, us, us-central1, us-east5, europe-west4, asia-south1, asia-southeast1). Whenever Gemini cannot voice a line, Chirp 3 HD voices it in the same persona, so dubs still complete |
+| `GEMINI_TTS_PREMIUM_MODEL` | gemini-3.1-flash-tts-preview | Tried first on Gemini voices, only for users who turn on **Premium voices** (Settings → Paid extras). Served by Cloud TTS (verified 2026-09-24) |
 | `GEMINI_REVIEW_MODEL` | gemini-3.5-flash-lite | Listens to every dubbed take next to the original, for users who turn on **AI review** (Settings → Paid extras) |
 | `FIREBASE_STORAGE_BUCKET` | — | Media bucket |
 | `CREDENTIALS_MODE` / `FIREBASE_PROJECT_ID` | keyfile / — | `adc` = no key files |
 | `CREDENTIALS_DIR`, `DUBLY_ENV_FILE` | server/credentials, server/.env | Secret locations |
-| `HF_SPACE_URL`, `HF_TOKEN` | — | Optional GPU voice cloning |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | —, 587, —, —, — | Emails invitations. Any SMTP account works, including the one set as Firebase Auth's custom SMTP. Port 465 uses TLS, and 587 uses STARTTLS. `MAIL_FROM` is the sender, e.g. `Dubly <no-reply@scatterpie.io>`. With `SMTP_HOST` or `MAIL_FROM` empty, invitations are shared by link only. Invite links use `WEB_ORIGIN`, so it must be the address people open Dubly at |
 | `NODE_ENV`, `LOG_FORMAT` | —, json when production | Logging format |
 | `TRUST_PROXY` | unset | Proxy hops |
@@ -101,7 +103,6 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `RATE_TRANSLATE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 40 / 120 | |
 | `RATE_DUB_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 30 / 90 | Dub starts |
 | `RATE_TTS_PER_HOUR` | 200 | Text-to-voice generations (no text length limit) |
-| `RATE_VOICE_CLONE_PER_HOUR` | 10 | |
 | `RATE_EXPORT_PER_HOUR` | 30 | Export and captioned-render requests |
 | `RATE_IMPORT_SAMPLE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | 20 / 30 | |
 | `RATE_INVITE_ACCEPT_PER_HOUR` | 30 | Invite preview and accept |

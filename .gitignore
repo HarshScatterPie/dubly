@@ -21,6 +21,3 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-# HF Space clone assets (mirrors an external repo, not project source)
-hf-space/__pycache__/
-

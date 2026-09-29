@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { allowanceRate, effectiveExtras, NO_EXTRAS } from '../../src/lib/planMath';
+import { voiceAllowed, voiceForPlan } from '../../src/lib/voiceEngines';
+import { VOICES } from '../../src/data/mockData';
 import { DEFAULT_PLANS, toPlan } from './plans';
 
 const prefs = { aiReview: true, premiumVoices: true, paceRetakes: true, expressiveVoices: true };
@@ -27,5 +29,35 @@ describe('plan maths', () => {
       teamInvites: true,
     });
     expect(toPlan('starter', { minutesPerMonth: 'lots', paidExtras: 'yes' })).toMatchObject({ minutesPerMonth: 50, paidExtras: false });
+  });
+
+  it('gives Starter Gemini 3.8 Flash-Lite voices only, and Enterprise every engine', () => {
+    expect(toPlan('starter', undefined).voiceEngines).toEqual(['gemini-flash-lite']);
+    expect(toPlan('enterprise', undefined).voiceEngines).toEqual(['gemini-flash-lite', 'gemini-flash', 'chirp']);
+    // Hand-edited: unknown names dropped, and a list left empty keeps the built-in one rather than voicing nothing.
+    expect(toPlan('starter', { voiceEngines: ['gemini-flash-lite', 'chirp', 'nope'] }).voiceEngines).toEqual(['gemini-flash-lite', 'chirp']);
+    expect(toPlan('starter', { voiceEngines: ['nope'] }).voiceEngines).toEqual(['gemini-flash-lite']);
+  });
+});
+
+describe('voices on a plan', () => {
+  const byId = (id: string) => VOICES.find((v) => v.id === id)!;
+
+  it('offers every persona on every engine, keeping the saved Chirp 3 HD ids', () => {
+    expect(VOICES).toHaveLength(90);
+    expect(byId('google-hi-aoede').engine).toBe('chirp');
+    expect(byId('gemini-lite-aoede').engine).toBe('gemini-flash-lite');
+    expect(byId('gemini-flash-aoede').engine).toBe('gemini-flash');
+    expect(new Set(VOICES.map((v) => v.id)).size).toBe(VOICES.length);
+    // The fallback voice must be one every plan can use.
+    expect(VOICES[0].engine).toBe('gemini-flash-lite');
+  });
+
+  it('voices a locked voice as the same persona on an engine the plan has', () => {
+    const starter = DEFAULT_PLANS.starter.voiceEngines;
+    expect(voiceAllowed(byId('google-hi-aoede'), starter)).toBe(false);
+    expect(voiceForPlan(byId('google-hi-aoede'), starter, VOICES).id).toBe('gemini-lite-aoede');
+    expect(voiceForPlan(byId('gemini-flash-charon'), starter, VOICES).id).toBe('gemini-lite-charon');
+    expect(voiceForPlan(byId('google-hi-aoede'), DEFAULT_PLANS.enterprise.voiceEngines, VOICES).id).toBe('google-hi-aoede');
   });
 });

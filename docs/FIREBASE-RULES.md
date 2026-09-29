@@ -21,7 +21,7 @@ Dubly runs in the Firebase project `scatter-studio-live-2026`, which it **shares
 
 ## Defence in depth on the server (already implemented)
 
-Even if a client could write a voice document, the server only uses a voice whose `sampleStoragePath` is exactly `users/{caller uid}/voices/{uuid}/sample.wav`. See `isOwnVoiceSamplePath` in `server/lib/customVoices.ts`. Voices that fail this check are left out of listings and synthesis, and are never used to sign a URL or download a file.
+Voice cloning has been removed, so the server no longer reads `users/{uid}/voices/*` at all: a document or file a client wrote there is never used, signed or downloaded.
 
 | Deployed-rules check | Status |
 |---|---|

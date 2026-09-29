@@ -38,22 +38,9 @@ os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
 
 SAMPLE_RATE = 16000
 
-# Per-language CTC models. The base map is WhisperX's own (BSD-2), which covers Hindi,
-# Telugu, Malayalam and Urdu among the Indian languages; the rest of the Indic entries are
-# AI4Bharat's IndicWav2Vec, which WhisperX has no mapping for at all and which is trained
-# on Indian speech rather than a multilingual model fine-tuned onto it.
-#
-# Languages absent here (Kannada, Punjabi) simply fall back to the caller's VAD-based
-# timing — a missing model degrades precision, it does not break the dub.
 # Per-language CTC models, in preference order. The base map is WhisperX's own (BSD-2),
-# extended for the Indian languages it has no mapping for at all.
-#
-# Two candidates per Indic language on purpose. AI4Bharat's IndicWav2Vec is the better
-# model — trained on Indian speech rather than a multilingual model fine-tuned onto it —
-# but every one of its repos is gated, so it 403s until the account has accepted the terms
-# and a token is present. The second entry is an ungated community model that works with no
-# setup at all. Trying them in order means alignment works out of the box and silently
-# upgrades once someone accepts the AI4Bharat terms.
+# extended with public community models for the Indian languages it has no mapping for.
+# Every one is ungated, so alignment needs no account or token.
 #
 # A language with no entry falls back to the caller's VAD timing — a missing model degrades
 # precision, it does not break the dub.
@@ -79,14 +66,13 @@ ALIGN_MODELS = {
     "id": ["cahya/wav2vec2-large-xlsr-indonesian"],
     "sv": ["KBLab/wav2vec2-large-voxrex-swedish"],
     "ur": ["kingabzpro/wav2vec2-large-xls-r-300m-Urdu"],
-    # Indian languages: AI4Bharat (gated) first, ungated community model second.
-    "hi": ["ai4bharat/indicwav2vec-hindi", "theainerd/Wav2Vec2-large-xlsr-hindi"],
-    "ta": ["ai4bharat/indicwav2vec_v1_tamil", "Harveenchadha/vakyansh-wav2vec2-tamil-tam-250"],
-    "te": ["ai4bharat/indicwav2vec_v1_telugu", "anuragshas/wav2vec2-large-xlsr-53-telugu"],
-    "bn": ["ai4bharat/indicwav2vec_v1_bengali", "arijitx/wav2vec2-xls-r-300m-bengali"],
-    "gu": ["ai4bharat/indicwav2vec_v1_gujarati", "gchhablani/wav2vec2-large-xlsr-gu"],
-    "mr": ["ai4bharat/indicwav2vec_v1_marathi", "sumedh/wav2vec2-large-xlsr-marathi"],
-    "or": ["ai4bharat/indicwav2vec_v1_odia", "Harveenchadha/odia_large_wav2vec2"],
+    "hi": ["theainerd/Wav2Vec2-large-xlsr-hindi"],
+    "ta": ["Harveenchadha/vakyansh-wav2vec2-tamil-tam-250"],
+    "te": ["anuragshas/wav2vec2-large-xlsr-53-telugu"],
+    "bn": ["arijitx/wav2vec2-xls-r-300m-bengali"],
+    "gu": ["gchhablani/wav2vec2-large-xlsr-gu"],
+    "mr": ["sumedh/wav2vec2-large-xlsr-marathi"],
+    "or": ["Harveenchadha/odia_large_wav2vec2"],
     "ml": ["gvs/wav2vec2-large-xlsr-malayalam"],
     "kn": ["amoghsgopadi/wav2vec2-large-xlsr-kn"],
     "pa": ["kingabzpro/wav2vec2-large-xlsr-53-punjabi"],
@@ -136,7 +122,7 @@ def _cache_model(key, model, processor):
         print(f"[forced_align] evicted {evicted} from warm cache", file=sys.stderr)
 
 
-def get_model(language, token, Wav2Vec2ForCTC, Wav2Vec2Processor):
+def get_model(language, Wav2Vec2ForCTC, Wav2Vec2Processor):
     """
     Returns (model, processor, repo, error) for `language`, reusing an already-loaded model
     from this process's cache when one exists. `from_pretrained()` deserializing a
@@ -158,8 +144,8 @@ def get_model(language, token, Wav2Vec2ForCTC, Wav2Vec2Processor):
     problems = []
     for candidate in candidates:
         try:
-            processor = Wav2Vec2Processor.from_pretrained(candidate, token=token)
-            model = Wav2Vec2ForCTC.from_pretrained(candidate, token=token).eval()
+            processor = Wav2Vec2Processor.from_pretrained(candidate)
+            model = Wav2Vec2ForCTC.from_pretrained(candidate).eval()
             _cache_model(candidate, model, processor)
             return model, processor, candidate, None
         except Exception as err:
@@ -348,10 +334,8 @@ def handle_align(request):
     except ImportError as err:
         return {"ok": False, "error": f"Forced alignment needs `pip install transformers`: {err}"}
 
-    # A gated repo 403s until its terms are accepted, so walk the candidates and use the
-    # first that actually loads rather than failing the whole pass on the preferred one.
-    token = os.environ.get("HF_TOKEN") or None
-    model, processor, repo, err = get_model(language, token, Wav2Vec2ForCTC, Wav2Vec2Processor)
+    # Walk the candidates and use the first that actually loads rather than failing the whole pass on one download.
+    model, processor, repo, err = get_model(language, Wav2Vec2ForCTC, Wav2Vec2Processor)
     if model is None:
         return {"ok": False, "error": err}
 
@@ -439,8 +423,7 @@ def main():
             try:
                 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
 
-                token = os.environ.get("HF_TOKEN") or None
-                model, _processor, repo, err = get_model(request.get("language", "en"), token, Wav2Vec2ForCTC, Wav2Vec2Processor)
+                model, _processor, repo, err = get_model(request.get("language", "en"), Wav2Vec2ForCTC, Wav2Vec2Processor)
                 respond({"ok": model is not None, "model": repo, "error": err})
             except Exception as err:
                 respond({"ok": False, "error": str(err)})

@@ -24,6 +24,7 @@ import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type
 import { projectProgress } from './lib/projectProgress';
 import { randomId } from './lib/randomId';
 import { allowanceRate, effectiveExtras } from './lib/planMath';
+import { DEFAULT_VOICE_ENGINES, VOICE_ENGINES } from './lib/voiceEngines';
 import { DEFAULT_PREFERENCES } from './data/preferences';
 
 takeInviteTokenFromUrl();
@@ -37,9 +38,6 @@ const DubbingStudio = lazy(() =>
 );
 const TextToVoiceStudio = lazy(() =>
   import('./components/TextToVoiceStudio').then((m) => ({ default: m.TextToVoiceStudio }))
-);
-const VoiceCloneStudio = lazy(() =>
-  import('./components/VoiceCloneStudio').then((m) => ({ default: m.VoiceCloneStudio }))
 );
 const ProjectsHistory = lazy(() =>
   import('./components/ProjectsHistory').then((m) => ({ default: m.ProjectsHistory }))
@@ -84,6 +82,7 @@ const EMPTY_USAGE: UserUsageStats = {
   paidExtrasAllowed: false,
   extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
   teamInvites: false,
+  voiceEngines: DEFAULT_VOICE_ENGINES,
 };
 
 export default function App() {
@@ -114,6 +113,8 @@ export default function App() {
   const usageLoaded = usage !== EMPTY_USAGE;
   // How much allowance a dubbed minute uses with this user's paid extras, as the server will charge it.
   const extrasRate = allowanceRate(usage.extraRates, effectiveExtras(usageLoaded && usage.paidExtrasAllowed, preferences ?? DEFAULT_PREFERENCES));
+  // Voices locked by the plan are marked only once the plan is known; the server enforces it either way.
+  const voiceEngines = usageLoaded ? usage.voiceEngines : VOICE_ENGINES;
   const [isMobileOpen, setIsMobileOpen] = useState<boolean>(false);
   const [isPlayingAudio, setIsPlayingAudio] = useState<boolean>(false);
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
@@ -515,6 +516,7 @@ export default function App() {
                     initialProject={studioSession.redubProject}
                     resumeProject={studioSession.resumeProject}
                     preferences={preferences}
+                    voiceEngines={voiceEngines}
                     onStatusChange={setStudioStatus}
                     onSaveProject={handleSaveProject}
                     onOpenWorkspace={handleOpenWorkspace}
@@ -554,15 +556,10 @@ export default function App() {
 
             {activeTab === 'text-to-voice' && (
               <TextToVoiceStudio
+                voiceEngines={voiceEngines}
                 onShowToast={showToast}
                 onSendToDubbingWithAudio={handleSendToDubbingWithAudio}
               />
-            )}
-
-            {activeTab === 'my-voices' && (
-              <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-                <VoiceCloneStudio onShowToast={showToast} />
-              </div>
             )}
 
             {activeTab === 'history' && (
@@ -610,6 +607,7 @@ export default function App() {
                   onProjectRefreshed={handleProjectRefreshed}
                   onShowToast={showToast}
                   allowanceRate={extrasRate}
+                  voiceEngines={voiceEngines}
                   onDubMoreLanguages={handleRedubProject}
                   defaultBurnCaptions={preferences?.burnCaptions ?? false}
                 />

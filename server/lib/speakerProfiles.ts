@@ -37,10 +37,10 @@ export function profilesForSpeakers(profiles: Record<string, SpeakerProfile>, sp
 export function castVoices(
   speakers: string[],
   profiles: Record<string, SpeakerProfile>,
-  catalog: Voice[],
+  // Pass only the voices the workspace's plan can use, so no speaker is cast with a locked one.
+  stock: Voice[],
   preferredVoiceId?: string
 ): Record<string, string> {
-  const stock = catalog.filter((v) => v.provider !== 'clone');
   const byGender = (gender: string) => stock.filter((v) => v.gender === gender);
   const used = new Set<string>();
   const preferred = stock.find((v) => v.id === preferredVoiceId);

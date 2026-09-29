@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
 import { serverRoot, venvPython, venvSitePackages } from './paths';
-import { env } from './env';
+import { toolLanguageCode } from './languageMeta';
 import type { TranscriptSegment } from '../../src/types';
 
 /**
@@ -28,19 +28,19 @@ const SITE_PACKAGES = venvSitePackages();
 const ALIGNABLE_LANGUAGES = new Set([
   'en', 'fr', 'de', 'es', 'it', 'pt', 'nl', 'ru', 'pl', 'ar', 'ja', 'zh', 'ko', 'tr',
   'el', 'fa', 'fi', 'he', 'id', 'sv', 'ur',
-  'hi', 'hinglish', 'ta', 'te', 'bn', 'gu', 'mr', 'or', 'ml', 'kn', 'pa',
+  'hi', 'ta', 'te', 'bn', 'gu', 'mr', 'or', 'ml', 'kn', 'pa',
 ]);
 
 export function isCtcAlignAvailable(languageCode?: string): boolean {
   if (!existsSync(VENV_PYTHON) || !existsSync(WORKER_SCRIPT)) return false;
   if (!existsSync(path.join(SITE_PACKAGES, 'transformers'))) return false;
-  return languageCode === undefined || ALIGNABLE_LANGUAGES.has(languageCode);
+  return languageCode === undefined || ALIGNABLE_LANGUAGES.has(toolLanguageCode(languageCode));
 }
 
 // Starts loading a language's model in the background, so it overlaps the speech-to-text call instead of following it.
 export function warmCtcModel(languageCode: string): void {
   if (!isCtcAlignAvailable(languageCode)) return;
-  const language = languageCode === 'hinglish' ? 'hi' : languageCode;
+  const language = toolLanguageCode(languageCode);
   runWorker({ cmd: 'warm', language })
     .then((r) => console.log(r.ok ? `[ctcAlign] warmed ${r.model}` : `[ctcAlign] warm failed: ${r.error}`))
     .catch((err) => console.warn('[ctcAlign] warm failed', err));
@@ -74,7 +74,7 @@ export async function refineTimingsWithCtc(
 
   const result = await runWorker({
     audioPath,
-    language: languageCode === 'hinglish' ? 'hi' : languageCode,
+    language: toolLanguageCode(languageCode),
     segments: segments.map((s) => ({ id: s.id, text: s.text, start: s.startTime, end: s.endTime })),
   });
   if (!result.ok) throw new Error(result.error || 'Forced alignment failed');
@@ -144,9 +144,7 @@ function getWorker(): ChildProcessWithoutNullStreams {
 
   const proc = spawn(VENV_PYTHON, ['-W', 'ignore', WORKER_SCRIPT], {
     cwd: serverRoot,
-    // HF_TOKEN is passed through so the gated AI4Bharat models can be used once their
-    // terms have been accepted; without it the worker falls back to ungated models.
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', HF_TOKEN: env.hfToken || '' },
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
   });
 
   let stderrTail = '';

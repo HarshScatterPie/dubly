@@ -55,7 +55,6 @@ interface StepLocalizeProps {
   onShowToast?: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   /** The voice choices so far, so a line preview uses the voice that line will actually get. */
   voiceSelection: VoiceSelection;
-  /** The user's cloned voices plus the catalog. */
   voiceCatalog: Voice[];
   voiceEmotion: VoiceEmotion;
 }
@@ -99,7 +98,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
     if (hasGeneratedTranslation && !isTranslating) setShowPicker(false);
   }, [hasGeneratedTranslation, isTranslating]);
 
-  const sourceLang = LANGUAGES.find((l) => l.code === sourceLanguageCode) || LANGUAGES[10];
+  const sourceLang = LANGUAGES.find((l) => l.code === sourceLanguageCode) || LANGUAGES.find((l) => l.code === 'en')!;
   const targetLang = LANGUAGES.find((l) => l.code === activeLanguageCode) || LANGUAGES[0];
   const selectedLangs = targetLanguageCodes
     .map((code) => LANGUAGES.find((l) => l.code === code))

@@ -61,7 +61,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
           <h3 className="text-xl font-bold text-[#0F172A] mb-2 tracking-tight">VIDEO DUBBING</h3>
           <p className="text-sm text-[#64748B] leading-relaxed mb-6">
-            Upload a video and automatically translate its existing speech. Full multi-stage transcription, cultural localization, neural voice clone, and export.
+            Upload a video and automatically translate its existing speech. Full multi-stage transcription, cultural localization, expressive Gemini and Chirp voices, and export.
           </p>
 
           <div className="flex items-center justify-between pt-4 border-t border-[#E2E8F0]">

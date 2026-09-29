@@ -10,10 +10,16 @@ import { env } from './env';
 
 const USD_TO_INR = 83;
 
-// Google Cloud TTS list prices per 1M characters.
+// Google Cloud TTS list price per 1M characters.
 const GOOGLE_CHIRP3_HD_PER_1M_USD = 30;
-// gemini-2.5-flash-tts bills $10 per 1M audio tokens (25/s) plus $0.50 per 1M text tokens; about 0.07 s of speech per character.
-const GEMINI_TTS_PER_1M_CHARS_USD = 18;
+// Gemini-TTS bills audio out per token (25 a second) plus text in; at about 0.07 s of speech per character that is
+// 1.75 audio tokens and ~0.25 text tokens per character. Paid-tier list prices (ai.google.dev pricing, Sep 2026);
+// 3.8 is half price until 2026-12-31, and the 2027 standard rate is used as the upper bound.
+const GEMINI_TTS_PER_1M_CHARS_USD: Record<string, number> = {
+  [env.geminiTtsLiteModel]: 1.75 * 12 + 0.25 * 1, // gemini-3.8-flash-lite-tts: $1 in / $12 audio out
+  [env.geminiTtsFlashModel]: 1.75 * 18 + 0.25 * 1, // gemini-3.8-flash-tts: $1 in / $18 audio out
+  [env.geminiTtsPremiumModel]: 1.75 * 20 + 0.25 * 1, // gemini-3.1-flash-tts-preview: $1 in / $20 audio out
+};
 const GEMINI_AUDIO_TOKENS_PER_SECOND = 32;
 
 interface GeminiPrice {
@@ -86,10 +92,11 @@ export function recordStt(meter: CostMeter, provider: string, seconds: number): 
   meter.sttSecondsByProvider[provider] = (meter.sttSecondsByProvider[provider] || 0) + seconds;
 }
 
+// `provider` is the Gemini model that voiced the characters, or 'chirp' for Chirp 3 HD.
 function ttsCostInr(provider: string, chars: number): number {
-  if (provider === 'vertex') return (chars / 1_000_000) * GOOGLE_CHIRP3_HD_PER_1M_USD * USD_TO_INR;
-  if (provider === 'gemini-tts') return (chars / 1_000_000) * GEMINI_TTS_PER_1M_CHARS_USD * USD_TO_INR;
-  return 0;
+  if (provider === 'chirp') return (chars / 1_000_000) * GOOGLE_CHIRP3_HD_PER_1M_USD * USD_TO_INR;
+  const perMillion = GEMINI_TTS_PER_1M_CHARS_USD[provider];
+  return perMillion ? (chars / 1_000_000) * perMillion * USD_TO_INR : 0;
 }
 
 function sttCostInr(provider: string, seconds: number): number {

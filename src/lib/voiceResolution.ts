@@ -44,7 +44,6 @@ export function resolveVoice(
   selection: VoiceSelection,
   languageCode: string,
   speaker: string,
-  /** Defaults to the built-in catalog; pass the user's catalog so their cloned voices resolve too. */
   catalog: Voice[] = VOICES
 ): Voice {
   const id = resolveVoiceId(selection, languageCode, speaker);

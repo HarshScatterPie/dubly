@@ -157,8 +157,8 @@ describe('usage accounting', () => {
 
   it('turns metered provider usage into a stored estimate', () => {
     const meter = createCostMeter();
-    recordTts(meter, 'vertex', 1_000_000, false);
-    recordTts(meter, 'vertex', 500, true);
+    recordTts(meter, 'chirp', 1_000_000, false);
+    recordTts(meter, 'chirp', 500, true);
     recordStt(meter, 'vertex', 60);
     const estimate = costEstimate(meter);
     expect(estimate).toMatchObject({ ttsChars: 1_000_000, ttsCharsFromCache: 500, sttSeconds: 60 });

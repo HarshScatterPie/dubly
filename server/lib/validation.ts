@@ -15,8 +15,6 @@ const voiceId = z.string().min(1).max(120);
 const seconds = z.number().finite().min(-60).max(24 * 60 * 60);
 const multiplier = z.number().finite().min(0.5).max(2);
 
-const emptyToUndefined = (value: unknown) => (value === '' ? undefined : value);
-
 const boundedRecord = <T extends z.ZodTypeAny>(value: T) =>
   z.record(z.string().min(1).max(100), value).refine((obj) => Object.keys(obj).length <= MAX_MAP_ENTRIES, `At most ${MAX_MAP_ENTRIES} entries`);
 
@@ -156,12 +154,6 @@ export const schemas = {
   invite: z.object({ email: z.string().trim().min(3).max(254), role }),
   changeRole: z.object({ role }),
   inviteToken: z.object({ token: z.string().min(10).max(200) }),
-  // Multipart form fields arrive as strings; an empty one means "not given".
-  voiceSample: z.object({
-    name: z.preprocess(emptyToUndefined, z.string().trim().max(80).optional()),
-    gender: z.preprocess(emptyToUndefined, z.enum(['male', 'female', 'non-binary']).optional()),
-    languageCode: z.preprocess(emptyToUndefined, languageCode.optional()),
-  }),
 };
 
 // Replaces req.body with its parsed value (unknown top-level fields dropped) or answers 400 naming the bad fields, never echoing values.

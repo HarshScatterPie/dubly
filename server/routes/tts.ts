@@ -3,7 +3,7 @@ import path from 'node:path';
 import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { VOICES, LANGUAGES } from '../../src/data/mockData';
-import { createReferenceLoader, isClonedVoiceId, voiceCatalogFor } from '../lib/customVoices';
+import { effectiveExtras } from '../../src/lib/planMath';
 import { routeSynthesizeSpeech } from '../lib/modelRouter';
 import { buildStylePrompt } from '../lib/speechStyle';
 import { applySpokenForms } from '../lib/glossary';
@@ -11,6 +11,7 @@ import { getGlossary } from '../lib/glossaryStore';
 import { applyPitchSpeed } from '../lib/ffmpeg';
 import { getWavDurationSeconds } from '../lib/audioUtils';
 import { getSettings } from '../lib/projectRepo';
+import { planForWorkspace } from '../lib/plans';
 import { tmpDir } from '../lib/paths';
 import { rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
@@ -29,10 +30,7 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
     res.status(400).json({ error: 'text is required' });
     return;
   }
-  // Resolved against the user's own catalog, not just the shared one, so their cloned
-  // voices are selectable here exactly like the built-in ones.
-  const catalog = await voiceCatalogFor(req.uid!, VOICES);
-  const voice = catalog.find((v) => v.id === voiceId);
+  const voice = VOICES.find((v) => v.id === voiceId);
   if (!voice) {
     res.status(400).json({ error: `Unknown voice id: ${voiceId}` });
     return;
@@ -42,8 +40,7 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
 
   const jobDir = path.join(tmpDir, 'tts', randomUUID());
   try {
-    const [settings, glossary] = await Promise.all([getSettings(req.uid!), getGlossary(req.workspaceId!)]);
-    const loadReference = createReferenceLoader(req.uid!, jobDir);
+    const [settings, glossary, plan] = await Promise.all([getSettings(req.uid!), getGlossary(req.workspaceId!), planForWorkspace(req.workspaceId!)]);
     const { audio, provider } = await routeSynthesizeSpeech(
       // The workspace's pronunciations apply here as in a dub, so a preview is how the render will sound.
       applySpokenForms(text, glossary),
@@ -51,11 +48,12 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
       targetLanguageCode,
       settings.ttsProvider,
       {
-        cloneReference: isClonedVoiceId(voice.id) ? await loadReference(voice.id) : undefined,
+        // A voice the plan does not include is previewed as the same persona on one it does, exactly as a dub would voice it.
+        engines: plan.voiceEngines,
         // Same direction a dub gives the line, so a preview sounds like the render.
         style: buildStylePrompt(emotion, delivery),
         expressive: settings.preferences.expressiveVoices,
-        premium: settings.preferences.premiumVoices,
+        premium: effectiveExtras(plan.paidExtras, settings.preferences).premiumVoices,
       }
     );
     const shaped = await applyPitchSpeed(audio, pitch ?? 1, speed ?? 1, jobDir);

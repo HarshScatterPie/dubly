@@ -13,7 +13,6 @@ server/cache
 server/lipsync/venv
 server/lipsync/wav2lip_onnx/temp
 **/__pycache__
-hf-space
 assets
 coverage
 *.log

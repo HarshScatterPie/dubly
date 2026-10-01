@@ -15,10 +15,10 @@ export function buildInviteEmail(invite: InviteSummary, workspaceName: string, l
   const text = [
     `${inviter} invited you to join the ${workspaceName} workspace on Dubly as ${role}.`,
     '',
-    `Open this link, sign in with ${invite.email}, and press Join workspace:`,
+    `Open this link. If you are new to Dubly you will be asked to choose a password; otherwise sign in with ${invite.email}. Then press Join workspace:`,
     link,
     '',
-    `The link works until ${until}, and only for ${invite.email}. If you don't know your password, use "Forgot password?" on the sign-in page.`,
+    `The link works until ${until}, and only for ${invite.email}. If you already have an account and don't know its password, use "Forgot password?" on the sign-in page.`,
     "If you weren't expecting this invitation, you can ignore this email.",
   ].join('\n');
   const e = escapeHtml;
@@ -26,7 +26,7 @@ export function buildInviteEmail(invite: InviteSummary, workspaceName: string, l
   <h2 style="font-size:18px;margin:0 0 12px">Join ${e(workspaceName)} on Dubly</h2>
   <p style="font-size:14px;line-height:1.5">${e(inviter)} invited you to join the <strong>${e(workspaceName)}</strong> workspace as ${role}.</p>
   <p style="margin:24px 0"><a href="${e(link)}" style="background:#F05637;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:bold;font-size:14px;display:inline-block">Open invitation</a></p>
-  <p style="font-size:13px;line-height:1.5;color:#475569">Sign in with <strong>${e(invite.email)}</strong>, then press <em>Join workspace</em>. The link works until ${e(until)}, and only for that email. If you don't know your password, use <em>Forgot password?</em> on the sign-in page.</p>
+  <p style="font-size:13px;line-height:1.5;color:#475569">New to Dubly? You'll be asked to choose a password, then press <em>Join workspace</em>. Already have an account? Sign in with <strong>${e(invite.email)}</strong>. The link works until ${e(until)}, and only for that email. If you don't know your existing password, use <em>Forgot password?</em> on the sign-in page.</p>
   <p style="font-size:12px;color:#94A3B8;word-break:break-all">Or copy this link: ${e(link)}</p>
   <p style="font-size:12px;color:#94A3B8">If you weren't expecting this invitation, you can ignore this email.</p>
 </div>`;

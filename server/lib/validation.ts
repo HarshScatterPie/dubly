@@ -152,6 +152,7 @@ export const schemas = {
   invite: z.object({ email: z.string().trim().min(3).max(254), role }),
   changeRole: z.object({ role }),
   inviteToken: z.object({ token: z.string().min(10).max(200) }),
+  inviteSignup: z.object({ token: z.string().min(10).max(200), password: z.string().min(8).max(128) }),
 };
 
 // Replaces req.body with its parsed value (unknown top-level fields dropped) or answers 400 naming the bad fields, never echoing values.

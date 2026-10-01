@@ -6,10 +6,12 @@ import { requireAdmin } from '../lib/auth';
 import {
   acceptInvite,
   changeRole,
+  createAccountForInvite,
   createInvite,
   getWorkspace,
   InviteError,
   listPendingInvites,
+  lookupInviteForSignup,
   previewInvite,
   removeMember,
   revokeInvite,
@@ -117,6 +119,26 @@ workspaceRouter.get('/glossary', async (req, res) => {
 workspaceRouter.put('/glossary', requireAdmin, validateBody(schemas.glossary), async (req, res) => {
   const entries = await saveGlossary(req.workspaceId!, req.body.entries, req.uid!);
   res.json({ entries, canEdit: true });
+});
+
+// Mounted with no sign-in: a brand-new invitee has no account yet, so the link itself (256-bit, emailed, expiring) is the credential.
+export const inviteSignupRouter = Router();
+inviteSignupRouter.use(rateLimit('invite-signup', [['ip', rateRules.inviteSignupPerIp]]));
+
+inviteSignupRouter.post('/lookup', validateBody(schemas.inviteToken), async (req, res) => {
+  try {
+    res.json(await lookupInviteForSignup(String(req.body?.token ?? '')));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
+
+inviteSignupRouter.post('/claim', validateBody(schemas.inviteSignup), async (req, res) => {
+  try {
+    res.status(201).json(await createAccountForInvite(String(req.body?.token ?? ''), String(req.body?.password ?? '')));
+  } catch (err) {
+    sendError(res, err);
+  }
 });
 
 // Mounted behind requireAuth only: the invite is matched to the caller's signed-in email, whatever workspace they are in now.

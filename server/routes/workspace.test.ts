@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { authAdmin, createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { authAdmin, createUser, db, resetEmulators, signIn, startApi, type TestApi, type TestUser } from '../test/helpers';
 import { setWorkspacePlan } from '../lib/plans';
 import { isMailConfigured, setMailSenderForTests } from '../lib/mailer';
 
@@ -339,5 +339,64 @@ describe('invitation emails', () => {
     const unconfigured = await invite(admin, 'two@team.test');
     expect(unconfigured.status).toBe(201);
     expect(unconfigured.body.emailed).toBe(false);
+  });
+});
+
+describe('invite sign-up for people with no account', () => {
+  const lookup = (token: string) => api.call('POST', '/api/invite-signup/lookup', { body: { token } });
+  const claim = (token: string, password: string) => api.call('POST', '/api/invite-signup/claim', { body: { token, password } });
+
+  it('lets a new invitee set a password from the link, sign in, and join', async () => {
+    const admin = await createUser('admin@team.test');
+    const teamWs = await workspaceOf(admin);
+    const { body } = await invite(admin, 'Newbie@Team.test');
+
+    const info = await lookup(body.token);
+    expect(info.status).toBe(200);
+    expect(info.body).toMatchObject({ email: 'newbie@team.test', accountExists: false, role: 'editor' });
+
+    expect((await claim(body.token, 'short')).status).toBe(400);
+    const created = await claim(body.token, 'a-good-password');
+    expect(created.status).toBe(201);
+    expect(created.body.email).toBe('newbie@team.test');
+
+    const token = await signIn('newbie@team.test', 'a-good-password');
+    const joined = await api.call('POST', '/api/invites/accept', { token, body: { token: body.token } });
+    expect(joined.status).toBe(200);
+    expect(joined.body.workspaceId).toBe(teamWs.id);
+  });
+
+  it('never creates or changes an account that already exists', async () => {
+    const admin = await createUser('admin@team.test');
+    const existing = await createUser('existing@team.test', 'original-password');
+    await workspaceOf(admin);
+    const { body } = await invite(admin, existing.email);
+
+    expect((await lookup(body.token)).body.accountExists).toBe(true);
+    const res = await claim(body.token, 'attacker-password');
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('ACCOUNT_EXISTS');
+    // The original password still works; the attacker's does not.
+    await expect(signIn(existing.email, 'original-password')).resolves.toBeTruthy();
+    await expect(signIn(existing.email, 'attacker-password')).rejects.toBeTruthy();
+  });
+
+  it('refuses unknown, revoked and expired links, and a second claim', async () => {
+    const admin = await createUser('admin@team.test');
+    await workspaceOf(admin);
+    expect((await lookup('not-a-real-token-at-all')).status).toBe(404);
+
+    const revoked = (await invite(admin, 'revoked@team.test')).body;
+    await api.call('DELETE', `/api/workspace/invites/${revoked.invite.id}`, { token: admin.token });
+    expect((await claim(revoked.token, 'a-good-password')).status).toBe(404);
+    await expect(authAdmin.getUserByEmail('revoked@team.test')).rejects.toMatchObject({ code: 'auth/user-not-found' });
+
+    const expired = (await invite(admin, 'expired@team.test')).body;
+    await db.collection('invites').doc(expired.invite.id).update({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    expect((await claim(expired.token, 'a-good-password')).status).toBe(410);
+
+    const once = (await invite(admin, 'once@team.test')).body;
+    expect((await claim(once.token, 'a-good-password')).status).toBe(201);
+    expect((await claim(once.token, 'another-password')).status).toBe(409);
   });
 });

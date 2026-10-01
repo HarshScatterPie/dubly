@@ -162,7 +162,6 @@ export async function createProject(
     languageSpeakerVoiceMap: data.languageSpeakerVoiceMap || {},
     translationStyle: data.translationStyle || 'natural',
     adaptExpressions: data.adaptExpressions ?? true,
-    autoLipSync: data.autoLipSync ?? false,
     voiceSpeed: data.voiceSpeed ?? 1.0,
     voicePitch: data.voicePitch ?? 1.0,
     voiceEmotion: data.voiceEmotion || 'friendly',

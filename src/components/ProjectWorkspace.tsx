@@ -183,7 +183,6 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
         speakerVoiceMap: project.speakerVoiceMap,
         languageVoiceMap: { ...project.languageVoiceMap, [voiceLanguage]: pendingVoiceId },
         languageSpeakerVoiceMap: project.languageSpeakerVoiceMap,
-        autoLipSync: project.autoLipSync,
         separateBackground: project.separateBackground,
         // Only this language re-renders; the others keep the files they already have.
         languages: [voiceLanguage],
@@ -797,7 +796,7 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
                         <p className="text-[11px] text-[#94A3B8] truncate">
                           {entry.videoUrl
                             ? entry.report
-                              ? `${Math.round((entry.report.inSync / Math.max(1, entry.report.lines)) * 100)}% timing match${entry.report.lipSync === 'applied' ? ' · lip-synced' : ''}`
+                              ? `${Math.round((entry.report.inSync / Math.max(1, entry.report.lines)) * 100)}% timing match`
                               : 'Rendered'
                             : entry.message || 'Not dubbed yet'}
                         </p>

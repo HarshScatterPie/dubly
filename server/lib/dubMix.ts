@@ -12,8 +12,7 @@ import { ffmpegPath } from './mediaTools';
  *     WAV at the exact sample it starts on, with short fades so no line starts or stops on
  *     a click. This used to be one ffmpeg graph with an input, a delay and a full-length
  *     pad per line — hundreds of full-length streams for a long video — and placement was
- *     only as exact as `adelay`'s millisecond. The voice track on its own is also what
- *     lip-sync listens to, so the mouth follows the voice and not the music under it.
+ *     only as exact as `adelay`'s millisecond.
  *  2. The mix. The voice sits in the centre of a stereo mix over the background bed, which
  *     is ducked by a smooth gain envelope instead of being switched on and off.
  */
@@ -21,7 +20,7 @@ import { ffmpegPath } from './mediaTools';
 export const VOICE_SAMPLE_RATE = 48000;
 /** trimSilence keeps this much air before a take's first sound; placing a take this early puts its first sound on the mark. */
 export const TAKE_LEAD_SECONDS = 0.03;
-/** In lip-sync mode a line may run this far past the mouth before it is sped up to fit. */
+/** In strict mode a line may run this far past the mouth before it is sped up to fit. */
 const STRICT_OVERRUN = 1.06;
 /** How much faster (or slower) than the user's pace a line may be shaped to follow the mouth; small enough to stay natural. */
 export const STRICT_MAX_TEMPO = 1.22;
@@ -55,7 +54,7 @@ export interface Placement {
  *
  * Every line starts where the original speaker starts. Its pace is the user's chosen speed,
  * except that a line which would run into the next one is compressed (never past
- * MAX_COMPRESSION). In `strict` mode — a face is on screen, or lip-sync is on — the line is
+ * MAX_COMPRESSION). In `strict` mode — a face is on screen — the line is
  * also fitted to the mouth: a take that would keep talking after the speaker's mouth closes
  * is sped up a little, and one that would finish well before is slowed a little, both within
  * a range that still sounds like natural speech.
@@ -347,12 +346,6 @@ export async function mixDubAudio(params: {
     [...inputs, '-filter_complex', graph, '-map', '[mixed]', '-t', total, '-ar', String(VOICE_SAMPLE_RATE), '-ac', '2', '-c:a', 'pcm_s16le', '-y', outputPath],
     TIMEOUT.render
   );
-  return outputPath;
-}
-
-/** A 16 kHz mono copy of the voice track, the form lip-sync reads. */
-export async function voiceTrackFor16k(voicePath: string, outputPath: string): Promise<string> {
-  await runFfmpeg([...SAFE_INPUT_OPTIONS, '-i', voicePath, '-ar', '16000', '-ac', '1', '-c:a', 'pcm_s16le', '-y', outputPath], TIMEOUT.render);
   return outputPath;
 }
 

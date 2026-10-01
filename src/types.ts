@@ -120,7 +120,7 @@ export interface LocalizedSegment {
   dubEndTime?: number;
 }
 
-/** What a scan of sampled frames found on screen; decides whether lip-sync is worth offering. */
+/** What a scan of sampled frames found on screen; a face means every line is fitted to the speaker's mouth. */
 export interface FaceScan {
   /** Frames sampled across the video, and how many of them showed a face. */
   sampledFrames: number;
@@ -131,7 +131,7 @@ export interface FaceScan {
   medianFaceArea: number;
   /** Share of face frames where the face looks towards the camera. */
   frontalRatio: number;
-  /** A clear face worth lip-syncing is on screen for a good part of the video. */
+  /** A clear face is on screen for a good part of the video. */
   hasFaces: boolean;
   /** The clearest face seen: where (seconds) and its box as fractions of the frame [x1, y1, x2, y2]. */
   best?: { time: number; box: [number, number, number, number] };
@@ -140,7 +140,6 @@ export interface FaceScan {
 
 /** How one language's last render came out, for the export screen's quality panel. */
 export interface RenderReport {
-  lipSync: 'applied' | 'off' | 'skipped_no_face' | 'unavailable' | 'failed';
   background: 'separated' | 'ducked';
   channels: 'stereo' | 'mono';
   /** Spoken lines, and how many of them start and end with the original speaker's mouth. */
@@ -173,7 +172,6 @@ export interface UserPreferences {
   /** Voice lines with emotion and delivery (Gemini-TTS); off uses the steadier standard voices. */
   expressiveVoices: boolean;
   separateBackground: boolean;
-  autoLipSync: boolean;
   /** Whether video downloads start with captions burned in. */
   burnCaptions: boolean;
   /** Paid extra, off by default: an AI reviewer listens to every rendered line against the original and re-records the ones that came out wrong. */
@@ -214,7 +212,7 @@ export interface LanguageOutput {
   wordsCount?: number;
   dubbedAudioUrl?: string;
   finalDubbedVideoUrl?: string;
-  /** How the last render of this language came out (sync, lip-sync, background). */
+  /** How the last render of this language came out (sync, background). */
   renderReport?: RenderReport;
 }
 
@@ -241,8 +239,7 @@ export interface DubbingProject {
   selectedVoiceId: string;
   translationStyle: TranslationStyle;
   adaptExpressions: boolean;
-  autoLipSync: boolean;
-  /** Run vocal/background separation so music and ambience keep playing *under* the dubbed voice, not just between lines. Slow (CPU), so opt-in. */
+  /** Run speech/background separation so music and ambience keep playing *under* the dubbed voice, not just between lines. Opt-in. */
   separateBackground?: boolean;
   voiceSpeed: number;
   voicePitch: number;

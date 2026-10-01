@@ -99,7 +99,6 @@ async function seedProject(): Promise<Fixture> {
     languageSpeakerVoiceMap: {},
     translationStyle: 'natural',
     adaptExpressions: true,
-    autoLipSync: false,
     voiceSpeed: 1,
     voicePitch: 1,
     voiceEmotion: 'friendly',

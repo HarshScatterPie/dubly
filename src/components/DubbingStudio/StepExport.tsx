@@ -5,7 +5,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import confetti from 'canvas-confetti';
-import { CheckCircle2, Clapperboard, Clock, ExternalLink, Languages, Mic, Monitor, Plus, RefreshCw, Share2 } from 'lucide-react';
+import { CheckCircle2, Clock, ExternalLink, Languages, Mic, Monitor, Plus, RefreshCw, Share2 } from 'lucide-react';
 import { DubbingProject, VoiceEngine } from '../../types';
 import { LANGUAGES, VOICES } from '../../data/mockData';
 import { languageVoiced, VOICE_ENGINES } from '../../lib/voiceEngines';
@@ -52,7 +52,6 @@ export const StepExport: React.FC<StepExportProps> = ({
   const voiceId = (active && project.languageVoiceMap?.[active.code]) || project.selectedVoiceId;
   const voiceName = VOICES.find((v) => v.id === voiceId)?.name.replace(/\s*\(.*\)$/, '') || 'AI voice';
   const readyCount = languages.filter((l) => l.videoUrl).length;
-  const lipSynced = languages.some((l) => l.report?.lipSync === 'applied');
   const moreLanguages = LANGUAGES.filter((l) => !languages.some((d) => d.code === l.code) && l.code !== project.sourceLanguage && languageVoiced(l.code, voiceEngines));
 
   useEffect(() => {
@@ -90,12 +89,6 @@ export const StepExport: React.FC<StepExportProps> = ({
                   <Clock className="w-3 h-3" />
                   {formatClock(project.videoDuration)}
                 </span>
-                {lipSynced && (
-                  <span className="px-2 py-1 rounded-full bg-emerald-400/15 border border-emerald-300/30 text-emerald-200 inline-flex items-center gap-1">
-                    <Clapperboard className="w-3 h-3" />
-                    Lip-synced
-                  </span>
-                )}
               </div>
             </div>
           </div>

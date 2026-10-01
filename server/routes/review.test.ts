@@ -118,7 +118,6 @@ async function seedRenderedProject(opts: { legacy?: boolean } = {}): Promise<Fix
     languageSpeakerVoiceMap: {},
     translationStyle: 'natural',
     adaptExpressions: true,
-    autoLipSync: false,
     voiceSpeed: 1,
     voicePitch: 1,
     voiceEmotion: 'friendly',

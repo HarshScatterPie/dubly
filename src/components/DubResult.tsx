@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, AudioLines, CheckCircle2, Clapperboard, Gauge, Info, ListChecks, Music, ScanFace, XCircle } from 'lucide-react';
+import { AlertTriangle, AudioLines, CheckCircle2, Gauge, Info, ListChecks, Music, ScanFace } from 'lucide-react';
 import type { DubbingProject, Language, LocalizedSegment, RenderReport } from '../types';
 import { LANGUAGES } from '../data/mockData';
 import { spokenSpan } from '../lib/captionCues';
@@ -112,14 +112,6 @@ const Row: React.FC<{ icon: React.ElementType; tone: Tone; title: string; detail
   </div>
 );
 
-const LIP_SYNC_ROW: Record<RenderReport['lipSync'], { tone: Tone; title: string; detail: string; icon: React.ElementType }> = {
-  applied: { tone: 'good', icon: Clapperboard, title: 'Lip-synced', detail: "The speaker's mouth was re-animated to the new voice." },
-  off: { tone: 'muted', icon: Clapperboard, title: 'Lip-sync off', detail: 'The picture is untouched. Turn lip-sync on when a speaker faces the camera.' },
-  skipped_no_face: { tone: 'warn', icon: ScanFace, title: 'Lip-sync skipped', detail: 'No clear, front-facing face was found, so the original picture was kept.' },
-  unavailable: { tone: 'muted', icon: Clapperboard, title: 'Lip-sync unavailable', detail: 'Lip-sync is not set up on this server.' },
-  failed: { tone: 'bad', icon: XCircle, title: 'Lip-sync failed', detail: 'The original picture was kept so the dub could still finish.' },
-};
-
 /** What the last render of a language did: how well it follows the speaker, and what happened to the picture and the soundtrack. */
 export const QualityPanel: React.FC<{
   report?: RenderReport;
@@ -136,7 +128,7 @@ export const QualityPanel: React.FC<{
         </div>
         <p className="mt-2 text-xs text-[#64748B] flex items-start gap-2">
           <Info className="w-3.5 h-3.5 mt-0.5 shrink-0" />
-          This language was rendered before quality reports existed. Re-dub it to see timing and lip-sync details.
+          This language was rendered before quality reports existed. Re-dub it to see timing details.
         </p>
       </div>
     );
@@ -144,8 +136,6 @@ export const QualityPanel: React.FC<{
   const score = report.lines ? Math.round((report.inSync / report.lines) * 100) : 100;
   const toReview = report.condensed + report.rushed + report.overflow;
   const ring = score >= 85 ? '#10B981' : score >= 65 ? '#F59E0B' : '#F05637';
-  const lip = LIP_SYNC_ROW[report.lipSync];
-  const lipRow = report.lipSync === 'off' && faceDetected ? { ...lip, tone: 'info' as Tone, detail: 'A face is on screen: re-dub with lip-sync on for the mouth to follow the new voice.' } : lip;
 
   return (
     <div className={`rounded-3xl glass-panel p-5 space-y-4 ${className}`}>
@@ -177,7 +167,9 @@ export const QualityPanel: React.FC<{
       </div>
 
       <div className="space-y-3 pt-3 border-t border-[#E2E8F0]">
-        <Row icon={lipRow.icon} tone={lipRow.tone} title={lipRow.title} detail={lipRow.detail} />
+        {faceDetected && (
+          <Row icon={ScanFace} tone="good" title="Timed to the mouth" detail="A face is on screen, so every line is fitted to when the speaker's mouth opens and closes." />
+        )}
         <Row
           icon={Music}
           tone={report.background === 'separated' ? 'good' : 'info'}

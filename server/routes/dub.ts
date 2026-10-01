@@ -63,7 +63,6 @@ import {
   planPlacements,
   renderVoiceTrack,
   TAKE_LEAD_SECONDS,
-  voiceTrackFor16k,
   type DuckSpan,
   type LineTiming,
 } from '../lib/dubMix';
@@ -77,7 +76,6 @@ import { languageVoiced } from '../../src/lib/voiceEngines';
 import { isVertexConfigured, vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
 import { buildKaraokeAss } from '../lib/captions';
 import { toSrt } from '../../src/lib/captionCues';
-import { isLipSyncAvailable, lipSyncFps, runLipSync } from '../lib/lipSync';
 import { costEstimate, createCostMeter, recordTts, summarizeCost } from '../lib/costMeter';
 import { isSeparationAvailable, SEPARATION_MODEL, separateStems } from '../lib/audioSeparation';
 import { getLanguageName } from '../lib/languageMeta';
@@ -133,7 +131,6 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     speakerVoiceMap,
     languageVoiceMap,
     languageSpeakerVoiceMap,
-    autoLipSync,
     separateBackground: sepBg,
     languages: requestedLanguages,
   } = req.body || {};
@@ -154,7 +151,6 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     voiceSpeed: voiceSpeed ?? stored.voiceSpeed,
     voicePitch: voicePitch ?? stored.voicePitch,
     voiceEmotion: voiceEmotion || stored.voiceEmotion,
-    autoLipSync: autoLipSync ?? stored.autoLipSync,
     separateBackground: sepBg ?? stored.separateBackground,
   });
 
@@ -482,7 +478,7 @@ async function prepareBackgroundBed(
       { stage: 'separating_audio', progress: 10 + Math.round(fraction * 4) }
     )
   );
-  const stems = await separateStems(videoLocalPath, jobDir, { durationSeconds: stored.videoDuration, onProgress: report });
+  const stems = await separateStems(videoLocalPath, jobDir, { onProgress: report });
   if (!stems) {
     log.warn('separation_failed', {}, '[dub] separation unavailable/failed, keeping background via ducking instead');
     return raw;
@@ -607,9 +603,9 @@ async function renderLanguage(params: {
   levelSpeech: WavSlicer | null;
   // Measured start/end of each original line's speech, by transcript segment id.
   speechBounds: Map<string, SpeechBounds>;
-  // A face is on screen or lip-sync is on: fit each line to the speaker's mouth, not just to the gap before the next line.
+  // A face is on screen: fit each line to the speaker's mouth, not just to the gap before the next line.
   strictSync: boolean;
-  // The source's streams: frame rate for lip-sync, and how far its sound is offset from its picture.
+  // The source's streams: how far its sound is offset from its picture.
   layout: StreamLayout | null;
   // The paid extras the user who started the dub switched on (Settings): AI review, premium voices, pace re-takes.
   aiReview: boolean;
@@ -837,7 +833,6 @@ async function renderLanguage(params: {
   const placedByIndex = new Map(takes.map((t, k) => [t.index, { placement: placements[k], timing: timings[k] }]));
 
   const report: RenderReport = {
-    lipSync: stored.autoLipSync ? 'failed' : 'off',
     background: background.isVocalsRemoved ? 'separated' : 'ducked',
     channels: 'stereo',
     lines: takes.length,
@@ -914,44 +909,6 @@ async function renderLanguage(params: {
   const audioLead = audioLeadSeconds(params.layout);
   let finalVideoPath = path.join(langDir, 'dubbed.mp4');
   await muxVideoWithAudio(videoLocalPath, stitchedAudioPath, finalVideoPath, { audioOffsetSeconds: Math.max(0, audioLead), languageCode });
-
-  if (stored.autoLipSync) {
-    if (!isLipSyncAvailable()) report.lipSync = 'unavailable';
-    else if (stored.faceScan && !stored.faceScan.hasFaces) report.lipSync = 'skipped_no_face';
-    else {
-      const lipSyncMessage = `${languageName}: lip-syncing the speaker's mouth to the new voice`;
-      await params.onProgress(0.84, `${lipSyncMessage}...`);
-      try {
-        const voice16k = await voiceTrackFor16k(voicePath, path.join(langDir, 'voice_16k.wav'));
-        const lipSyncVideo = path.join(langDir, 'lipsync_video.mp4');
-        const result = await runLipSync({
-          videoPath: videoLocalPath,
-          voiceWavPath: voice16k,
-          outputPath: lipSyncVideo,
-          fps: lipSyncFps(params.layout?.video?.fps ?? 0),
-          durationSeconds: stored.videoDuration,
-          spans: mergeSpans([...originalSpans, ...dubSpans], 0.3),
-          workDir: langDir,
-          onProgress: throttled((fraction) => params.onProgress(0.84 + fraction * 0.1, `${lipSyncMessage} — ${Math.round(fraction * 100)}%`), 4000),
-        });
-        if (result.synced === 0) {
-          report.lipSync = 'skipped_no_face';
-        } else {
-          const lipSyncedPath = path.join(langDir, 'dubbed_lipsynced.mp4');
-          // The lip-synced picture starts at the source's first frame, so an offset either way is applied here.
-          await muxVideoWithAudio(lipSyncVideo, stitchedAudioPath, lipSyncedPath, { audioOffsetSeconds: audioLead, languageCode });
-          finalVideoPath = lipSyncedPath;
-          report.lipSync = 'applied';
-        }
-        log.info('lipsync_done', { languageCode, frames: result.frames, synced: result.synced });
-      } catch (err) {
-        if (err instanceof JobCancelledError || err instanceof JobSupersededError) throw err;
-        // Best-effort enhancement, not a core requirement: fall back to the non-lip-synced render rather than failing the dub.
-        log.error('lipsync_failed', err, { languageCode }, '[dub] lip-sync failed, continuing with non-lip-synced video');
-        report.lipSync = 'failed';
-      }
-    }
-  }
 
   // The captions ride along as a subtitle track viewers can switch on, so every download has them.
   const spokenLines = finalSegments.filter((s) => stripPerformanceTags(s.translatedText).trim());
@@ -1055,7 +1012,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     const sourceLoudness = await measureLoudness(videoLocalPath);
     const loudnessLufs = loudnessTarget(sourceLoudness);
     // A face on screen means viewers watch the mouth: fit every line to it, not only to the gap before the next line.
-    const strictSync = Boolean(stored.autoLipSync) || stored.faceScan?.hasFaces === true;
+    const strictSync = stored.faceScan?.hasFaces === true;
     log.info('dub_setup', {
       separated: background.isVocalsRemoved,
       onsetsMeasured: speechBounds.size,

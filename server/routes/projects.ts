@@ -28,7 +28,6 @@ import { limits, rateRules } from '../lib/limits';
 import { acquireHeavySlot } from '../lib/heavyWork';
 import { routeTranscribe, routeTranslateSegments } from '../lib/modelRouter';
 import { alignSegmentsWithinWindows, detectSpeechRegions, retimeWords } from '../lib/forcedAlign';
-import { isCtcAlignAvailable, refineTimingsWithCtc, warmCtcModel } from '../lib/ctcAlign';
 import { describeTranscriptHealth, sanitizeTranscript } from '../lib/transcriptSanitizer';
 import { costEstimate, createCostMeter, recordStt, summarizeCost } from '../lib/costMeter';
 import { getLanguageName, mapDetectedLanguageToAppCode, resolveTargetLanguages } from '../lib/languageMeta';
@@ -167,7 +166,6 @@ const PATCHABLE_FIELDS = [
   'languageSpeakerVoiceMap',
   'translationStyle',
   'adaptExpressions',
-  'autoLipSync',
   'voiceSpeed',
   'voicePitch',
   'voiceEmotion',
@@ -231,7 +229,7 @@ async function ingestSourceVideo(workspaceId: string, projectId: string, localVi
       `Videos can be up to ${Math.round(limits.maxVideoSeconds / 60)} minutes long; this one is ${Math.ceil(probe.durationSeconds / 60)} minutes.`
     );
   }
-  // Looks for faces while the file uploads, so offering lip-sync costs the user no extra wait.
+  // Looks for faces while the file uploads, so fitting lines to the speaker's mouth costs the user no extra wait.
   const faceScanning = scanFaces(localVideoPath, probe.durationSeconds).catch(() => null);
   const storagePath = `workspaces/${workspaceId}/projects/${projectId}/source${probe.ext}`;
   await uploadFileToStorage(storagePath, localVideoPath, probe.contentType);
@@ -319,11 +317,6 @@ projectsRouter.post('/:id/import-sample', refuseWhenDraining, rateLimit('import-
     await rm(localPath, { force: true });
   }
 });
-
-// How long the optional word-timing pass may hold up an analysis before VAD timings are used instead.
-const CTC_BASE_BUDGET_MS = 25_000;
-const CTC_BUDGET_MS_PER_AUDIO_SECOND = 150;
-const CTC_MAX_BUDGET_MS = 75_000;
 
 const transcribeLimit = rateLimit('transcribe', [
   ['user', rateRules.transcribePerUser],
@@ -454,9 +447,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
       audioLocalPath,
       stored.targetLanguage,
       settings.sttProvider,
-      (done, total, language) => {
-        // The first chunk reveals the language, so the word-timing model loads while the remaining chunks are still transcribing.
-        if (done === 1) warmCtcModel(mapDetectedLanguageToAppCode(language));
+      (done, total) => {
         return report(12 + Math.round((done / total) * 63), total > 1 ? `Listening to the speech — part ${done} of ${total} done` : 'Speech transcribed');
       }
     );
@@ -478,12 +469,10 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
     await recordJobUsage(job.id, { ...costEstimate(costMeter) });
 
     // Gemini gives accurate text but unreliable timing (it estimates and drifts
-    // progressively across a long clip). Timing is therefore rebuilt from the audio in
-    // two passes, coarse then fine.
-    //
-    // Pass 1 (always): voice-activity detection finds where speech physically is, and the
-    // transcript is partitioned onto those regions. This decides *which* stretch of audio
-    // each line belongs to, and never places a line in silence.
+    // progressively across a long clip). Timing is therefore rebuilt from the audio:
+    // voice-activity detection finds where speech physically is, and the transcript is
+    // partitioned onto those regions. This decides *which* stretch of audio each line
+    // belongs to, and never places a line in silence.
     let timedSegments = cleanSegments;
     await report(84, 'Syncing every line to the exact moment it is spoken');
     try {
@@ -496,26 +485,6 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
       }
     } catch (err) {
       console.error('[projects] speech alignment failed, keeping provider timings', err);
-    }
-
-    // Pass 2 (when the model is installed): a CTC forced alignment solves for the exact
-    // frame each word lands on, turning pass 1's region-level estimate into measured
-    // word-level timing. Best-effort — a failure here leaves pass 1's timings standing,
-    // which is what every project got before this existed.
-    if (isCtcAlignAvailable(detectedSourceLanguage)) {
-      await report(90, 'Measuring word-by-word timing');
-      try {
-        // Word timing is a refinement: past its budget the VAD timings stand, rather than holding the user on this screen.
-        const budgetMs = Math.min(CTC_MAX_BUDGET_MS, CTC_BASE_BUDGET_MS + audioSeconds * CTC_BUDGET_MS_PER_AUDIO_SECOND);
-        const refined = await Promise.race([
-          refineTimingsWithCtc(audioLocalPath, detectedSourceLanguage, timedSegments),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), budgetMs)),
-        ]);
-        if (refined) timedSegments = refined;
-        else console.warn(`[projects] word timing exceeded its ${Math.round(budgetMs / 1000)}s budget, keeping VAD timings`);
-      } catch (err) {
-        console.error('[projects] forced alignment failed, keeping VAD timings', err);
-      }
     }
 
     await report(97, 'Identifying speakers');

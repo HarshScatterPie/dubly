@@ -14,18 +14,15 @@ import {
   Volume2,
   Smile,
   Zap,
-  Clapperboard,
   Music,
-  ScanFace,
   Lock,
 } from 'lucide-react';
-import { FaceScan, SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion, VoiceEngine } from '../../types';
+import { SpeakerProfile, TranscriptSegment, Voice, VoiceCategory, VoiceEmotion, VoiceEngine } from '../../types';
 import { VOICES, LANGUAGES } from '../../data/mockData';
 import { enginesLabel, hasGeminiVoices, listedEngines, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed } from '../../lib/voiceEngines';
 import { textToSpeechService } from '../../services/textToSpeechService';
 import { StickyActionBar } from './StickyActionBar';
 import { VoiceEngineBadge } from '../VoiceEngineBadge';
-import { lipSyncEstimate } from './LipSyncPrompt';
 
 interface StepVoiceProps {
   selectedVoiceId: string;
@@ -45,11 +42,6 @@ interface StepVoiceProps {
   /** Who each speaker is, heard during analysis. */
   speakerProfiles?: Record<string, SpeakerProfile>;
   transcriptSegments?: TranscriptSegment[];
-  autoLipSync?: boolean;
-  lipSyncAvailable?: boolean;
-  /** Faces found in the video; decides how lip-sync is presented. */
-  faceScan?: FaceScan | null;
-  videoDuration?: number;
   separateBackground?: boolean;
   separationAvailable?: boolean;
   onToggleSeparateBackground?: (enabled: boolean) => void;
@@ -60,7 +52,6 @@ interface StepVoiceProps {
   onChangeSpeed: (speed: number) => void;
   onChangePitch: (pitch: number) => void;
   onChangeEmotion: (emotion: VoiceEmotion) => void;
-  onToggleLipSync?: (enabled: boolean) => void;
   onGenerateDub: () => void;
   onShowToast?: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
 }
@@ -79,10 +70,6 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   speakerVoiceMap = {},
   speakerProfiles = {},
   transcriptSegments = [],
-  autoLipSync = false,
-  lipSyncAvailable = false,
-  faceScan = null,
-  videoDuration = 0,
   separateBackground = false,
   separationAvailable = false,
   onToggleSeparateBackground,
@@ -94,7 +81,6 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
   onChangeSpeed,
   onChangePitch,
   onChangeEmotion,
-  onToggleLipSync,
   onGenerateDub,
   onShowToast,
 }) => {
@@ -545,78 +531,38 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
         )}
       </div>
 
-      {/* Render quality: what happens to the picture and the soundtrack */}
-      {(lipSyncAvailable || separationAvailable) && (
+      {/* Render quality: what happens to the soundtrack */}
+      {separationAvailable && (
         <div className="rounded-3xl glass-panel p-5 sm:p-6 space-y-4">
           <div>
             <h4 className="text-sm font-bold text-[#0F172A]">Render quality</h4>
             <p className="text-xs text-[#64748B] mt-0.5">Every line is timed to the moment the original speaker starts talking. These add more.</p>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            {lipSyncAvailable && (
-              <button
-                type="button"
-                role="switch"
-                aria-checked={autoLipSync}
-                onClick={() => onToggleLipSync?.(!autoLipSync)}
-                className={`flex items-start justify-between gap-3 p-4 rounded-2xl border text-left transition-colors ${
-                  autoLipSync ? 'bg-[#FFF4F1] border-[#F05637]/50' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
-                }`}
-              >
-                <span className="flex items-start gap-3">
-                  <span className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center ${autoLipSync ? 'bg-[#F05637] text-white' : 'bg-[#F8FAFC] text-[#94A3B8] border border-[#E2E8F0]'}`}>
-                    <Clapperboard className="w-4 h-4" />
-                  </span>
-                  <span>
-                    <span className="text-xs font-bold text-[#0F172A] block">Lip-sync</span>
-                    <span className="text-[11px] text-[#64748B] block leading-relaxed">
-                      Re-animates the speaker's mouth to the new voice. Adds {lipSyncEstimate(videoDuration)} of rendering.
-                    </span>
-                    {faceScan && (
-                      <span
-                        className={`mt-1.5 inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-semibold border ${
-                          faceScan.hasFaces ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-amber-50 border-amber-200 text-amber-700'
-                        }`}
-                      >
-                        <ScanFace className="w-3 h-3" />
-                        {faceScan.hasFaces
-                          ? `Face on screen in ${Math.round((faceScan.framesWithFace / Math.max(1, faceScan.sampledFrames)) * 100)}% of the video`
-                          : 'No clear face found — lip-sync would be skipped'}
-                      </span>
-                    )}
+            <button
+              type="button"
+              role="switch"
+              aria-checked={separateBackground}
+              onClick={() => onToggleSeparateBackground?.(!separateBackground)}
+              className={`flex items-start justify-between gap-3 p-4 rounded-2xl border text-left transition-colors ${
+                separateBackground ? 'bg-[#FFF4F1] border-[#F05637]/50' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
+              }`}
+            >
+              <span className="flex items-start gap-3">
+                <span className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center ${separateBackground ? 'bg-[#F05637] text-white' : 'bg-[#F8FAFC] text-[#94A3B8] border border-[#E2E8F0]'}`}>
+                  <Music className="w-4 h-4" />
+                </span>
+                <span>
+                  <span className="text-xs font-bold text-[#0F172A] block">Keep music under the voice</span>
+                  <span className="text-[11px] text-[#64748B] block leading-relaxed">
+                    Removes the original voice and keeps music and ambience playing underneath the dub. Off, the background plays only between lines. Done once per video, then reused.
                   </span>
                 </span>
-                <span className={`relative mt-1 w-9 h-5 rounded-full shrink-0 transition-colors ${autoLipSync ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
-                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${autoLipSync ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                </span>
-              </button>
-            )}
-            {separationAvailable && (
-              <button
-                type="button"
-                role="switch"
-                aria-checked={separateBackground}
-                onClick={() => onToggleSeparateBackground?.(!separateBackground)}
-                className={`flex items-start justify-between gap-3 p-4 rounded-2xl border text-left transition-colors ${
-                  separateBackground ? 'bg-[#FFF4F1] border-[#F05637]/50' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'
-                }`}
-              >
-                <span className="flex items-start gap-3">
-                  <span className={`w-9 h-9 shrink-0 rounded-xl flex items-center justify-center ${separateBackground ? 'bg-[#F05637] text-white' : 'bg-[#F8FAFC] text-[#94A3B8] border border-[#E2E8F0]'}`}>
-                    <Music className="w-4 h-4" />
-                  </span>
-                  <span>
-                    <span className="text-xs font-bold text-[#0F172A] block">Keep music under the voice</span>
-                    <span className="text-[11px] text-[#64748B] block leading-relaxed">
-                      Removes the original voice and keeps music and ambience playing underneath the dub. Off, the background plays only between lines. Done once per video, then reused.
-                    </span>
-                  </span>
-                </span>
-                <span className={`relative mt-1 w-9 h-5 rounded-full shrink-0 transition-colors ${separateBackground ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
-                  <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${separateBackground ? 'translate-x-4' : 'translate-x-0.5'}`} />
-                </span>
-              </button>
-            )}
+              </span>
+              <span className={`relative mt-1 w-9 h-5 rounded-full shrink-0 transition-colors ${separateBackground ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'}`}>
+                <span className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform ${separateBackground ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </span>
+            </button>
           </div>
         </div>
       )}

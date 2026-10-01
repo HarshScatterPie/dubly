@@ -10,8 +10,7 @@ server/.env
 server/credentials
 server/tmp
 server/cache
-server/lipsync/venv
-server/lipsync/wav2lip_onnx/temp
+server/bin
 **/__pycache__
 assets
 coverage

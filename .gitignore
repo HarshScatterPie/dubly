@@ -12,12 +12,13 @@ server/tmp/
 gcp-service-account*.json
 firebase-service-account*.json
 
-# Local model runtimes / caches — large, machine-specific, reproducible from setup docs
-server/lipsync/venv/
-server/lipsync/wav2lip_onnx/temp/
-server/lipsync/wav2lip_onnx/checkpoints/*.onnx
+# Machine-specific binaries and caches (deep-filter: see docs/DEPLOYMENT.md)
+server/bin/
 server/cache/
 __pycache__/
 *.pyc
 .pytest_cache/
 
+
+# Leftover local lip-sync venv and weights (feature removed)
+server/lipsync/

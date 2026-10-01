@@ -84,7 +84,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Build production image (not pushed)
         run: docker build -t dubly:ci .
-      - name: Image has a working ffmpeg and starts its runtime
+      - name: Image has a working ffmpeg and deep-filter and starts its runtime
         run: |
           docker run --rm --entrypoint ffmpeg dubly:ci -hide_banner -version | head -1
+          docker run --rm --entrypoint /app/server/bin/deep-filter dubly:ci --version
           docker run --rm --entrypoint node dubly:ci -e "require('fs').accessSync('dist/index.html'); console.log('frontend bundle present')"

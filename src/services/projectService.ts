@@ -196,7 +196,6 @@ export class ProjectService {
       languageVoiceMap?: Record<string, string>;
       /** Language code -> speaker label -> voice id, for a multi-speaker video dubbed into several languages. */
       languageSpeakerVoiceMap?: Record<string, Record<string, string>>;
-      autoLipSync?: boolean;
       separateBackground?: boolean;
       /** Render only these languages. Omit to render every language the project targets. */
       languages?: string[];

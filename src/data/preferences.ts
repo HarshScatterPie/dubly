@@ -19,7 +19,6 @@ export const DEFAULT_PREFERENCES: UserPreferences = {
   voiceSpeed: 1,
   expressiveVoices: true,
   separateBackground: false,
-  autoLipSync: false,
   burnCaptions: false,
   // Features that add to the provider bill start off; users switch on the ones they want.
   aiReview: false,

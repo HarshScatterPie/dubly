@@ -76,7 +76,6 @@ const voiceChoices = {
   speakerVoiceMap: boundedRecord(voiceId).optional(),
   languageVoiceMap: boundedRecord(voiceId).optional(),
   languageSpeakerVoiceMap: boundedRecord(boundedRecord(voiceId)).optional(),
-  autoLipSync: z.boolean().optional(),
 };
 
 export const schemas = {
@@ -142,7 +141,6 @@ export const schemas = {
         voiceSpeed: z.number().finite().min(0.75).max(1.25).optional(),
         expressiveVoices: z.boolean().optional(),
         separateBackground: z.boolean().optional(),
-        autoLipSync: z.boolean().optional(),
         burnCaptions: z.boolean().optional(),
         aiReview: z.boolean().optional(),
         premiumVoices: z.boolean().optional(),

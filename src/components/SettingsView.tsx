@@ -151,7 +151,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
     return `${what} Uses your monthly limit faster: each dubbed minute counts as ${Math.round((1 + rate) * 100) / 100} min while it is on.`;
   };
   const [saving, setSaving] = useState(false);
-  const [engines, setEngines] = useState<{ lipSyncAvailable: boolean; separationAvailable: boolean } | null>(null);
+  const [engines, setEngines] = useState<{ separationAvailable: boolean } | null>(null);
   const [previewingVoiceId, setPreviewingVoiceId] = useState<string | null>(null);
   const [device, setDevice] = useState<DevicePrefs>(loadDevicePrefs);
   const [permission, setPermission] = useState<NotificationPermission | 'unsupported'>(notificationsSupported() ? Notification.permission : 'unsupported');
@@ -165,9 +165,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   }, [preferences]);
 
   useEffect(() => {
-    apiGet<{ lipSyncAvailable: boolean; separationAvailable: boolean }>('/api/health')
+    apiGet<{ separationAvailable: boolean }>('/api/health')
       .then(setEngines)
-      .catch(() => setEngines({ lipSyncAvailable: false, separationAvailable: false }));
+      .catch(() => setEngines({ separationAvailable: false }));
   }, []);
 
   const saved = preferences ?? DEFAULT_PREFERENCES;
@@ -511,9 +511,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
               hint={engines && !engines.separationAvailable ? 'Not available on this server yet: music plays between lines instead.' : 'Separates music and ambience so they keep playing under the dub. Adds a few minutes per video.'}
             >
               <Toggle label="Keep background music" checked={draft.separateBackground} disabled={engines !== null && !engines.separationAvailable} onChange={(v) => update({ separateBackground: v })} />
-            </Row>
-            <Row title="Lip-sync" hint={engines && !engines.lipSyncAvailable ? 'Not available on this server yet.' : 'Matches mouth movements to the new language. Slow, and best on clear, front-facing faces.'}>
-              <Toggle label="Lip-sync" checked={draft.autoLipSync} disabled={engines !== null && !engines.lipSyncAvailable} onChange={(v) => update({ autoLipSync: v })} />
             </Row>
             <Row title="Burn captions into downloads" hint="Downloads start with word-by-word captions on the video. You can still switch it per download.">
               <Toggle label="Burn captions" checked={draft.burnCaptions} onChange={(v) => update({ burnCaptions: v })} />

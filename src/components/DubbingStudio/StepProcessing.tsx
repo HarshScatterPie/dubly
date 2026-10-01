@@ -32,7 +32,7 @@ const STAGES = [
   { label: 'Preparing audio & measuring speech', match: /preparing|separating|reusing|measuring|starting/i },
   { label: 'Generating the dubbed voice', match: /generating neural voice|ai reviewer|re-recording/i },
   { label: "Syncing every line to the speaker's timing", match: /synchroniz|matching loudness/i },
-  { label: 'Rendering the final video', match: /rendering|lip-sync|uploading/i },
+  { label: 'Rendering the final video', match: /rendering|uploading/i },
 ];
 
 export const StepProcessing: React.FC<StepProcessingProps> = ({

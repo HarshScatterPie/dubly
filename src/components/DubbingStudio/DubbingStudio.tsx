@@ -31,7 +31,6 @@ import { StepLocalize } from './StepLocalize';
 import { StepVoice } from './StepVoice';
 import { StepProcessing } from './StepProcessing';
 import { StepExport } from './StepExport';
-import { LipSyncPrompt } from './LipSyncPrompt';
 import { speechToTextService, type TranscriptionResult } from '../../services/speechToTextService';
 import { translationService } from '../../services/translationService';
 import { videoService } from '../../services/videoService';
@@ -188,14 +187,10 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const [voiceSpeed, setVoiceSpeed] = useState<number>(prefs.voiceSpeed);
   const [voicePitch, setVoicePitch] = useState<number>(1.0);
   const [voiceEmotion, setVoiceEmotion] = useState<VoiceEmotion>(prefs.voiceEmotion);
-  const [autoLipSync, setAutoLipSync] = useState<boolean>(prefs.autoLipSync);
-  const [lipSyncAvailable, setLipSyncAvailable] = useState<boolean>(false);
   const [separateBackground, setSeparateBackground] = useState<boolean>(prefs.separateBackground);
   const [separationAvailable, setSeparationAvailable] = useState<boolean>(false);
-  // Faces found in the video (scanned on upload): a speaker on screen is when lip-sync is worth offering.
+  // Faces found in the video (scanned on upload): with a speaker on screen, every line is fitted to the mouth.
   const [faceScan, setFaceScan] = useState<FaceScan | null>(null);
-  const [showLipSyncPrompt, setShowLipSyncPrompt] = useState(false);
-  const lipSyncAskedRef = useRef(false);
   const faceScanRequestedRef = useRef<string | null>(null);
 
   // A saved default on an engine the plan does not include becomes the same persona on one it does.
@@ -207,15 +202,9 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   }, [voiceEngines]);
 
   React.useEffect(() => {
-    apiGet<{ lipSyncAvailable: boolean; separationAvailable: boolean }>('/api/health')
-      .then((res) => {
-        setLipSyncAvailable(res.lipSyncAvailable);
-        setSeparationAvailable(res.separationAvailable);
-      })
-      .catch(() => {
-        setLipSyncAvailable(false);
-        setSeparationAvailable(false);
-      });
+    apiGet<{ separationAvailable: boolean }>('/api/health')
+      .then((res) => setSeparationAvailable(res.separationAvailable))
+      .catch(() => setSeparationAvailable(false));
   }, []);
 
   // Processing & Export State
@@ -223,8 +212,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const [dubProgress, setDubProgress] = useState<number>(0);
   const [processingMessage, setProcessingMessage] = useState<string>('');
   // A countdown here used to be a flat `(100 - progress) * 0.7` guess, shown identically for
-  // an 8-second clip and a 10-minute one, and wildly wrong whenever lip-sync or background
-  // separation is on (both are CPU-only and can add minutes). Elapsed time is never wrong —
+  // an 8-second clip and a 10-minute one, and wildly wrong whenever background separation
+  // is on (it runs on the CPU and can add minutes). Elapsed time is never wrong —
   // it just counts — so that's what the processing screen shows instead of a fabricated ETA.
   const [dubElapsedSeconds, setDubElapsedSeconds] = useState<number>(0);
   const dubStartedAtRef = useRef<number>(0);
@@ -268,7 +257,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setVoiceSpeed(p.voiceSpeed ?? 1);
     setVoicePitch(p.voicePitch ?? 1);
     setVoiceEmotion(p.voiceEmotion || 'friendly');
-    setAutoLipSync(Boolean(p.autoLipSync));
     setSeparateBackground(Boolean(p.separateBackground));
     setFaceScan(p.faceScan ?? null);
     maxReachedIndexRef.current = STEP_ORDER.indexOf('localize');
@@ -312,7 +300,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         setVoiceSpeed(p.voiceSpeed ?? 1);
         setVoicePitch(p.voicePitch ?? 1);
         setVoiceEmotion(p.voiceEmotion || 'friendly');
-        setAutoLipSync(Boolean(p.autoLipSync));
         setSeparateBackground(Boolean(p.separateBackground));
       }
       const languages = p.targetLanguages?.length ? p.targetLanguages : [p.targetLanguage];
@@ -391,7 +378,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setActivePresetId(undefined);
     setIsUploading(true);
     setFaceScan(null);
-    lipSyncAskedRef.current = false;
 
     // Instant client-side preview while the real upload runs.
     const meta = await videoService.parseVideoFile(file);
@@ -441,7 +427,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setTranscriptSegments([]);
     setIsUploading(true);
     setFaceScan(null);
-    lipSyncAskedRef.current = false;
 
     try {
       const draft = await projectService.createDraft(sample.title, 'en', targetLanguageCode);
@@ -496,13 +481,12 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setLocalizedSegments([]);
     setHasGeneratedTranslation(false);
     setFaceScan(null);
-    lipSyncAskedRef.current = false;
     setCurrentStep('upload');
   };
 
   // Projects uploaded before face scanning (or whose scan ran past the upload) are scanned once, in the background.
   React.useEffect(() => {
-    if (!projectId || isUploading || !lipSyncAvailable || faceScan || faceScanRequestedRef.current === projectId) return;
+    if (!projectId || isUploading || faceScan || faceScanRequestedRef.current === projectId) return;
     faceScanRequestedRef.current = projectId;
     projectService
       .scanFaces(projectId)
@@ -510,14 +494,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         if (isMountedRef.current && res.faceScan) setFaceScan(res.faceScan);
       })
       .catch(() => undefined);
-  }, [projectId, isUploading, lipSyncAvailable, faceScan]);
-
-  // A face on screen: ask about lip-sync once, when the user reaches the render options.
-  React.useEffect(() => {
-    if (currentStep !== 'voice' || !lipSyncAvailable || !faceScan?.hasFaces || lipSyncAskedRef.current) return;
-    lipSyncAskedRef.current = true;
-    setShowLipSyncPrompt(true);
-  }, [currentStep, lipSyncAvailable, faceScan]);
+  }, [projectId, isUploading, faceScan]);
 
   // STEP 1 -> STEP 2: Analyze Video (real STT)
   const handleAnalyzeVideo = async () => {
@@ -723,7 +700,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         languageSpeakerVoiceMap: Object.fromEntries(
           targetLanguageCodes.map((code) => [code, speakerVoicesForLanguage(code)])
         ),
-        autoLipSync,
         separateBackground,
         // Only this run's languages: a project's already-finished dubs are kept, not re-rendered and re-billed.
         languages: targetLanguageCodes,
@@ -1062,10 +1038,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           speakerVoiceMap={speakerVoicesForLanguage(voiceLanguageCode)}
           speakerProfiles={speakerProfiles}
           transcriptSegments={transcriptSegments}
-          autoLipSync={autoLipSync}
-          lipSyncAvailable={lipSyncAvailable}
-          faceScan={faceScan}
-          videoDuration={videoDuration}
           separateBackground={separateBackground}
           separationAvailable={separationAvailable}
           onToggleSeparateBackground={setSeparateBackground}
@@ -1074,7 +1046,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           onChangeSpeed={setVoiceSpeed}
           onChangePitch={setVoicePitch}
           onChangeEmotion={setVoiceEmotion}
-          onToggleLipSync={setAutoLipSync}
           onGenerateDub={handleGenerateDub}
           onShowToast={onShowToast}
         />
@@ -1224,21 +1195,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         </div>
       </div>
 
-      {showLipSyncPrompt && faceScan && (
-        <LipSyncPrompt
-          faceScan={faceScan}
-          videoUrl={videoPreviewUrl}
-          languageName={targetLanguageCodes.length > 1 ? 'dubbed' : targetLang.name}
-          durationSeconds={videoDuration}
-          initialEnabled
-          onConfirm={(enabled) => {
-            setAutoLipSync(enabled);
-            setShowLipSyncPrompt(false);
-            onShowToast(enabled ? 'Lip-sync On' : 'Lip-sync Off', enabled ? "The speaker's mouth will follow the new voice." : 'The picture stays as it is; lines are still timed to the mouth.', 'info');
-          }}
-          onClose={() => setShowLipSyncPrompt(false)}
-        />
-      )}
     </div>
   );
 };

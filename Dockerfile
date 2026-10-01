@@ -34,6 +34,8 @@ COPY server ./server
 COPY src/data ./src/data
 COPY src/types.ts ./src/types.ts
 COPY tsconfig.json ./
+# DeepFilterNet separates speech from the background (server/lib/audioSeparation.ts); a static binary, pinned by hash.
+ADD --chmod=755 --checksum=sha256:70775e251eee44c0f2451a1e833326cf8bcbbe304d3e7cd12851e6fce72ef7da   https://github.com/Rikorose/DeepFilterNet/releases/download/v0.5.6/deep-filter-0.5.6-x86_64-unknown-linux-musl /app/server/bin/deep-filter
 # Scratch space the app writes to; credentials and server/.env are mounted at runtime, never baked in (see docs/DEPLOYMENT.md).
 RUN mkdir -p server/tmp server/cache server/credentials && chown -R node:node server/tmp server/cache
 USER node

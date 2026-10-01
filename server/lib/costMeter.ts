@@ -8,7 +8,7 @@
  */
 import { env } from './env';
 
-const USD_TO_INR = 83;
+const USD_TO_INR = 95;
 
 // Google Cloud TTS list price per 1M characters.
 const GOOGLE_CHIRP3_HD_PER_1M_USD = 30;

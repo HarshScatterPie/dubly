@@ -9,6 +9,9 @@ RELEASES="$BASE/dubly-releases"
 SHARED="$BASE/dubly-shared"
 CURRENT="$BASE/dubly"
 REPO_URL="${DUBLY_REPO_URL:-https://github.com/HarshScatterPie/dubly.git}"
+# DeepFilterNet separates speech from the background (server/lib/audioSeparation.ts): one static binary, checked against this hash.
+DEEP_FILTER_VERSION=0.5.6
+DEEP_FILTER_SHA256=70775e251eee44c0f2451a1e833326cf8bcbbe304d3e7cd12851e6fce72ef7da
 export PATH="/opt/node-24/bin:$PATH"
 
 log() { echo "[deploy $(date -u +%FT%TZ)] $*"; }
@@ -37,6 +40,21 @@ ln -sfn "$SHARED/server.env" "$REL/server/.env"
 rm -rf "$REL/server/credentials" "$REL/server/cache"
 ln -sfn "$SHARED/credentials" "$REL/server/credentials"
 ln -sfn "$SHARED/cache" "$REL/server/cache"
+
+# Downloaded once into the shared folder and linked into every release; a partial or tampered download is never installed.
+install_deep_filter() {
+  local bin="$SHARED/bin/deep-filter-$DEEP_FILTER_VERSION"
+  if [ ! -x "$bin" ]; then
+    mkdir -p "$SHARED/bin" &&
+      curl -fsSL "https://github.com/Rikorose/DeepFilterNet/releases/download/v$DEEP_FILTER_VERSION/deep-filter-$DEEP_FILTER_VERSION-x86_64-unknown-linux-musl" -o "$bin.part" &&
+      echo "$DEEP_FILTER_SHA256  $bin.part" | sha256sum -c --quiet - &&
+      chmod 755 "$bin.part" &&
+      mv "$bin.part" "$bin" || { rm -f "$bin.part"; return 1; }
+  fi
+  mkdir -p "$REL/server/bin" && ln -sfn "$bin" "$REL/server/bin/deep-filter"
+}
+# Separation is optional (without it the background is kept by ducking), so a failed download never blocks a deploy.
+install_deep_filter || log "could not install deep-filter $DEEP_FILTER_VERSION; background separation is off in this release"
 (
   cd "$REL"
   npm ci --no-audit --no-fund --loglevel=error

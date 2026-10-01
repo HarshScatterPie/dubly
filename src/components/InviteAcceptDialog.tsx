@@ -23,6 +23,10 @@ export function hasPendingInvite(): boolean {
   return Boolean(readToken());
 }
 
+export function pendingInviteToken(): string | null {
+  return readToken();
+}
+
 function readToken(): string | null {
   try {
     return sessionStorage.getItem(STORAGE_KEY);

@@ -1,4 +1,4 @@
-import { apiDelete, apiGet, apiPatch, apiPost, apiPut } from '../lib/apiClient';
+import { apiDelete, apiGet, apiPatch, apiPost, apiPostPublic, apiPut } from '../lib/apiClient';
 import type { GlossaryEntry } from '../types';
 
 export type WorkspaceRole = 'admin' | 'editor';
@@ -37,6 +37,14 @@ export interface InvitePreview {
   status: 'pending' | 'accepted';
 }
 
+export interface InviteSignupInfo {
+  email: string;
+  workspaceName: string;
+  role: WorkspaceRole;
+  invitedByName: string;
+  accountExists: boolean;
+}
+
 // The link an invitee opens; the token in it is the only copy, the server keeps just its hash.
 export const inviteLink = (token: string) => `${window.location.origin}/?invite=${encodeURIComponent(token)}`;
 
@@ -48,6 +56,9 @@ export const workspaceService = {
     // `emailed` says whether the server also emailed the link to the invitee.
     apiPost<{ invite: WorkspaceInvite; token: string; emailed?: boolean }>('/api/workspace/invites', input),
   revokeInvite: (inviteId: string) => apiDelete(`/api/workspace/invites/${encodeURIComponent(inviteId)}`),
+  // Pre-sign-in: what the link is for, and whether its email still needs an account.
+  lookupInviteSignup: (token: string) => apiPostPublic<InviteSignupInfo>('/api/invite-signup/lookup', { token }),
+  claimInviteAccount: (token: string, password: string) => apiPostPublic<{ email: string }>('/api/invite-signup/claim', { token, password }),
   previewInvite: (token: string) => apiPost<InvitePreview>('/api/invites/preview', { token }),
   acceptInvite: (token: string) => apiPost<{ workspaceId: string; role: WorkspaceRole }>('/api/invites/accept', { token }),
   changeRole: (uid: string, role: WorkspaceRole) => apiPatch<unknown>(`/api/workspace/members/${uid}`, { role }),

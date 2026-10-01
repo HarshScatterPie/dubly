@@ -283,6 +283,66 @@ export async function previewInvite(
   };
 }
 
+export const INVITE_LINK_INVALID = 'This invitation link is not valid. Ask the workspace admin for a new one.';
+
+// Whoever holds the link proves they got the email, so it is the one place an unsigned-in caller may learn anything: the address it was sent to.
+async function openInviteForSignup(token: string): Promise<StoredInvite> {
+  const snap = await invitesCol().doc(hashToken(String(token))).get();
+  const invite = snap.exists ? (snap.data() as StoredInvite) : null;
+  if (!invite || invite.status === 'revoked') throw new InviteError(404, 'INVITE_NOT_FOUND', INVITE_LINK_INVALID);
+  if (invite.status === 'pending' && new Date(invite.expiresAt).getTime() <= Date.now()) {
+    throw new InviteError(410, 'INVITE_EXPIRED', 'This invitation has expired. Ask the workspace admin for a new link.');
+  }
+  return invite;
+}
+
+async function accountExistsFor(email: string): Promise<boolean> {
+  try {
+    await authAdmin.getUserByEmail(email);
+    return true;
+  } catch (err) {
+    if ((err as { code?: string }).code === 'auth/user-not-found') return false;
+    throw err;
+  }
+}
+
+// What the "set your password" screen shows before anyone is signed in; an existing account signs in as usual instead.
+export async function lookupInviteForSignup(
+  token: string
+): Promise<{ email: string; workspaceName: string; role: WorkspaceRole; invitedByName: string; accountExists: boolean }> {
+  const invite = await openInviteForSignup(token);
+  const accountExists = invite.status === 'accepted' || (await accountExistsFor(invite.invitedEmail));
+  if (!accountExists) await assertPlanAllowsTeam(invite.workspaceId, true);
+  return {
+    email: invite.invitedEmail,
+    workspaceName: invite.workspaceName,
+    role: invite.role,
+    invitedByName: invite.invitedByName,
+    accountExists,
+  };
+}
+
+// Creates the login for a brand-new invitee. An email that already has an account is never touched, so a leaked link cannot reset anyone's password.
+export async function createAccountForInvite(token: string, password: string): Promise<{ email: string }> {
+  const invite = await openInviteForSignup(token);
+  if (invite.status !== 'pending') {
+    throw new InviteError(409, 'ACCOUNT_EXISTS', 'This email already has an account. Sign in with it to join.');
+  }
+  await assertPlanAllowsTeam(invite.workspaceId, true);
+  try {
+    // The invitation reached this inbox, which is the same proof a verification email would ask for.
+    await authAdmin.createUser({ email: invite.invitedEmail, password, emailVerified: true });
+  } catch (err) {
+    const code = (err as { code?: string }).code;
+    if (code === 'auth/email-already-exists') {
+      throw new InviteError(409, 'ACCOUNT_EXISTS', 'This email already has an account. Sign in with it to join.');
+    }
+    if (code === 'auth/invalid-password') throw new WorkspaceRequestError('Choose a stronger password (at least 8 characters).');
+    throw err;
+  }
+  return { email: invite.invitedEmail };
+}
+
 // Joins the caller to the invite's workspace, leaving their own workspace and projects in place to return to; accepting twice is a no-op.
 export async function acceptInvite(token: string, uid: string, callerEmail: string | undefined): Promise<Membership> {
   const ref = invitesCol().doc(hashToken(String(token)));

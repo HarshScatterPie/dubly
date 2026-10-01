@@ -51,6 +51,12 @@ export async function apiPost<T>(path: string, body?: unknown, extraHeaders: Rec
   return handle<T>(res);
 }
 
+// For the few endpoints used before anyone is signed in (a new invitee setting their first password).
+export async function apiPostPublic<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return handle<T>(res);
+}
+
 export async function apiPatch<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(path, {
     method: 'PATCH',

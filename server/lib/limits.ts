@@ -45,5 +45,7 @@ export const rateRules = {
   // Invitations send email, so they are capped well below anything a real team needs.
   invitePerUser: rule('INVITE_PER_HOUR', 20, HOUR),
   invitePerWorkspace: rule('INVITE_PER_WORKSPACE_DAY', 100, 24 * HOUR),
+  // Unauthenticated: looking up a link and creating its account, per caller address.
+  inviteSignupPerIp: rule('INVITE_SIGNUP_PER_HOUR', 40, HOUR),
   shareViewPerIp: rule('SHARE_VIEW_PER_MINUTE', 60, 60 * 1000),
 };

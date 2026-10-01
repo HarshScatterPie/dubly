@@ -3,10 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Languages, Loader2, Mail, Lock, UserPlus, MailCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { hasPendingInvite } from './InviteAcceptDialog';
+import { hasPendingInvite, pendingInviteToken } from './InviteAcceptDialog';
+import { workspaceService, type InviteSignupInfo } from '../services/workspaceService';
 import scatterPieLogo from '../assets/scatterpie-logo.png';
 
 export const Login: React.FC = () => {
@@ -16,6 +17,52 @@ export const Login: React.FC = () => {
   const [password, setPassword] = useState('');
   const [invited] = useState(hasPendingInvite);
   const [resetState, setResetState] = useState<'idle' | 'sending' | 'sent' | 'needs-email'>('idle');
+
+  // A link for an email with no account yet opens a "set your password" form here instead of asking for a password nobody has.
+  const [inviteToken] = useState(pendingInviteToken);
+  const [signup, setSignup] = useState<InviteSignupInfo | null>(null);
+  const [newPassword, setNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [signupError, setSignupError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!inviteToken) return;
+    workspaceService
+      .lookupInviteSignup(inviteToken)
+      .then((info) => {
+        if (info.accountExists) return;
+        setSignup(info);
+        setEmail(info.email);
+      })
+      // An unusable link falls back to the normal sign-in; the join step explains what is wrong once they are in.
+      .catch(() => {});
+  }, [inviteToken]);
+
+  const handleSetPassword = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!signup || !inviteToken) return;
+    if (newPassword.length < 8) {
+      setSignupError('Use at least 8 characters.');
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setSignupError('The two passwords do not match.');
+      return;
+    }
+    setSignupError(null);
+    setIsSigningIn(true);
+    try {
+      await workspaceService.claimInviteAccount(inviteToken, newPassword);
+      await signInWithEmail(signup.email, newPassword);
+    } catch (err) {
+      const message = (err as Error).message;
+      setSignupError(message);
+      // Someone created the account in the meantime: send them to the ordinary sign-in.
+      if ((err as { status?: number }).status === 409) setSignup(null);
+    } finally {
+      setIsSigningIn(false);
+    }
+  };
 
   const handleForgotPassword = async () => {
     if (!email.trim()) {
@@ -68,7 +115,67 @@ export const Login: React.FC = () => {
             </div>
           </div>
 
-          {invited && (
+          {signup && (
+            <>
+              <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
+                <UserPlus className="w-4 h-4 shrink-0 mt-0.5" />
+                <p>
+                  <strong>{signup.invitedByName}</strong> invited you to join <strong>{signup.workspaceName}</strong> as{' '}
+                  {signup.role === 'admin' ? 'an Admin' : 'an Editor'}. Choose a password to create your account and join.
+                </p>
+              </div>
+              <form onSubmit={handleSetPassword} className="space-y-3">
+                <div className="relative">
+                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="email"
+                    readOnly
+                    value={signup.email}
+                    className="w-full pl-10 pr-3 py-2.5 rounded-md bg-slate-50 border border-border text-sm text-muted-foreground"
+                  />
+                </div>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    autoComplete="new-password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    placeholder="Create a password (8+ characters)"
+                    className="w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
+                  />
+                </div>
+                <div className="relative">
+                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    autoComplete="new-password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    placeholder="Confirm password"
+                    className="w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={isSigningIn}
+                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white font-semibold text-sm shadow-sm transition-all disabled:opacity-60"
+                >
+                  {isSigningIn && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Set password &amp; continue</span>
+                </button>
+              </form>
+              {signupError && (
+                <p className="text-xs text-danger text-center bg-red-50 border border-red-200 rounded-md p-3">{signupError}</p>
+              )}
+            </>
+          )}
+
+          {!signup && invited && (
             <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
               <UserPlus className="w-4 h-4 shrink-0 mt-0.5" />
               <p>
@@ -78,6 +185,7 @@ export const Login: React.FC = () => {
             </div>
           )}
 
+          {!signup && (
           <form onSubmit={handleEmailSubmit} className="space-y-3">
             <div className="relative">
               <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -125,11 +233,14 @@ export const Login: React.FC = () => {
               <span>Sign In</span>
             </button>
           </form>
+          )}
 
-          {/* Accounts are provisioned by ScatterPie, so there is deliberately no self-serve sign-up here. */}
-          <p className="text-center text-xs text-muted-foreground">
-            Don&apos;t have an account? Contact <span className="font-semibold text-foreground">ScatterPie</span> to get access.
-          </p>
+          {/* Accounts are provisioned by ScatterPie; the only way to get one here is an emailed invitation, handled above. */}
+          {!signup && (
+            <p className="text-center text-xs text-muted-foreground">
+              Don&apos;t have an account? Contact <span className="font-semibold text-foreground">ScatterPie</span> to get access.
+            </p>
+          )}
 
           {resetState === 'needs-email' && (
             <p className="text-xs text-center text-muted-foreground">Enter your email above first, then press Forgot password? again.</p>

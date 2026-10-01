@@ -18,7 +18,7 @@ import { dubRouter } from './routes/dub';
 import { ttsRouter } from './routes/tts';
 import { profileRouter } from './routes/profile';
 import { publicShareRouter, shareCreateRouter } from './routes/share';
-import { invitesRouter, workspaceRouter } from './routes/workspace';
+import { inviteSignupRouter, invitesRouter, workspaceRouter } from './routes/workspace';
 import { jobsRouter } from './routes/jobs';
 
 declare global {
@@ -135,6 +135,8 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   app.use('/api/usage', requireAuth, requireWorkspace, usageRouter);
   app.use('/api/bootstrap', requireAuth, requireWorkspace, bootstrapRouter);
   app.use('/api/tts', requireAuth, requireWorkspace, ttsRouter);
+  // A new invitee has no login yet, so this one is reachable without sign-in (rate limited by address, gated by the invite token).
+  app.use('/api/invite-signup', inviteSignupRouter);
   // Invitations addressed to the caller are resolved by their email, before (and regardless of) which workspace they are in.
   app.use('/api/invites', requireAuth, invitesRouter);
   // Projects belong to a workspace: every request is resolved to the caller's workspace and role first.

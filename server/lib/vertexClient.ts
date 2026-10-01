@@ -7,7 +7,7 @@ import { gcpServiceAccountPath, hasGoogleCredentials, useAdc } from './credentia
 import { buildTranslationPrompt, parseTranslationResponse, type TranslatableSegment, type TranslationContext } from './translatePrompt';
 import { probeMedia, splitAudioIntoChunks, extractAudioClip } from './ffmpeg';
 import { logGeminiCallCost } from './costMeter';
-import { getScriptInstruction, isInExpectedScript, mapDetectedLanguageToAppCode } from './languageMeta';
+import { getScriptInstruction, isInExpectedScript, isRegionalLanguage, mapDetectedLanguageToAppCode, standardHindiLeak } from './languageMeta';
 import { log } from './log';
 import { cleanDelivery } from './speechStyle';
 import { glossaryInstruction, glossaryMisses, relevantEntries, withoutKeptTerms } from './glossary';
@@ -177,8 +177,8 @@ export async function vertexTranslateSegments(
   // Only the terms these lines actually use, so a large glossary does not bloat every prompt.
   const terms = relevantEntries(glossary, segments.map((s) => s.text));
   const glossaryText = glossaryInstruction(terms, targetLanguageCode);
-  const ask = async (lines: TranslatableSegment[]) => {
-    const raw = await requestTranslations(lines, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText, context);
+  const ask = async (lines: TranslatableSegment[], correction = '') => {
+    const raw = await requestTranslations(lines, targetLanguageName, style, adaptExpressions, scriptInstruction + correction, glossaryText, context);
     // A translation keeps the source's laughs and sighs but may not invent any.
     for (const s of lines) if (raw[s.id] !== undefined) raw[s.id] = sanitizePerformanceTags(raw[s.id], s.text);
     return raw;
@@ -189,20 +189,31 @@ export async function vertexTranslateSegments(
   const problems = (source: string, text: string | undefined) =>
     !text?.trim()
       ? Infinity
-      : (isInExpectedScript(withoutKeptTerms(stripPerformanceTags(text), terms), targetLanguageCode) ? 0 : 100) + glossaryMisses(source, text, terms, targetLanguageCode).length;
+      : (isInExpectedScript(withoutKeptTerms(stripPerformanceTags(text), terms), targetLanguageCode) ? 0 : 100) +
+        // A regional language that came back as standard Hindi in Devanagari: right script, wrong language.
+        (standardHindiLeak(withoutKeptTerms(stripPerformanceTags(text), terms), targetLanguageCode).length ? 50 : 0) +
+        glossaryMisses(source, text, terms, targetLanguageCode).length;
 
-  // One targeted re-ask for lines that went missing, came back in the wrong script (e.g. romanized Hindi) or broke the glossary.
-  const bad = segments.filter((s) => problems(s.text, result[s.id]) > 0);
-  if (bad.length > 0) {
-    console.warn(`[vertexClient] ${bad.length}/${segments.length} ${targetLanguageName} lines missing, in the wrong script or off-glossary, retrying them`);
+  // Targeted re-asks for lines that went missing, came back in the wrong script (e.g. romanized Hindi), as Hindi instead of the regional language, or broke the glossary.
+  // A regional language gets a second round, since the first correction often only swaps a few words.
+  const rounds = isRegionalLanguage(targetLanguageCode) ? 2 : 1;
+  for (let round = 0; round < rounds; round++) {
+    const bad = segments.filter((s) => problems(s.text, result[s.id]) > 0);
+    if (bad.length === 0) break;
+    console.warn(`[vertexClient] ${bad.length}/${segments.length} ${targetLanguageName} lines missing, in the wrong script, in Hindi or off-glossary, retrying them`);
+    const leaked = [...new Set(bad.flatMap((s) => standardHindiLeak(result[s.id] ?? '', targetLanguageCode)))];
+    const correction = leaked.length
+      ? `\nCORRECTION: the previous draft was standard Hindi, not ${targetLanguageName} (it used the Hindi words ${leaked.join(', ')}). Rewrite every line in real ${targetLanguageName}, replacing each such word with its ${targetLanguageName} equivalent, and change the verb endings and "to be" forms to match.`
+      : '';
     try {
-      const retried = await ask(bad);
+      const retried = await ask(bad, correction);
       for (const s of bad) {
         const candidate = retried[s.id]?.trim();
         if (candidate && problems(s.text, candidate) < problems(s.text, result[s.id])) result[s.id] = candidate;
       }
     } catch (err) {
-      console.error('[vertexClient] translation retry failed, keeping first pass', err);
+      console.error('[vertexClient] translation retry failed, keeping previous pass', err);
+      break;
     }
   }
   return result;

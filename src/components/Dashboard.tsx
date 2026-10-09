@@ -43,7 +43,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
+    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-10">
       <DashboardHero projects={projects} onNavigate={onNavigate} />
 
       {/* Two Large Creation Cards */}

@@ -89,7 +89,8 @@ export const Header: React.FC<HeaderProps> = ({
         {/* The sidebar carries the brand on desktop; below md it is a closed drawer */}
         <img src={scatterPieLogo} alt="ScatterPie" className="md:hidden h-5 w-auto shrink-0 select-none" draggable={false} />
 
-        <div className="hidden sm:block min-w-0">
+        {/* A fixed width from lg up, so the search box starts at the same place on every screen instead of sliding with the title's length */}
+        <div className="hidden sm:block min-w-0 lg:w-72 lg:shrink-0">
           <h1 className="text-base sm:text-lg font-semibold text-foreground tracking-tight truncate font-display">
             {details.title}
           </h1>

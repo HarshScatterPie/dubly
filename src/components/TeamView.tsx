@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Check, Clock, Copy, Loader2, Lock, Pencil, ShieldCheck, Trash2, UserPlus, Users, X } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
 import { Avatar } from './Avatar';
+import { copyText } from '../lib/clipboard';
 import {
   inviteLink,
   workspaceService,
@@ -125,15 +126,15 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
 
   const copyLink = async () => {
     if (!newLink) return;
-    await navigator.clipboard.writeText(newLink.link);
-    onShowToast('Copied', 'Invitation link copied — send it to your teammate privately.', 'success');
+    if (await copyText(newLink.link)) onShowToast('Copied', 'Invitation link copied — send it to your teammate privately.', 'success');
+    else onShowToast('Copy Failed', 'Select the link and copy it manually.', 'error');
   };
 
   const inputClass =
     'w-full px-3 py-2.5 rounded-xl bg-white border border-[#E2E8F0] text-sm text-[#0F172A] placeholder-[#94A3B8] focus:outline-none focus:ring-2 focus:ring-[#F05637]/25 focus:border-[#F05637]/60';
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-fade-in">
+    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-fade-in">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>

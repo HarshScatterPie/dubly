@@ -4,6 +4,7 @@
  */
 
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { AlertTriangle } from 'lucide-react';
 
 interface ConfirmDialogProps {
@@ -32,7 +33,8 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
 }) => {
   if (!isOpen) return null;
 
-  return (
+  // Drawn on the page itself: inside an animated screen (Team, Settings) `fixed` is measured from that screen, not the window.
+  return createPortal(
     <div
       className="fixed inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-4"
       onClick={onCancel}
@@ -73,6 +75,7 @@ export const ConfirmDialog: React.FC<ConfirmDialogProps> = ({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, Clock, Copy, ExternalLink, Link2, Loader2, MessageCircle, Subtitles, X } from 'lucide-react';
 import { projectService } from '../services/projectService';
+import { copyText } from '../lib/clipboard';
 
 interface ShareDialogProps {
   projectId: string;
@@ -59,11 +61,10 @@ export const ShareDialog: React.FC<ShareDialogProps> = ({ projectId, projectTitl
 
   const copyLink = async () => {
     if (!link) return;
-    try {
-      await navigator.clipboard.writeText(link.url);
+    if (await copyText(link.url)) {
       setCopied(true);
       onShowToast?.('Link Copied', 'Anyone with this link can watch the video for 24 hours.', 'success');
-    } catch {
+    } else {
       onShowToast?.('Copy Failed', 'Select the link and copy it manually.', 'error');
     }
   };
@@ -73,13 +74,15 @@ export const ShareDialog: React.FC<ShareDialogProps> = ({ projectId, projectTitl
     : '';
   const whatsappText = link ? `${projectTitle} (${languageName} dub): ${link.url}` : '';
 
-  return (
+  // Drawn on the page itself, not inside the project screen: that screen is animated, which makes it the reference for `fixed`, and the
+  // dialog then centred on the whole (taller) screen and ran off the bottom of the window.
+  return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0F172A]/40 backdrop-blur-sm animate-fade-in" onMouseDown={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="share-title"
-        className="w-full max-w-md rounded-3xl bg-white border border-[#E2E8F0] shadow-[0_30px_80px_rgba(15,23,42,0.25)] p-6 space-y-5"
+        className="w-full max-w-md max-h-[calc(100vh-2rem)] overflow-y-auto rounded-3xl bg-white border border-[#E2E8F0] shadow-[0_30px_80px_rgba(15,23,42,0.25)] p-6 space-y-5"
         onMouseDown={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-4">
@@ -223,6 +226,7 @@ export const ShareDialog: React.FC<ShareDialogProps> = ({ projectId, projectTitl
           <span>{link ? `Stops working ${expiresLabel}. Anyone with the link can watch and download until then.` : 'The link and the video behind it stop working 24 hours after you create it.'}</span>
         </p>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 };

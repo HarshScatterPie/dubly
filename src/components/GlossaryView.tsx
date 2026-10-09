@@ -202,7 +202,7 @@ export const GlossaryView: React.FC<GlossaryViewProps> = ({ onShowToast }) => {
   };
 
   return (
-    <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-fade-in">
+    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6 animate-fade-in">
       <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
         <div>
           <span className="text-[11px] font-bold uppercase tracking-wider text-[#94A3B8]">Workspace</span>

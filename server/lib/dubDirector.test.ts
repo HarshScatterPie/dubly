@@ -1,7 +1,11 @@
-import { describe, expect, it } from 'vitest';
-import { buildReviewPrompt, describeVerdict, parseReviewResponse, retakeStyle } from './dubDirector';
+import { describe, expect, it, vi } from 'vitest';
+import { buildReviewPrompt, describeVerdict, parseReviewResponse, retakeStyle, reviewDubbedLines } from './dubDirector';
+import { vertexGenerateJson } from './vertexClient';
 import { paceRequest } from './speechStyle';
 import { lineGainsDb, MAX_LINE_GAIN_DB } from './levelMatch';
+
+// The reviewer is the only network call these tests could make; each test sets what it answers.
+vi.mock('./vertexClient', () => ({ vertexGenerateJson: vi.fn() }));
 
 describe('AI review', () => {
   it('reads verdicts for the lines it asked about and nothing else', () => {
@@ -85,5 +89,32 @@ describe('line levels', () => {
 
   it('does nothing with too few lines to know what normal is', () => {
     expect(lineGainsDb([{ id: 'a', sourceDb: -30, dubDb: -10 }]).size).toBe(0);
+  });
+});
+
+describe('AI review progress', () => {
+  const lines = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `l${i}`, script: `line ${i}`, dubbed: Buffer.alloc(44) }));
+
+  it('reports every finished batch, including one that failed, so the bar can keep moving', async () => {
+    let call = 0;
+    vi.mocked(vertexGenerateJson).mockImplementation(async () => {
+      if (++call === 2) throw new Error('quota');
+      return '{}';
+    });
+    const seen: [number, number][] = [];
+    // 20 lines go out in three requests of at most eight lines.
+    const verdicts = await reviewDubbedLines(lines(20), 'Hindi', (done, total) => seen.push([done, total]));
+    expect(seen).toEqual([
+      [1, 3],
+      [2, 3],
+      [3, 3],
+    ]);
+    // Nothing was judged bad: a failed or unreadable batch just has no verdicts.
+    expect(verdicts.size).toBe(0);
+  });
+
+  it('works without a progress callback', async () => {
+    vi.mocked(vertexGenerateJson).mockResolvedValue('{}');
+    await expect(reviewDubbedLines(lines(3), 'Hindi')).resolves.toBeInstanceOf(Map);
   });
 });

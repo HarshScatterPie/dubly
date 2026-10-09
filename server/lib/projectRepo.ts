@@ -187,6 +187,26 @@ export async function getStoredProject(workspaceId: string, id: string): Promise
   return loadProject(projectsCol(workspaceId).doc(id));
 }
 
+/** What a progress bar needs from a project; the same fields, with the same meaning, as in the full project. */
+export type ProjectProgress = Pick<DubbingProject, 'status' | 'progressPercent' | 'currentProcessingMessage' | 'updatedAt'>;
+
+/**
+ * The progress of a project from a single document read, with only those four fields fetched. The UI polls every second or so
+ * while a dub runs, and the full project costs a read per language plus the transcript, signed URLs and the whole transcript in the answer.
+ */
+export async function getProjectProgress(workspaceId: string, id: string): Promise<ProjectProgress | null> {
+  const [snap] = await db.getAll(projectsCol(workspaceId).doc(id), { fieldMask: ['status', 'progressPercent', 'currentProcessingMessage', 'updatedAt'] });
+  if (!snap.exists) return null;
+  const data = snap.data() as Partial<ProjectProgress>;
+  return {
+    status: data.status ?? 'draft',
+    progressPercent: data.progressPercent ?? 0,
+    // A cleared message is stored as null; the full project leaves it out, and so does this.
+    currentProcessingMessage: data.currentProcessingMessage ?? undefined,
+    updatedAt: data.updatedAt ?? '',
+  };
+}
+
 export async function listStoredProjects(workspaceId: string): Promise<StoredProject[]> {
   const snap = await projectsCol(workspaceId).orderBy('createdAt', 'desc').get();
   const loaded = await Promise.all(snap.docs.map((d) => loadProject(d.ref)));

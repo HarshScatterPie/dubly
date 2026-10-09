@@ -51,6 +51,7 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | POST | `/api/projects` | `{ title?, sourceLanguage?, targetLanguage? }` |
 | GET | `/api/projects` | All projects of the workspace, with 3-hour signed media URLs |
 | GET | `/api/projects/:id` | One project, with segments reassembled, plus `retakeInfo`: per language, the lines edited since its last render (`changedLineIds`, `seconds`, `minutes`). The list endpoint leaves `retakeInfo` out |
+| GET | `/api/projects/:id/progress` | `{ status, progressPercent, currentProcessingMessage, updatedAt }` from a single document read. For progress bars: poll this while a dub, re-dub or retake runs, then fetch the full project once when `status` is `completed` or `failed`. Never cached |
 | PATCH | `/api/projects/:id` | Title, voice choices, maps, style, transcript/localized segments, `currentStep` |
 | DELETE | `/api/projects/:id` | **Admin only.** Deletes the project, its segment documents, every file in its own storage folder and its share links |
 | POST | `/api/projects/:id/upload` | multipart `file`, ≤ 500 MB, ≤ 60 min. MP4/MOV/WebM, checked by content. `400 UNSUPPORTED_MEDIA` / `MEDIA_UNREADABLE` / `NO_AUDIO_STREAM` / `VIDEO_TOO_LONG`; `413 STORAGE_LIMIT_REACHED` when enforcement is on |

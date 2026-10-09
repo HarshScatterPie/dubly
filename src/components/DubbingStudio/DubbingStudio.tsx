@@ -515,7 +515,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     const poll = async () => {
       while (polling && isMountedRef.current) {
         try {
-          const proj = await projectService.get(id);
+          const proj = await projectService.progress(id);
           if (!polling || !isMountedRef.current) break;
           if (proj.currentProcessingMessage) {
             setAnalysisMessage(proj.currentProcessingMessage);
@@ -719,12 +719,15 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     const poll = async () => {
       if (!isMountedRef.current) return;
       try {
-        const proj = await projectService.get(id);
+        // Only the progress while it runs; the whole project is fetched once, when the dub has finished.
+        const progress = await projectService.progress(id);
         if (!isMountedRef.current) return;
-        setDubProgress(proj.progressPercent);
-        setProcessingMessage(proj.currentProcessingMessage || '');
+        setDubProgress(progress.progressPercent);
+        setProcessingMessage(progress.currentProcessingMessage || '');
 
-        if (proj.status === 'completed') {
+        if (progress.status === 'completed') {
+          const proj = await projectService.get(id);
+          if (!isMountedRef.current) return;
           setIsGeneratingDub(false);
           setCompletedProject(proj);
           onSaveProject(proj);
@@ -732,10 +735,10 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           notifyWorkDone('Your dub is ready', `${proj.title} is ready to watch and download.`);
           return;
         }
-        if (proj.status === 'failed') {
+        if (progress.status === 'failed') {
           setIsGeneratingDub(false);
-          onShowToast('Dubbing Failed', proj.currentProcessingMessage || 'Something went wrong.', 'error');
-          notifyWorkDone('Dubbing failed', proj.currentProcessingMessage || 'Something went wrong.');
+          onShowToast('Dubbing Failed', progress.currentProcessingMessage || 'Something went wrong.', 'error');
+          notifyWorkDone('Dubbing failed', progress.currentProcessingMessage || 'Something went wrong.');
           setCurrentStep('voice');
           return;
         }

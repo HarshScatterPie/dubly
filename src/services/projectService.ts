@@ -20,6 +20,11 @@ export class ProjectService {
     return apiGet<DubbingProject>(`/api/projects/${projectId}`);
   }
 
+  /** Status, percentage and message only: what a progress bar polls, instead of the whole project (transcript, every language, signed URLs). */
+  public progress(projectId: string): Promise<ProjectProgress> {
+    return apiGet<ProjectProgress>(`/api/projects/${projectId}/progress`);
+  }
+
   public patch(projectId: string, patch: Partial<DubbingProject>): Promise<DubbingProject> {
     return apiPatch<DubbingProject>(`/api/projects/${projectId}`, patch);
   }
@@ -210,6 +215,8 @@ export class ProjectService {
     return apiPost(`/api/projects/${projectId}/languages/${languageCode}/retake`, undefined, { 'Idempotency-Key': randomId() });
   }
 }
+
+export type ProjectProgress = Pick<DubbingProject, 'status' | 'progressPercent' | 'currentProcessingMessage' | 'updatedAt'>;
 
 /** A server job (dub or transcription) as the API reports it. */
 export interface JobView {

@@ -1,9 +1,11 @@
 import * as ort from 'onnxruntime-node';
 import { ffmpeg } from './mediaTools';
 import { existsSync } from 'node:fs';
-import { readFile, mkdir, rm } from 'node:fs/promises';
+import { mkdir, open, rm, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { createCpuSession } from './onnxSession';
+import { runOffThread } from './onnxPool';
 import { serverRoot, tmpDir } from './paths';
 
 /**
@@ -50,13 +52,13 @@ export function isVadAvailable(): boolean {
 let sessionPromise: Promise<ort.InferenceSession> | null = null;
 function getSession(): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
-    sessionPromise = ort.InferenceSession.create(MODEL_PATH);
+    sessionPromise = createCpuSession(MODEL_PATH);
   }
   return sessionPromise;
 }
 
-/** Decodes any audio file to raw mono 16kHz float samples via ffmpeg, sidestepping WAV-header edge cases. */
-async function decodeToPcm(audioPath: string): Promise<Float32Array> {
+/** Decodes any audio file to a raw mono 16kHz s16le file via ffmpeg, sidestepping WAV-header edge cases; the caller removes the file. */
+async function decodeToRaw(audioPath: string): Promise<string> {
   await mkdir(tmpDir, { recursive: true });
   const rawPath = path.join(tmpDir, `vad_${randomUUID()}.raw`);
   try {
@@ -72,45 +74,84 @@ async function decodeToPcm(audioPath: string): Promise<Float32Array> {
         .on('end', () => resolve())
         .save(rawPath);
     });
-    const buf = await readFile(rawPath);
-    const count = Math.floor(buf.length / 2);
-    const pcm = new Float32Array(count);
-    for (let i = 0; i < count; i++) {
-      pcm[i] = buf.readInt16LE(i * 2) / 32768;
+    return rawPath;
+  } catch (err) {
+    await rm(rawPath, { force: true }).catch(() => undefined);
+    throw err;
+  }
+}
+
+// Windows read from disk per batch (about 1 MiB), so a long recording is never held in memory whole.
+const BATCH_WINDOWS = 1024;
+
+/**
+ * Speech probability of every 32 ms window of a raw s16le file. Buffers, tensors and the hidden state are allocated once and
+ * reused for the whole file: a one-hour recording is over 100,000 windows, and allocating several arrays per window dominated the run.
+ */
+export async function speechProbabilities(rawPath: string): Promise<Float32Array> {
+  const session = await getSession();
+  const windows = Math.floor((await stat(rawPath)).size / 2 / WINDOW_SAMPLES);
+  const probs = new Float32Array(windows);
+
+  // Silero is a stateful (RNN) model — the hidden state carries across windows, which is
+  // what lets it use context rather than judging each 32ms slice in isolation.
+  const state = new Float32Array(2 * 1 * 128);
+  const stateTensor = new ort.Tensor('float32', state, [2, 1, 128]);
+  const srTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(SAMPLE_RATE)]), [1]);
+  // The model input is the previous window's last CONTEXT_SAMPLES samples followed by the next WINDOW_SAMPLES (silence before the first).
+  const input = new Float32Array(CONTEXT_SAMPLES + WINDOW_SAMPLES);
+  const inputTensor = new ort.Tensor('float32', input, [1, input.length]);
+
+  const bytes = new ArrayBuffer(BATCH_WINDOWS * WINDOW_SAMPLES * 2);
+  const raw = Buffer.from(bytes);
+  // s16le is the host's own byte order on every platform this runs on (x86-64 and arm64).
+  const samples = new Int16Array(bytes);
+  const file = await open(rawPath, 'r');
+  try {
+    for (let done = 0; done < windows; ) {
+      const batch = Math.min(BATCH_WINDOWS, windows - done);
+      const want = batch * WINDOW_SAMPLES * 2;
+      let got = 0;
+      while (got < want) {
+        const { bytesRead } = await file.read(raw, got, want - got, done * WINDOW_SAMPLES * 2 + got);
+        if (bytesRead === 0) break;
+        got += bytesRead;
+      }
+      const have = Math.floor(got / (WINDOW_SAMPLES * 2));
+      for (let w = 0; w < have; w++) {
+        input.copyWithin(0, WINDOW_SAMPLES, WINDOW_SAMPLES + CONTEXT_SAMPLES);
+        const from = w * WINDOW_SAMPLES;
+        for (let k = 0; k < WINDOW_SAMPLES; k++) input[CONTEXT_SAMPLES + k] = samples[from + k] / 32768;
+        const results = await session.run({ input: inputTensor, state: stateTensor, sr: srTensor });
+        probs[done + w] = (results.output.data as Float32Array)[0];
+        state.set(results.stateN.data as Float32Array);
+      }
+      if (have < batch) return probs.subarray(0, done + have);
+      done += batch;
     }
-    return pcm;
+  } finally {
+    await file.close();
+  }
+  return probs;
+}
+
+/** The detection itself, in whichever thread calls it; the worker thread's entry point (onnxWorker.ts). */
+export async function detectSpeechRegionsVadLocal(audioPath: string, totalDuration: number): Promise<SpeechRegion[]> {
+  const rawPath = await decodeToRaw(audioPath);
+  try {
+    return regionsFromProbabilities(await speechProbabilities(rawPath), totalDuration);
   } finally {
     await rm(rawPath, { force: true }).catch(() => undefined);
   }
 }
 
-export async function detectSpeechRegionsVad(audioPath: string, totalDuration: number): Promise<SpeechRegion[]> {
-  const session = await getSession();
-  const pcm = await decodeToPcm(audioPath);
+// Runs in a worker thread: Silero makes one blocking ONNX call per 32 ms window, which would otherwise hold up the whole API.
+export function detectSpeechRegionsVad(audioPath: string, totalDuration: number): Promise<SpeechRegion[]> {
+  return runOffThread('vad', { audioPath, totalDuration }, () => detectSpeechRegionsVadLocal(audioPath, totalDuration));
+}
 
-  // Silero is a stateful (RNN) model — the hidden state carries across windows, which is
-  // what lets it use context rather than judging each 32ms slice in isolation.
-  let state = new Float32Array(2 * 1 * 128);
-  const srTensor = new ort.Tensor('int64', BigInt64Array.from([BigInt(SAMPLE_RATE)]), [1]);
-
-  let context = new Float32Array(CONTEXT_SAMPLES);
-  const probs: number[] = [];
-  for (let i = 0; i + WINDOW_SAMPLES <= pcm.length; i += WINDOW_SAMPLES) {
-    const chunk = pcm.slice(i, i + WINDOW_SAMPLES);
-    const input = new Float32Array(CONTEXT_SAMPLES + WINDOW_SAMPLES);
-    input.set(context, 0);
-    input.set(chunk, CONTEXT_SAMPLES);
-    context = chunk.slice(WINDOW_SAMPLES - CONTEXT_SAMPLES);
-
-    const results = await session.run({
-      input: new ort.Tensor('float32', input, [1, input.length]),
-      state: new ort.Tensor('float32', state, [2, 1, 128]),
-      sr: srTensor,
-    });
-    probs.push(Number((results.output.data as Float32Array)[0]));
-    state = Float32Array.from(results.stateN.data as Float32Array);
-  }
-
+/** Turns per-window probabilities into padded speech regions (two thresholds for hysteresis, minimum lengths, no overlap). */
+export function regionsFromProbabilities(probs: ArrayLike<number>, totalDuration: number): SpeechRegion[] {
   const regions: SpeechRegion[] = [];
   let triggered = false;
   let currentStart = 0;

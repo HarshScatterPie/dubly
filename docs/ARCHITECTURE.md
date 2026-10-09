@@ -98,6 +98,7 @@ Measured: a single-document project would exceed Firestore's 1 MiB limit at 60 m
 | `server/lib/workspaces.ts`, `auth.ts` | Tenancy, invitations, authentication |
 | `server/lib/validation.ts`, `rateLimit.ts`, `limits.ts`, `httpError.ts` | Input validation, limits, errors |
 | `server/lib/ffmpeg.ts`, `mediaTools.ts`, `mediaValidation.ts`, `safeDownload.ts` | Media handling and safety |
+| `server/lib/onnxPool.ts`, `onnxWorker.mjs`, `onnxWorker.ts`, `onnxSession.ts`, `faceScan.ts`, `vad.ts` | ONNX inference (face scan, voice-activity detection) in worker threads |
 | `server/lib/log.ts`, `costMeter.ts` | Structured logging, provider cost estimates |
 | `server/lib/vertexClient.ts`, `googleTtsClient.ts`, `geminiSpeech.ts`, `modelRouter.ts`, `src/lib/voiceEngines.ts` | AI providers; voice engines and plan gating |
 | `server/lib/speechStyle.ts`, `glossary.ts`, `glossaryStore.ts`, `lineReview.ts`, `retake.ts` | Voice direction and pace, workspace glossary, line review flags, line fingerprints and retake pricing |
@@ -105,7 +106,17 @@ Measured: a single-document project would exceed Firestore's 1 MiB limit at 60 m
 | `server/lib/storageUsage.ts`, `recordSweeper.ts`, `tmpSweeper.ts` | Usage measurement and data retention |
 | `src/services/*`, `src/lib/apiClient.ts` | Frontend API layer |
 
+## Keeping one machine fast (no extra infrastructure)
+The deployment is a single small VM, so capacity is bought back in code rather than with more servers. The load test (`deploy/loadtest/`) found the Node main thread, not the machine, was the limit: with 30 or more users, health and progress calls took 12 to 23 s. Its profile put 47% of the main thread's busy time in ONNX Runtime, whose Node backend runs every inference synchronously on the calling thread.
+- **Inference runs in worker threads** (`onnxPool.ts`): the face scan and the voice-activity pass. At most `ONNX_WORKERS` (default 2) start on demand and exit after five idle minutes. If a worker cannot start or dies, the task runs in-process as before and the reason is logged (`onnx_worker_crashed`); after three failures in a row workers are switched off. `onnxWorker.mjs` exists because a worker does not inherit the server's `--import tsx` loader.
+- **One inference thread per session** (`onnxSession.ts`): ONNX Runtime's default of a spinning thread per core competes with ffmpeg on 2 vCPUs.
+- **Progress polls read one document** (`GET /api/projects/:id/progress`) instead of reassembling the whole project (a read per language plus the transcript, signed URLs, a large JSON body) every second.
+- **Progress writes are throttled**: the voice loop reports every 2.5 s, not after each line, so it no longer waits on a Firestore transaction per line.
+- **Checksums**: uploads and downloads use MD5 (native) instead of the storage client's JavaScript CRC32C, and files under 32 MB upload in one request.
+- **HTTP**: responses are gzip-compressed, and the hashed files under `/assets` are cached for a year (`index.html` is always revalidated).
+
 ## Scaling beyond one instance (not done; what it would take)
+This would add running cost (a load balancer, workers, a shared store) and is not needed while one machine keeps up. A direct-to-storage upload was also considered and left out: `ffprobe` and `ffmpeg` may only read local files (a crafted upload must not make them fetch URLs), so the server would download the object again to validate it and save nothing.
 - Move rate-limit counters and the membership/account caches to a shared store, or accept per-instance limits.
 - Replace the in-memory dub queue and heavy slots with Firestore leases or Cloud Tasks. Jobs already persist their state and heartbeat, so ownership would carry over.
 - Give each instance an ID in the job heartbeat and reconcile only other instances' stale jobs (the heartbeat-based rule already allows this).

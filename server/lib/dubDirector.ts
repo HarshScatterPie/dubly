@@ -94,15 +94,23 @@ async function reviewBatch(batch: ReviewLine[], languageName: string): Promise<M
 }
 
 // Verdicts for every line the reviewer answered; a line missing from the map was not reviewed (a failed batch), never "bad".
-export async function reviewDubbedLines(lines: ReviewLine[], languageName: string): Promise<Map<string, LineVerdict>> {
+// `onBatchDone` is told how many of the batches have finished (failed ones included), so a caller can show the review moving.
+export async function reviewDubbedLines(
+  lines: ReviewLine[],
+  languageName: string,
+  onBatchDone?: (done: number, total: number) => void
+): Promise<Map<string, LineVerdict>> {
   const batches: ReviewLine[][] = [];
   for (let i = 0; i < lines.length; i += LINES_PER_REQUEST) batches.push(lines.slice(i, i + LINES_PER_REQUEST));
+  let finished = 0;
   const results = await mapWithConcurrency(batches, PARALLEL_REQUESTS, async (batch) => {
     try {
       return await reviewBatch(batch, languageName);
     } catch (err) {
       log.warn('dub_review_batch_failed', { lines: batch.length, error: (err as Error)?.message }, '[review] a review batch failed; its lines keep their first take');
       return new Map<string, LineVerdict>();
+    } finally {
+      onBatchDone?.(++finished, batches.length);
     }
   });
   return new Map(results.flatMap((m) => [...m]));

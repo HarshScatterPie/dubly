@@ -752,6 +752,15 @@ async function renderLanguage(params: {
   // The original line under each take: its level always, and the AI review when it is on. Read in groups so a long video never sits in memory whole.
   const verdicts = new Map<string, LineVerdict>();
   const REVIEW_GROUP = 48;
+  // The AI review and the re-recordings can take minutes (each retake may wait on the voice provider's quota) and used to report once,
+  // so the bar sat still. Their reports are queued one behind another: two never write the project at once and the bar never steps back.
+  // A queued report that fails is dropped here; the awaited ones around it surface a cancel.
+  let reports: Promise<unknown> = Promise.resolve();
+  const queueReport = (fraction: number, message: string): Promise<void> => {
+    const next = reports.then(() => params.onProgress(fraction, message));
+    reports = next.catch(() => undefined);
+    return next;
+  };
   for (let g = 0; g < takes.length; g += REVIEW_GROUP) {
     const group = takes.slice(g, g + REVIEW_GROUP);
     const sliceOf = (speech: WavSlicer | null, t: LineTake) =>
@@ -761,7 +770,8 @@ async function renderLanguage(params: {
     const levelClips = params.levelSpeech === params.sourceSpeech ? originals : await Promise.all(group.map((t) => sliceOf(params.levelSpeech, t)));
     group.forEach((t, k) => (t.sourceDb = levelClips[k] ? speechLevelDb(levelClips[k]!) : null));
     if (!params.aiReview) continue;
-    await params.onProgress(0.6 + (g / takes.length) * 0.08, `${languageName}: AI reviewer listening to every line (${g + group.length}/${takes.length})...`);
+    const listening = (heard: number) => `${languageName}: AI reviewer listening to every line (${heard}/${takes.length})...`;
+    await queueReport(0.6 + (g / takes.length) * 0.08, listening(g));
     const found = await reviewDubbedLines(
       group.map((t, k) => ({
         id: finalSegments[t.index].id,
@@ -770,7 +780,11 @@ async function renderLanguage(params: {
         original: originals[k] ?? undefined,
         dubbed: t.audio,
       })),
-      languageName
+      languageName,
+      (done, total) => {
+        const heard = g + Math.round((done / total) * group.length);
+        void queueReport(0.6 + (heard / takes.length) * 0.08, listening(heard)).catch(() => undefined);
+      }
     );
     for (const [id, verdict] of found) verdicts.set(id, verdict);
   }
@@ -778,12 +792,14 @@ async function renderLanguage(params: {
   // One re-recording per line the reviewer rejected, kept only if the reviewer accepts it; Chirp3-HD would only repeat itself, so its lines are flagged.
   const rejected = takes.filter((t) => verdicts.get(finalSegments[t.index].id)?.ok === false);
   if (rejected.length) {
-    await params.onProgress(0.69, `${languageName}: re-recording ${rejected.length} line${rejected.length === 1 ? '' : 's'} the AI reviewer flagged...`);
+    await queueReport(0.69, `${languageName}: re-recording ${rejected.length} line${rejected.length === 1 ? '' : 's'} the AI reviewer flagged...`);
     const retakes: { take: LineTake; audio: Buffer }[] = [];
-    for (const t of rejected) {
+    for (const [k, t] of rejected.entries()) {
       const verdict = verdicts.get(finalSegments[t.index].id)!;
       t.directorNote = describeVerdict(verdict);
       if (t.engine === 'chirp') continue;
+      // One line at a time, each reported (and awaited, so a cancel lands between lines); this is where the bar used to look stuck.
+      if (k > 0) await queueReport(0.69 + (k / rejected.length) * 0.015, `${languageName}: re-recording flagged lines (${k + 1}/${rejected.length})...`);
       try {
         const retake = await synthesizeLine(t.speechText, t.voice, retakeStyle(t.style, verdict), 1);
         retakes.push({ take: t, audio: retake.audio });
@@ -792,6 +808,8 @@ async function renderLanguage(params: {
       }
     }
     if (retakes.length) {
+      const checking = `${languageName}: AI reviewer checking the ${retakes.length} re-recorded line${retakes.length === 1 ? '' : 's'}...`;
+      await queueReport(0.705, checking);
       const second = await reviewDubbedLines(
         await Promise.all(
           retakes.map(async ({ take, audio }) => ({
@@ -802,7 +820,8 @@ async function renderLanguage(params: {
             dubbed: audio,
           }))
         ),
-        languageName
+        languageName,
+        (done, total) => void queueReport(0.705 + (done / total) * 0.01, checking).catch(() => undefined)
       );
       let fixed = 0;
       for (const { take, audio } of retakes) {
@@ -814,6 +833,8 @@ async function renderLanguage(params: {
       log.info('dub_review', { languageCode, reviewed: verdicts.size, rejected: rejected.length, retaken: retakes.length, fixed });
     }
   }
+  // Every queued report has landed before the next stage reports, so the bar cannot step back.
+  await reports;
 
   // Each line at the level the original speaker used, relative to the rest (whispers stay quiet, shouts stay loud).
   const gains = lineGainsDb(takes.map((t) => ({ id: finalSegments[t.index].id, sourceDb: t.sourceDb, dubDb: speechLevelDb(t.audio) })));

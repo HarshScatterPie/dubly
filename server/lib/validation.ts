@@ -108,7 +108,7 @@ export const schemas = {
     languages: z.array(languageCode).max(20).optional(),
   }),
   exportVideo: z.object({ languageCode: languageCode.optional(), captions: z.boolean().optional() }),
-  share: z.object({ languageCode: languageCode.optional() }),
+  share: z.object({ languageCode: languageCode.optional(), captions: z.boolean().optional() }),
   importSample: z.object({ sampleId: z.string().max(100).optional(), sourceUrl: z.string().max(2000).optional(), fileName: z.string().max(300).optional() }),
   // No length cap on the text itself (product decision); the 2 MB request limit bounds it.
   tts: z.object({
@@ -149,9 +149,23 @@ export const schemas = {
       .optional(),
   }),
   renameWorkspace: z.object({ name: z.string().trim().min(1).max(80) }),
+  // The picture arrives already shrunk by the browser (a few KB); the cap stops anything bigger being stored on the member list.
+  profile: z
+    .object({
+      name: z.string().trim().min(1).max(60).optional(),
+      avatar: z
+        .string()
+        .max(60_000)
+        .regex(/^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/, 'Invalid image')
+        .nullable()
+        .optional(),
+    })
+    .refine((body) => body.name !== undefined || body.avatar !== undefined, 'Nothing to change'),
   invite: z.object({ email: z.string().trim().min(3).max(254), role }),
   changeRole: z.object({ role }),
   inviteToken: z.object({ token: z.string().min(10).max(200) }),
+  // An invitation's id is the SHA-256 of its token, as 64 hex characters.
+  inviteId: z.object({ inviteId: z.string().regex(/^[a-f0-9]{64}$/, 'Invalid invitation id') }),
   inviteSignup: z.object({ token: z.string().min(10).max(200), password: z.string().min(8).max(128) }),
 };
 

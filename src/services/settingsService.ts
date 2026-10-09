@@ -1,5 +1,6 @@
-import { apiGet, apiPost, apiPut } from '../lib/apiClient';
+import { apiGet, apiPatch, apiPost, apiPut } from '../lib/apiClient';
 import type { UserPreferences } from '../types';
+import type { UserProfile } from '../context/AuthContext';
 import { withPreferenceDefaults } from '../data/preferences';
 
 interface SettingsResponse {
@@ -53,5 +54,35 @@ export const settingsService = {
     return withPreferenceDefaults((await apiPut<SettingsResponse>('/api/settings', { preferences })).preferences);
   },
 
+  // Saves the name and/or picture (`avatar: null` removes it) shown across Dubly; returns the profile as it now reads.
+  saveProfile: (patch: { name?: string; avatar?: string | null }) => apiPatch<UserProfile>('/api/profile', patch),
+
   signOutEverywhere: () => apiPost<void>('/api/profile/sign-out-everywhere'),
 };
+
+// Turns a picked image into the small square picture that is stored: centre-cropped, shrunk to 192px, JPEG. A few KB, so it can ride along
+// with the team list and the app's startup data instead of needing file storage of its own.
+export const AVATAR_PIXELS = 192;
+export const MAX_AVATAR_SOURCE_BYTES = 12 * 1024 * 1024;
+
+export async function avatarFromFile(file: File): Promise<string> {
+  if (!/^image\/(jpeg|png|webp|gif|heic|heif|avif)$/.test(file.type)) throw new Error('Choose a JPEG, PNG or WebP picture.');
+  if (file.size > MAX_AVATAR_SOURCE_BYTES) throw new Error('That picture is too large. Choose one under 12 MB.');
+  const bitmap = await createImageBitmap(file).catch(() => {
+    throw new Error('That picture could not be opened. Try a JPEG or PNG.');
+  });
+  try {
+    const side = Math.min(bitmap.width, bitmap.height);
+    const canvas = document.createElement('canvas');
+    canvas.width = canvas.height = AVATAR_PIXELS;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Your browser could not prepare the picture.');
+    // A white backdrop, as JPEG has no transparency (a transparent PNG would otherwise turn black).
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, AVATAR_PIXELS, AVATAR_PIXELS);
+    ctx.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, AVATAR_PIXELS, AVATAR_PIXELS);
+    return canvas.toDataURL('image/jpeg', 0.85);
+  } finally {
+    bitmap.close();
+  }
+}

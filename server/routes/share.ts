@@ -1,12 +1,17 @@
 import { Router } from '../lib/router';
 import { createHash, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
+import type { Response } from 'express';
 import { bucket, db, signReadUrl } from '../lib/firebaseAdmin';
 import { getStoredProject, projectLanguages, segmentsForLanguage } from '../lib/projectRepo';
-import { toVtt } from '../../src/lib/captionCues';
+import { toVtt, type CaptionLine } from '../../src/lib/captionCues';
 import { getLanguageName } from '../lib/languageMeta';
 import { rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
+import { serverRoot } from '../lib/paths';
 import { schemas, validateBody } from '../lib/validation';
+import { renderMessagePage, renderSharePage, shareCsp } from '../lib/sharePage';
 
 // Public share links for a finished dub: anyone with the link can watch and download it for 24 hours, then it is dead.
 const SHARE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -23,6 +28,8 @@ interface StoredShare {
   languageCode: string;
   storagePath: string;
   title: string;
+  // Whether the page carries the dub's captions (with a CC switch). Links made before this existed have none recorded and keep theirs.
+  captions?: boolean;
   createdAt: string;
   expiresAt: string;
   revokedAt?: string;
@@ -46,6 +53,7 @@ shareCreateRouter.post('/:id/share', validateBody(schemas.share), async (req, re
     return;
   }
   const languageCode: string = req.body?.languageCode || stored.targetLanguage;
+  const captions = req.body?.captions !== false;
   if (!projectLanguages(stored).includes(languageCode)) {
     res.status(404).json({ error: `Project is not being dubbed into ${languageCode}` });
     return;
@@ -69,12 +77,13 @@ shareCreateRouter.post('/:id/share', validateBody(schemas.share), async (req, re
     languageCode,
     storagePath,
     title: stored.title,
+    captions,
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + SHARE_TTL_MS).toISOString(),
   };
   const shareId = shareIdFor(token);
   await sharesCol().doc(shareId).set(share);
-  res.status(201).json({ token, shareId, path: `/api/share/${token}`, expiresAt: share.expiresAt });
+  res.status(201).json({ token, shareId, path: `/api/share/${token}`, expiresAt: share.expiresAt, captions });
 });
 
 // Live links of a project, so members can see what is out there and turn links off.
@@ -84,7 +93,7 @@ shareCreateRouter.get('/:id/shares', async (req, res) => {
   const shares = snap.docs
     .map((d) => ({ id: d.id, ...(d.data() as StoredShare) }))
     .filter((s) => s.workspaceId === req.workspaceId && !s.revokedAt && new Date(s.expiresAt).getTime() > now)
-    .map((s) => ({ id: s.id, languageCode: s.languageCode, createdAt: s.createdAt, expiresAt: s.expiresAt }));
+    .map((s) => ({ id: s.id, languageCode: s.languageCode, captions: s.captions !== false, createdAt: s.createdAt, expiresAt: s.expiresAt }));
   res.json({ shares });
 });
 
@@ -101,37 +110,8 @@ shareCreateRouter.delete('/:id/shares/:shareId', async (req, res) => {
   res.status(204).send();
 });
 
-const escapeHtml = (text: string) =>
-  text.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
-
-function page(title: string, body: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><title>${escapeHtml(title)}</title>
-<style>
-:root{--coral:#F05637;--coral-d:#D94B2E;--ink:#0F172A;--muted:#64748B;--bg:#FAFAF7;--line:#E2E8F0}
-*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--ink);min-height:100vh;display:flex;flex-direction:column;align-items:center;padding:24px 16px}
-header{width:100%;max-width:960px;display:flex;align-items:center;gap:10px;margin-bottom:20px}
-.logo{width:34px;height:34px;border-radius:10px;background:var(--coral);color:#fff;display:grid;place-items:center;font-weight:800}
-.brand{font-weight:800;font-size:18px}.card{width:100%;max-width:960px;background:#fff;border:1px solid var(--line);border-radius:20px;overflow:hidden;box-shadow:0 20px 60px rgba(15,23,42,.08)}
-video{display:block;width:100%;max-height:70vh;background:#000}
-.meta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;padding:18px 20px}
-h1{font-size:18px;margin:0 0 4px}.sub{font-size:13px;color:var(--muted)}
-.btn{display:inline-flex;align-items:center;gap:8px;background:var(--coral);color:#fff;text-decoration:none;font-weight:600;font-size:14px;padding:11px 18px;border-radius:12px}
-.btn:hover{background:var(--coral-d)}.pill{display:inline-block;font-size:12px;font-weight:600;color:var(--coral-d);background:#FFF4F1;border:1px solid #FFC4B3;border-radius:999px;padding:3px 10px;margin-left:6px}
-.empty{padding:56px 24px;text-align:center}.empty h1{font-size:22px;margin-bottom:8px}
-footer{margin-top:20px;font-size:12px;color:var(--muted)}
-</style></head><body><header><div class="logo">D</div><span class="brand">Dubly</span></header>${body}<footer>Shared with Dubly · A ScatterPie product</footer></body></html>`;
-}
-
-function expiredPage(res: import('express').Response, status: number, heading: string, text: string) {
-  res.status(status).type('html').send(page(heading, `<div class="card empty"><h1>${heading}</h1><p class="sub">${text}</p></div>`));
-}
-
 // Mounted without auth: this is what the recipient opens.
 export const publicShareRouter = Router();
-
-// The share page is plain server-rendered HTML with inline styles, a video from Cloud Storage and its captions from here; nothing else may load or run.
-const SHARE_PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; media-src 'self' https://storage.googleapis.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 // Links made before tokens were hashed were stored under the raw token; they expire within a day of this change.
 async function findShare(token: string) {
@@ -139,62 +119,94 @@ async function findShare(token: string) {
   return hashed.exists ? hashed : sharesCol().doc(token).get();
 }
 
-// The shared dub's captions, for the page's <track>; they die with the link.
+// The page carries the dub's captions inline, read from Firestore; a burst of viewers of one link shares a single read for a few minutes.
+const CAPTION_LINES_TTL_MS = 5 * 60 * 1000;
+const captionLinesCache = new Map<string, { lines: CaptionLine[]; at: number }>();
+
+async function captionLinesFor(shareId: string, share: StoredShare): Promise<CaptionLine[]> {
+  const hit = captionLinesCache.get(shareId);
+  if (hit && Date.now() - hit.at < CAPTION_LINES_TTL_MS) return hit.lines;
+  const stored = share.workspaceId ? await getStoredProject(share.workspaceId, share.projectId) : null;
+  const lines = stored ? segmentsForLanguage(stored, share.languageCode).filter((s) => s.translatedText.trim()) : [];
+  if (captionLinesCache.size > 200) captionLinesCache.clear();
+  captionLinesCache.set(shareId, { lines, at: Date.now() });
+  return lines;
+}
+
+// The ScatterPie logo on the page, served from here so the page needs nothing from any other site.
+let logoPng: Buffer | null = null;
+publicShareRouter.get('/_assets/scatterpie-logo.png', async (_req, res) => {
+  logoPng ??= await readFile(path.join(serverRoot, 'assets', 'scatterpie-logo.png'));
+  res.status(200).type('png').setHeader('Cache-Control', 'public, max-age=86400').send(logoPng);
+});
+
+// The dub's captions as a WebVTT file; the page itself carries them inline. They die with the link, and with the captions switch.
 publicShareRouter.get('/:token/captions.vtt', rateLimit('share-view', [['ip', rateRules.shareViewPerIp]]), async (req, res) => {
   const snap = await findShare(req.params.token);
   const share = snap.exists ? (snap.data() as StoredShare) : null;
-  if (!share || share.revokedAt || new Date(share.expiresAt).getTime() <= Date.now() || !share.workspaceId) {
+  if (!share || share.revokedAt || share.captions === false || new Date(share.expiresAt).getTime() <= Date.now() || !share.workspaceId) {
     res.status(404).type('text/plain').send('Not found');
     return;
   }
-  const stored = await getStoredProject(share.workspaceId, share.projectId);
-  const lines = stored ? segmentsForLanguage(stored, share.languageCode).filter((s) => s.translatedText.trim()) : [];
+  const lines = await captionLinesFor(snap.id, share);
   res.status(200).type('text/vtt').setHeader('Cache-Control', 'no-store').send(toVtt(lines, share.title));
 });
 
+function messagePage(res: Response, status: number, heading: string, text: string) {
+  res.status(status).type('html').setHeader('Cache-Control', 'no-store').send(renderMessagePage(heading, text));
+}
+
 publicShareRouter.get('/:token', rateLimit('share-view', [['ip', rateRules.shareViewPerIp]]), async (req, res) => {
-  res.setHeader('Content-Security-Policy', SHARE_PAGE_CSP);
+  // Nothing may run on the error pages; the player page swaps in a policy with its own nonce below.
+  res.setHeader('Content-Security-Policy', shareCsp());
   res.setHeader('Referrer-Policy', 'no-referrer');
   const snap = await findShare(req.params.token);
   if (!snap.exists) {
-    expiredPage(res, 404, 'Link not found', 'This share link does not exist. Ask the sender for a new one.');
+    messagePage(res, 404, 'Link not found', 'This share link does not exist. Ask the sender for a new one.');
     return;
   }
   const share = snap.data() as StoredShare;
   if (share.revokedAt) {
-    expiredPage(res, 410, 'This link was turned off', 'The person who shared this video has turned the link off.');
+    messagePage(res, 410, 'This link was turned off', 'The person who shared this video has turned the link off.');
     return;
   }
   const msLeft = new Date(share.expiresAt).getTime() - Date.now();
   if (msLeft <= 0) {
-    expiredPage(res, 410, 'This link has expired', 'Shared videos stay available for 24 hours. Ask the sender for a new link.');
+    messagePage(res, 410, 'This link has expired', 'Shared videos stay available for 24 hours. Ask the sender for a new link.');
     return;
   }
 
   const file = bucket.file(share.storagePath);
   const [exists] = await file.exists();
   if (!exists) {
-    expiredPage(res, 404, 'Video no longer available', 'The owner has removed or re-rendered this video.');
+    messagePage(res, 404, 'Video no longer available', 'The owner has removed or re-rendered this video.');
     return;
   }
   // The media URLs die with the share itself, so a copied video URL cannot outlive the 24-hour window.
   const expires = Date.now() + Math.min(msLeft, SHARE_MEDIA_URL_MAX_MS);
   const languageName = getLanguageName(share.languageCode);
   const fileName = `${share.title.replace(/[^\p{L}\p{N}]+/gu, '_')}_${languageName}.mp4`;
-  const [streamUrl, downloadUrl] = await Promise.all([signReadUrl(share.storagePath, expires), signReadUrl(share.storagePath, expires, fileName)]);
+  const [streamUrl, downloadUrl, captions] = await Promise.all([
+    signReadUrl(share.storagePath, expires),
+    signReadUrl(share.storagePath, expires, fileName),
+    share.captions === false ? Promise.resolve(null) : captionLinesFor(snap.id, share),
+  ]);
 
-  const hoursLeft = Math.max(1, Math.round(msLeft / 3_600_000));
+  const nonce = randomBytes(16).toString('base64');
+  res.setHeader('Content-Security-Policy', shareCsp(nonce));
   res
     .status(200)
     .type('html')
     .setHeader('Cache-Control', 'no-store')
     .send(
-      page(
-        `${share.title} · ${languageName} dub`,
-        `<div class="card"><video controls playsinline preload="metadata" src="${escapeHtml(streamUrl)}"><track kind="captions" default srclang="${escapeHtml(share.languageCode)}" label="${escapeHtml(languageName)}" src="${escapeHtml(`/api/share/${encodeURIComponent(req.params.token)}/captions.vtt`)}"></video>
-<div class="meta"><div><h1>${escapeHtml(share.title)}<span class="pill">${escapeHtml(languageName)}</span></h1>
-<div class="sub">This link expires in about ${hoursLeft} hour${hoursLeft === 1 ? '' : 's'}.</div></div>
-<a class="btn" href="${escapeHtml(downloadUrl)}">Download video</a></div></div>`
-      )
+      renderSharePage({
+        title: share.title,
+        languageName,
+        streamUrl,
+        downloadUrl,
+        hoursLeft: Math.max(1, Math.round(msLeft / 3_600_000)),
+        captions,
+        nonce,
+      })
     );
 });

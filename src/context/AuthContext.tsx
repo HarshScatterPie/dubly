@@ -14,12 +14,18 @@ import {
 } from 'firebase/auth';
 import { auth, googleProvider } from '../lib/firebase';
 import { clearBootCaches } from '../lib/bootCache';
+import { SESSION_ENDED_EVENT } from '../lib/apiClient';
 
 export interface UserProfile {
   name: string;
   role: string;
   workspace: string;
+  // A small image (data: URL) the person chose in Dubly's Settings.
+  avatar?: string | null;
 }
+
+// What Firebase says when a session can never be renewed: signed out everywhere, disabled, or the login deleted.
+const DEAD_SESSION = /user-token-expired|user-disabled|user-not-found|invalid-user-token/;
 
 interface AuthContextValue {
   user: User | null;
@@ -76,6 +82,30 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   useEffect(() => {
     if (!user) setProfile(undefined);
   }, [user]);
+
+  // The server turned a request away as unauthenticated. If the session can be renewed that was a hiccup and nothing changes; if it cannot
+  // (an admin removed this account, or it signed out everywhere) the person is signed out on the spot instead of staring at failing screens.
+  useEffect(() => {
+    let checking = false;
+    const onSessionEnded = async () => {
+      const current = auth.currentUser;
+      if (!current || checking) return;
+      checking = true;
+      try {
+        await current.getIdToken(true);
+      } catch (err) {
+        if (DEAD_SESSION.test(String((err as { code?: string })?.code ?? ''))) {
+          clearBootCaches();
+          setError('Your access to Dubly has ended. Sign in again, or ask your workspace admin if you were removed.');
+          await firebaseSignOut(auth);
+        }
+      } finally {
+        checking = false;
+      }
+    };
+    window.addEventListener(SESSION_ENDED_EVENT, onSessionEnded);
+    return () => window.removeEventListener(SESSION_ENDED_EVENT, onSessionEnded);
+  }, []);
 
   const signInWithGoogle = async () => {
     setError(null);

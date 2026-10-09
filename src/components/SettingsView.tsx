@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { EmailAuthProvider, reauthenticateWithCredential, updatePassword } from 'firebase/auth';
 import {
   Bell,
   BookA,
+  Camera,
   Check,
   KeyRound,
   Languages,
@@ -20,14 +21,16 @@ import {
   Clapperboard,
   Sparkles,
   Gauge,
+  Trash2,
 } from 'lucide-react';
 import type { NavigationTab, PaidExtra, TranslationStyle, UserPreferences, UserUsageStats, Voice, VoiceEmotion } from '../types';
 import { allowanceRate, effectiveExtras } from '../lib/planMath';
 import { enginesLabel, hasGeminiVoices, languageVoiced, listedEngines, premiumVoicesOffered, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../lib/voiceEngines';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { DEFAULT_PREFERENCES } from '../data/preferences';
-import { useAuth } from '../context/AuthContext';
-import { settingsService } from '../services/settingsService';
+import { useAuth, type UserProfile } from '../context/AuthContext';
+import { avatarFromFile, settingsService } from '../services/settingsService';
+import { Avatar } from './Avatar';
 import { textToSpeechService } from '../services/textToSpeechService';
 import type { WorkspaceInfo } from '../services/workspaceService';
 import { apiGet } from '../lib/apiClient';
@@ -37,6 +40,8 @@ import { ConfirmDialog } from './ConfirmDialog';
 interface SettingsViewProps {
   preferences: UserPreferences | null;
   onPreferencesSaved: (preferences: UserPreferences) => void;
+  // The name or picture was saved: the app updates the sidebar, the team list and its saved copy.
+  onProfileSaved: (profile: UserProfile) => void;
   workspace: WorkspaceInfo | null;
   usage: UserUsageStats;
   // False while `usage` is still the placeholder, so plan-gated settings are not shown as locked by mistake.
@@ -126,11 +131,8 @@ const Row: React.FC<{ title: string; hint?: React.ReactNode; children: React.Rea
   </div>
 );
 
-const initials = (name: string) =>
-  name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('') || '?';
-
 // Everything a user can change about how Dubly works for them: account security, the defaults every new dub starts from, and this device's alerts.
-export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPreferencesSaved, workspace, usage, usageLoaded, onNavigate, onShowToast }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPreferencesSaved, onProfileSaved, workspace, usage, usageLoaded, onNavigate, onShowToast }) => {
   const { user, profile, signOut } = useAuth();
   const [draft, setDraft] = useState<UserPreferences>(preferences ?? DEFAULT_PREFERENCES);
   const extrasAllowed = usageLoaded && usage.paidExtrasAllowed;
@@ -158,6 +160,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   const [password, setPassword] = useState({ current: '', next: '', confirm: '' });
   const [changingPassword, setChangingPassword] = useState(false);
   const [confirmSignOutAll, setConfirmSignOutAll] = useState(false);
+  // The name being typed; null while it is untouched, so the field follows the saved name (which can arrive after the page opens).
+  const [nameDraft, setNameDraft] = useState<string | null>(null);
+  const [savingProfile, setSavingProfile] = useState(false);
+  const pictureInputRef = useRef<HTMLInputElement>(null);
 
   // The saved copy can arrive after the page opens; it only replaces the form while nothing has been edited.
   useEffect(() => {
@@ -177,6 +183,33 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   const signInMethod = hasPassword ? 'Email and password' : user?.providerData.some((p) => p.providerId === 'google.com') ? 'Google' : 'Single sign-on';
   const displayName = profile?.name || user?.displayName || user?.email?.split('@')[0] || 'You';
   const minutesPercent = usage.minutesLimit > 0 ? Math.min(100, (usage.minutesDubbed / usage.minutesLimit) * 100) : 0;
+  const nameShown = nameDraft ?? displayName;
+  const nameChanged = nameDraft !== null && nameDraft.trim() !== '' && nameDraft.trim() !== displayName;
+
+  // Saves to Dubly only: ScatterStudio's own profile is never written, so this changes how the person appears here and to their team.
+  const saveProfile = async (patch: { name?: string; avatar?: string | null }, done: string) => {
+    setSavingProfile(true);
+    try {
+      onProfileSaved(await settingsService.saveProfile(patch));
+      setNameDraft(null);
+      onShowToast('Profile Updated', done, 'success');
+    } catch (err) {
+      onShowToast('Could Not Update Profile', (err as Error).message, 'error');
+    } finally {
+      setSavingProfile(false);
+    }
+  };
+
+  const handlePicture = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      await saveProfile({ avatar: await avatarFromFile(file) }, 'Your new picture shows in the sidebar and on the team screen.');
+    } catch (err) {
+      onShowToast('Could Not Use That Picture', (err as Error).message, 'error');
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -307,9 +340,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
 
         <div className="space-y-6 pb-24">
           {/* Account & security */}
-          <Section id="account" title="Account & security" subtitle="Your ScatterStudio account, as Dubly sees it" Icon={UserRound}>
+          <Section id="account" title="Account & security" subtitle="Who you are in Dubly, and how you sign in" Icon={UserRound}>
             <div className="px-5 sm:px-6 py-5 flex items-center gap-4">
-              <div className="w-14 h-14 rounded-2xl bg-[#F05637] text-white flex items-center justify-center text-lg font-bold shrink-0">{initials(displayName)}</div>
+              <Avatar name={displayName} src={profile?.avatar} shape="square" className="w-14 h-14 text-lg" />
               <div className="min-w-0">
                 <p className="text-base font-bold text-[#0F172A] truncate">{displayName}</p>
                 <p className="text-sm text-[#64748B] truncate">{user?.email}</p>
@@ -319,8 +352,59 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
                 </p>
               </div>
             </div>
-            <Row title="Name and profile" hint="Your name comes from your ScatterStudio profile, so it is changed there and shows up everywhere.">
-              <span className="text-xs font-semibold text-[#64748B] px-2.5 py-1 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] shrink-0">Managed in ScatterStudio</span>
+            <Row stacked title="Picture" hint="Shown in the sidebar and to your team. A square picture works best; it is saved in Dubly only.">
+              <div className="flex items-center gap-4">
+                <Avatar name={displayName} src={profile?.avatar} shape="square" className="w-16 h-16 text-xl" />
+                <div className="flex flex-wrap gap-2">
+                  <input ref={pictureInputRef} type="file" accept="image/*" onChange={(e) => void handlePicture(e)} className="hidden" aria-label="Choose a picture" />
+                  <button
+                    type="button"
+                    onClick={() => pictureInputRef.current?.click()}
+                    disabled={savingProfile}
+                    className="flex items-center gap-2 px-3.5 py-2 rounded-xl border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] hover:bg-[#F8FAFC] disabled:opacity-50"
+                  >
+                    {savingProfile ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Camera className="w-3.5 h-3.5" />}
+                    {profile?.avatar ? 'Change picture' : 'Upload picture'}
+                  </button>
+                  {profile?.avatar && (
+                    <button
+                      type="button"
+                      onClick={() => void saveProfile({ avatar: null }, 'Your picture was removed.')}
+                      disabled={savingProfile}
+                      className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold text-[#64748B] hover:text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" /> Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            </Row>
+            <Row stacked title="Name" hint="How your teammates see you. Changing it here does not change your ScatterStudio profile.">
+              <form
+                className="flex gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (nameChanged) void saveProfile({ name: nameShown.trim() }, `You now appear as ${nameShown.trim()}.`);
+                }}
+              >
+                <input
+                  value={nameShown}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  maxLength={60}
+                  autoComplete="name"
+                  placeholder="Your name"
+                  className={inputClass}
+                  aria-label="Your name"
+                />
+                <button
+                  type="submit"
+                  disabled={!nameChanged || savingProfile}
+                  className="flex items-center gap-2 px-4 py-2 rounded-xl bg-[#0F172A] text-white text-xs font-semibold disabled:opacity-40 shrink-0"
+                >
+                  {savingProfile ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                  Save name
+                </button>
+              </form>
             </Row>
 
             {hasPassword && (

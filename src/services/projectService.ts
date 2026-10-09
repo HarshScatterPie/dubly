@@ -179,9 +179,16 @@ export class ProjectService {
   }
 
   /** Creates a public watch link for one language's dub that stops working after 24 hours. */
-  public async createShareLink(projectId: string, languageCode: string): Promise<{ url: string; expiresAt: string; shareId: string }> {
-    const res = await apiPost<{ path: string; expiresAt: string; shareId: string }>(`/api/projects/${projectId}/share`, { languageCode });
-    return { url: `${window.location.origin}${res.path}`, expiresAt: res.expiresAt, shareId: res.shareId };
+  public async createShareLink(
+    projectId: string,
+    languageCode: string,
+    captions = true
+  ): Promise<{ url: string; expiresAt: string; shareId: string; captions: boolean }> {
+    const res = await apiPost<{ path: string; expiresAt: string; shareId: string; captions?: boolean }>(`/api/projects/${projectId}/share`, {
+      languageCode,
+      captions,
+    });
+    return { url: `${window.location.origin}${res.path}`, expiresAt: res.expiresAt, shareId: res.shareId, captions: res.captions !== false };
   }
 
   /** Turns a share link off before it expires; its video stops playing within two hours at most. */

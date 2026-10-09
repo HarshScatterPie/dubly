@@ -23,7 +23,8 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 |---|---|---|
 | GET | `/api/healthz` | Public liveness check: `{ ok: true }` |
 | GET | `/api/health` | Provider and optional-engine availability |
-| GET | `/api/profile` | Name, role and workspace from the shared ScatterStudio profile (whitelisted fields only) |
+| GET | `/api/profile` | `{ name, role, workspace, avatar }`: from the shared ScatterStudio profile (whitelisted fields only), with the name and picture the person chose in Dubly's Settings taking precedence |
+| PATCH | `/api/profile` | `{ name?, avatar? }`: `name` 1–60 characters; `avatar` a small JPEG/PNG/WebP `data:` URL (≤ 60,000 characters, checked by content) or `null` to remove it. Saved on Dubly's side only (`users/{uid}/meta/profile`); the ScatterStudio document is never written. Also updates the caller's entry on the team list. Needs a workspace |
 | GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews steadily, without delivery direction or performed laughs and sighs |
 | POST | `/api/profile/sign-out-everywhere` | Revokes every session of the caller's account, this one included (`204`); their tokens are refused from then on |
 | GET | `/api/bootstrap` | Everything the app opens with, in one response: `{ workspace, preferences, usage, projects, profile }` (same shapes as the separate endpoints). The client caches it per account in the browser and refreshes it on every visit |
@@ -39,11 +40,15 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | POST | `/api/workspace/invites` | admin | `{ email, role }` → `201 { invite, token, emailed }`. Same response whether or not the email has an account. Re-inviting replaces the earlier link. The link is `/?invite=<token>`, valid 7 days. `emailed` is true when SMTP is configured and the server accepted the email to the invitee; the link is returned either way. `403 PLAN_NO_TEAM` on a plan without teammates. Rate-limited per admin and per workspace |
 | DELETE | `/api/workspace/invites/:inviteId` | admin | Withdraw an invitation |
 | PATCH | `/api/workspace/members/:uid` | admin | `{ role }`. The last admin can't be demoted |
-| DELETE | `/api/workspace/members/:uid` | admin | Removes the member, who returns to their own workspace if they had one |
+| DELETE | `/api/workspace/members/:uid` | admin | Removes the member for good, at once: the membership and a "removed" mark are written atomically (every request they make is then `403 NO_WORKSPACE`, even with a still-valid session), and every session is revoked. They are locked out of Dubly entirely, including a workspace of their own, until an admin invites them again. A login Dubly created from an invitation is deleted; a pre-existing login (shared with ScatterStudio) is only locked out of Dubly. `400` when removing yourself or the last admin |
 | GET | `/api/workspace/glossary` | member | `{ entries, canEdit }` |
 | PUT | `/api/workspace/glossary` | admin | `{ entries }` (≤ 300; each `{ id, term, mode: keep\|translate, translations?, spokenAs?, note? }`; terms unique regardless of case). Replaces the whole list. Translations, line shortening, review flags and the voice's pronunciation follow it |
 | POST | `/api/invites/preview` | any signed-in user | `{ token }`. Answers only if the signed-in email matches the invitation, otherwise the uniform `404 INVITE_NOT_FOUND` |
-| POST | `/api/invites/accept` | any signed-in user | `{ token }`. Joins the workspace. Idempotent for the same user. `410 INVITE_EXPIRED`; `409 IN_OTHER_TEAM` if the caller is in another team with other members |
+| POST | `/api/invites/accept` | any signed-in user | `{ token }`. Joins the workspace. Idempotent for the same user while they remain a member; a used link is spent once they are removed. `410 INVITE_EXPIRED`; `409 IN_OTHER_TEAM` if the caller is in another team with other members |
+| GET | `/api/invites/mine` | any signed-in user | `{ invites: [{ id, workspaceName, role, invitedByName, createdAt, expiresAt }] }`: live invitations addressed to the caller's email, for the notification bell. Empty unless the email is verified. Not rate-limited like the other invite routes (the bell asks every few minutes) |
+| POST | `/api/invites/accept-by-id` | verified email | `{ inviteId }`: joins from the bell or the join screen without the emailed link. `403 EMAIL_NOT_VERIFIED`; otherwise the same answers as `accept` |
+
+**No workspace yet.** A login made from an invitation, or an existing login with an invitation waiting that has never used Dubly, gets no workspace of its own (so no Starter plan) until it joins: every workspace route answers `403 AWAITING_INVITE`. A removed member gets `403 NO_WORKSPACE`.
 
 ### Projects
 | Method | Path | Notes |
@@ -72,10 +77,11 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 ### Sharing
 | Method | Path | Notes |
 |---|---|---|
-| POST | `/api/projects/:id/share` | `{ languageCode? }` → `201 { token, shareId, path, expiresAt }`: a 24-hour public link |
-| GET | `/api/projects/:id/shares` | The project's live links |
+| POST | `/api/projects/:id/share` | `{ languageCode?, captions? }` → `201 { token, shareId, path, expiresAt, captions }`: a 24-hour public link. `captions` (default `true`) puts the dub's word-by-word captions and a CC switch on the page |
+| GET | `/api/projects/:id/shares` | The project's live links (`captions` says whether each carries them) |
 | DELETE | `/api/projects/:id/shares/:shareId` | Turn a link off. Its page stops at once; any video URL already copied from it lasts at most 2 more hours |
-| GET | `/api/share/:token` | **Public** HTML watch page. `404` unknown, `410` expired or turned off. Limited per IP |
+| GET | `/api/share/:token` | **Public** HTML watch page with the ScatterPie logo and a player like the studio's (captions, CC, speed, fullscreen). `404` unknown, `410` expired or turned off. Limited per IP. Its one inline script is allowed by a per-response CSP nonce |
+| GET | `/api/share/:token/captions.vtt` | **Public** WebVTT of the captions; `404` when the link has none |
 
 ### Text-to-voice
 | Method | Path | Notes |

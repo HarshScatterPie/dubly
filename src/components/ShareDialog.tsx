@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Check, Clock, Copy, ExternalLink, Link2, Loader2, MessageCircle, X } from 'lucide-react';
+import { Check, Clock, Copy, ExternalLink, Link2, Loader2, MessageCircle, Subtitles, X } from 'lucide-react';
 import { projectService } from '../services/projectService';
 
 interface ShareDialogProps {
@@ -15,7 +15,9 @@ interface ShareDialogProps {
 export const ShareDialog: React.FC<ShareDialogProps> = ({ projectId, projectTitle, languages, initialLanguage, onClose, onShowToast }) => {
   const ready = languages.filter((l) => l.ready);
   const [languageCode, setLanguageCode] = useState(ready.some((l) => l.code === initialLanguage) ? initialLanguage : ready[0]?.code || '');
-  const [link, setLink] = useState<{ url: string; expiresAt: string; shareId: string } | null>(null);
+  const [link, setLink] = useState<{ url: string; expiresAt: string; shareId: string; captions: boolean } | null>(null);
+  // Whether the page people open carries the dub's captions (they can still switch them off with CC); chosen before the link is made.
+  const [captions, setCaptions] = useState(true);
   const [isRevoking, setIsRevoking] = useState(false);
   const [isCreating, setIsCreating] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -32,7 +34,7 @@ export const ShareDialog: React.FC<ShareDialogProps> = ({ projectId, projectTitl
     setIsCreating(true);
     setCopied(false);
     try {
-      setLink(await projectService.createShareLink(projectId, languageCode));
+      setLink(await projectService.createShareLink(projectId, languageCode, captions));
     } catch (err) {
       onShowToast?.('Could Not Create Link', (err as Error).message, 'error');
     } finally {
@@ -119,6 +121,42 @@ export const ShareDialog: React.FC<ShareDialogProps> = ({ projectId, projectTitl
             </div>
           </div>
         )}
+
+        {/* Captions: on the page the viewer sees them word by word with a CC switch, exactly as in this studio's preview */}
+        <div className="flex items-center justify-between gap-4 p-3.5 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0]">
+          <div className="flex items-start gap-3 min-w-0">
+            <div className="w-8 h-8 rounded-xl bg-white border border-[#E2E8F0] text-[#D94B2E] flex items-center justify-center shrink-0">
+              <Subtitles className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <span className="text-sm font-semibold text-[#0F172A] block">Captions</span>
+              <span className="text-xs text-[#64748B] block mt-0.5">
+                {link
+                  ? link.captions
+                    ? 'This link shows captions. Viewers can switch them off with CC.'
+                    : 'This link has no captions. Make a new link to include them.'
+                  : captions
+                    ? 'Words light up as they are spoken, and viewers can switch them off with CC.'
+                    : 'The video plays with no captions and no CC button.'}
+              </span>
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={link ? link.captions : captions}
+            aria-label="Include captions"
+            disabled={Boolean(link)}
+            onClick={() => setCaptions((v) => !v)}
+            className={`relative w-10 h-6 rounded-full transition-colors shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-[#F05637]/40 disabled:opacity-50 disabled:cursor-not-allowed ${
+              (link ? link.captions : captions) ? 'bg-[#F05637]' : 'bg-[#CBD5E1]'
+            }`}
+          >
+            <span
+              className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow transition-transform ${(link ? link.captions : captions) ? 'translate-x-4' : 'translate-x-0'}`}
+            />
+          </button>
+        </div>
 
         {!link ? (
           <button

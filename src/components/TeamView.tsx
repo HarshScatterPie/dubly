@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Check, Clock, Copy, Loader2, Lock, Pencil, ShieldCheck, Trash2, UserPlus, Users, X } from 'lucide-react';
 import { ConfirmDialog } from './ConfirmDialog';
+import { Avatar } from './Avatar';
 import {
   inviteLink,
   workspaceService,
@@ -22,10 +23,6 @@ const ROLE_INFO: Record<WorkspaceRole, { label: string; desc: string }> = {
   admin: { label: 'Admin', desc: 'Everything, including deleting projects and managing the team' },
   editor: { label: 'Editor', desc: 'Upload, translate, dub, edit and download — cannot delete projects' },
 };
-
-function initials(name: string): string {
-  return name.split(/\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]!.toUpperCase()).join('') || '?';
-}
 
 // The team screen: everyone sees who is in the workspace; admins invite people by link, change roles and remove them.
 export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShowToast, plan }) => {
@@ -109,7 +106,7 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
     try {
       await workspaceService.removeMember(member.uid);
       await refresh();
-      onShowToast('Member Removed', `${member.name} no longer has access to this workspace.`, 'info');
+      onShowToast('Member Removed', `${member.name} was signed out and can no longer use Dubly.`, 'info');
     } catch (err) {
       onShowToast('Could Not Remove Member', (err as Error).message, 'error');
     } finally {
@@ -183,9 +180,7 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
               const isMe = m.uid === workspace.myUid;
               return (
                 <li key={m.uid} className="flex items-center gap-3 px-5 py-3.5">
-                  <div className={`w-9 h-9 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${m.role === 'admin' ? 'bg-[#F05637] text-white' : 'bg-[#E2E8F0] text-[#0F172A]'}`}>
-                    {initials(m.name)}
-                  </div>
+                  <Avatar name={m.name} src={m.avatar} tone={m.role === 'admin' ? 'coral' : 'slate'} className="w-9 h-9 text-xs" />
                   <div className="min-w-0 flex-1">
                     <span className="text-sm font-semibold text-[#0F172A] block truncate">
                       {m.name}
@@ -336,7 +331,7 @@ export const TeamView: React.FC<TeamViewProps> = ({ workspace, onChanged, onShow
       <ConfirmDialog
         isOpen={Boolean(pendingRemove)}
         title={`Remove ${pendingRemove?.name ?? 'member'}?`}
-        description="They lose access to this workspace and its projects straight away. Their login itself is not deleted, and you can invite them back later."
+        description="They are signed out of Dubly on every device straight away and cannot get back in, not even to a workspace of their own. A login that was created from your invitation is deleted. You can invite them again later."
         confirmLabel="Remove"
         onCancel={() => setPendingRemove(null)}
         onConfirm={() => {

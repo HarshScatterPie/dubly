@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { NavigationTab, UserUsageStats } from '../types';
 import { useAuth } from '../context/AuthContext';
+import { Avatar } from './Avatar';
 import scatterPieLogoWhite from '../assets/scatterpie-logo-white.png';
 
 interface SidebarProps {
@@ -72,13 +73,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
   // empty (only Google sign-in ever fills it), so falling back to it first showed
   // "Studio User" for most accounts even when their real name was one API call away.
   const displayName = profile?.name || user?.displayName || user?.email || 'Studio User';
-  const initials = displayName
-    .split(/\s+/)
-    .map((p) => p[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
+  // The picture chosen in Dubly's Settings wins over the sign-in provider's photo.
+  const avatarSrc = profile?.avatar || user?.photoURL || null;
 
   const handleNav = (tab: NavigationTab) => {
     onSelectTab(tab);
@@ -208,13 +204,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
         <div className="p-3 border-t border-white/5">
           <div className={`flex items-center gap-3 ${collapsed ? 'justify-center' : ''}`}>
-            {user?.photoURL ? (
-              <img src={user.photoURL} alt={displayName} className="w-9 h-9 rounded-full object-cover shrink-0" />
-            ) : (
-              <div className="w-9 h-9 rounded-full bg-coral-500 flex items-center justify-center text-white text-xs font-bold shrink-0">
-                {initials || 'U'}
-              </div>
-            )}
+            <Avatar name={displayName} src={avatarSrc} className="w-9 h-9 text-xs" />
             {!collapsed && (
               <>
                 <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleNav('settings')}>
@@ -269,13 +259,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         </nav>
         <div className="p-3 border-t border-white/5">
           <div className="flex items-center gap-3">
-            {user?.photoURL ? (
-              <img src={user.photoURL} alt={displayName} className="w-9 h-9 rounded-full object-cover shrink-0" />
-            ) : (
-              <div className="w-9 h-9 rounded-full bg-coral-500 flex items-center justify-center text-white text-xs font-bold shrink-0">
-                {initials || 'U'}
-              </div>
-            )}
+            <Avatar name={displayName} src={avatarSrc} className="w-9 h-9 text-xs" />
             <div className="flex-1 min-w-0">
               <p className="text-sm font-medium truncate">{displayName}</p>
               <p className="text-xs text-slate-400 truncate">{usage.activePlan} Plan</p>

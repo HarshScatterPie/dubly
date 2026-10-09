@@ -11,14 +11,16 @@ import { BrandLoader, BrandSplash } from './components/BrandLoader';
 import { Dashboard } from './components/Dashboard';
 import { ToastContainer } from './components/Toast';
 import { Login } from './components/Login';
-import { useAuth } from './context/AuthContext';
+import { useAuth, type UserProfile } from './context/AuthContext';
 import { textToSpeechService } from './services/textToSpeechService';
 import { projectService } from './services/projectService';
-import { apiGet, type ApiError } from './lib/apiClient';
-import type { WorkspaceInfo } from './services/workspaceService';
+import { ACCESS_LOST_EVENT, apiGet, type ApiError } from './lib/apiClient';
+import { workspaceService, type MyInvite, type WorkspaceInfo } from './services/workspaceService';
 import { hasPendingInvite, InviteAcceptDialog, takeInviteTokenFromUrl } from './components/InviteAcceptDialog';
+import { InviteCard } from './components/Invitations';
+import { useMyInvites } from './lib/useMyInvites';
 import { hasLegacyPreferences, settingsService } from './services/settingsService';
-import { loadBootData, readBootCache, updateBootCache, writeBootCache, type BootData } from './lib/bootCache';
+import { clearBootCaches, loadBootData, readBootCache, updateBootCache, writeBootCache, type BootData } from './lib/bootCache';
 import { StudioMiniPlayer } from './components/StudioMiniPlayer';
 import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type StudioStatus } from './lib/studioSession';
 import { projectProgress } from './lib/projectProgress';
@@ -85,6 +87,12 @@ const EMPTY_USAGE: UserUsageStats = {
   voiceEngines: DEFAULT_VOICE_ENGINES,
 };
 
+// Why the server refuses this account a workspace: removed by an admin (`NO_WORKSPACE`), or invited and not yet joined (`AWAITING_INVITE`).
+interface WorkspaceAccessProblem {
+  code: string;
+  message: string;
+}
+
 export default function App() {
   const { user, loading: authLoading, signOut, primeProfile } = useAuth();
   // True while a visit with nothing cached waits for its startup data behind the loading screen.
@@ -93,10 +101,13 @@ export default function App() {
   const bootedRef = useRef(false);
   // The workspace an invitation is joining, shown full screen until the new workspace's data is loaded.
   const [joiningWorkspace, setJoiningWorkspace] = useState<string | null>(null);
-  // The caller's team and role; `accessError` is set when they were removed from their workspace.
+  // The caller's team and role; `workspaceAccessError` is set when they have no workspace: removed from theirs, or invited and not joined yet.
   const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
-  const [workspaceAccessError, setWorkspaceAccessError] = useState<string | null>(null);
+  const [workspaceAccessError, setWorkspaceAccessError] = useState<WorkspaceAccessProblem | null>(null);
   const isAdmin = workspace?.myRole === 'admin';
+  // Invitations waiting for this person: in the bell, and as the only thing on screen for someone who has no workspace yet.
+  const { invites, refresh: refreshInvites } = useMyInvites(Boolean(user) && !booting);
+  const [joiningInviteId, setJoiningInviteId] = useState<string | null>(null);
 
   const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
   const [projects, setProjects] = useState<DubbingProject[]>([]);
@@ -216,8 +227,12 @@ export default function App() {
       .catch((err) => {
         if (cancelled) return;
         bootedRef.current = true;
-        if ((err as ApiError).status === 403) setWorkspaceAccessError((err as Error).message);
-        else if (!cached) {
+        if ((err as ApiError).status === 403) {
+          const code = (err as ApiError).code ?? 'NO_WORKSPACE';
+          // What this browser kept of that workspace goes too: someone locked out must not reopen to a copy of its projects.
+          clearBootCaches();
+          setWorkspaceAccessError({ code, message: (err as Error).message });
+        } else if (!cached) {
           primeProfile(null);
           showToast('Failed to Load Studio Data', (err as Error).message, 'error');
         }
@@ -232,6 +247,18 @@ export default function App() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
+
+  // The server refused the signed-in account a workspace while the app was already open (an admin just removed them): leave the studio at once.
+  useEffect(() => {
+    const onAccessLost = (e: Event) => {
+      const { code, message } = (e as CustomEvent<WorkspaceAccessProblem>).detail;
+      clearBootCaches();
+      setWorkspace(null);
+      setWorkspaceAccessError({ code, message });
+    };
+    window.addEventListener(ACCESS_LOST_EVENT, onAccessLost);
+    return () => window.removeEventListener(ACCESS_LOST_EVENT, onAccessLost);
+  }, []);
 
   useEffect(() => {
     if (!user) {
@@ -329,6 +356,50 @@ export default function App() {
       <BrandSplash label={`Joining ${joiningWorkspace}…`} />
     </div>
   );
+
+  // The Join workspace button on an invitation in the bell or on the join screen: accepts it by id (no emailed link needed), then loads the team's workspace.
+  const handleJoinInvite = async (invite: MyInvite) => {
+    setJoiningInviteId(invite.id);
+    setJoiningWorkspace(invite.workspaceName);
+    try {
+      await workspaceService.acceptInviteById(invite.id);
+    } catch (err) {
+      setJoiningWorkspace(null);
+      setJoiningInviteId(null);
+      showToast('Could Not Join', (err as Error).message, 'error');
+      void refreshInvites();
+      return;
+    }
+    await handleJoinedWorkspace(invite.workspaceName);
+    setJoiningInviteId(null);
+    void refreshInvites();
+  };
+
+  // The person changed their name or picture in Settings: the sidebar, the team list and this browser's saved copy all follow at once.
+  const handleProfileSaved = (saved: UserProfile) => {
+    primeProfile(saved);
+    setWorkspace((current) =>
+      current && {
+        ...current,
+        members: current.members.map((m) => (m.uid === current.myUid ? { ...m, name: saved.name || m.name, avatar: saved.avatar ?? undefined } : m)),
+      }
+    );
+    if (user) updateBootCache(user.uid, { profile: saved });
+  };
+
+  // "Check again" on the join screen, for an invitation accepted on another device or a join that finished loading too late.
+  const handleRecheckAccess = async () => {
+    try {
+      const data = await loadBootData();
+      applyBoot(data);
+      if (user) writeBootCache(user.uid, data);
+    } catch (err) {
+      const code = (err as ApiError).code;
+      if (code === 'NO_WORKSPACE' || code === 'AWAITING_INVITE') setWorkspaceAccessError({ code, message: (err as Error).message });
+      else showToast('Could Not Check', (err as Error).message, 'error');
+    }
+    void refreshInvites();
+  };
 
   const handleDismissToast = (id: string) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -434,23 +505,57 @@ export default function App() {
     return <BrandSplash label={hasPendingInvite() ? 'Opening your invitation…' : 'Loading your workspace…'} />;
   }
 
-  // Removed from their workspace: nothing else in the app would work, so say so plainly instead of failing every request.
+  // No workspace: nothing else in the app would work, so say why plainly instead of failing every request. Someone invited but not yet joined
+  // sees their invitation(s) with a Join button and nothing of Dubly; someone an admin removed sees that, and can only sign out.
   if (workspaceAccessError) {
+    const awaiting = workspaceAccessError.code === 'AWAITING_INVITE';
     return (
-      <div className="min-h-screen bg-background flex items-center justify-center px-4">
-        <div className="w-full max-w-sm glass-panel rounded-2xl p-8 text-center space-y-4 shadow-lg">
-          <h1 className="text-lg font-bold text-foreground">No workspace access</h1>
-          <p className="text-sm text-muted-foreground">{workspaceAccessError}</p>
-          <button
-            type="button"
-            onClick={() => void signOut()}
-            className="w-full py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white text-sm font-semibold"
-          >
-            Sign out
-          </button>
+      <div className="min-h-screen bg-background flex items-center justify-center px-4 py-8">
+        <div className="w-full max-w-sm glass-panel rounded-2xl p-8 space-y-5 shadow-lg">
+          <div className="text-center space-y-2">
+            <h1 className="text-lg font-bold text-foreground">{awaiting ? 'Join your workspace' : 'No workspace access'}</h1>
+            <p className="text-sm text-muted-foreground">
+              {awaiting
+                ? invites.length > 0
+                  ? 'You have been invited to a Dubly workspace. Join it to start using Dubly.'
+                  : 'You have not joined a workspace yet, and there is no invitation waiting for you right now.'
+                : workspaceAccessError.message}
+            </p>
+          </div>
+          {awaiting && invites.length > 0 && (
+            <div className="space-y-3">
+              {invites.map((invite) => (
+                <InviteCard key={invite.id} invite={invite} joining={joiningInviteId === invite.id} disabled={joiningInviteId !== null} onJoin={handleJoinInvite} />
+              ))}
+            </div>
+          )}
+          {awaiting && invites.length === 0 && (
+            <p className="text-xs text-muted-foreground text-center">
+              Open the invitation link from your email, or ask the workspace admin to send you a new one.
+            </p>
+          )}
+          <div className="space-y-2">
+            {awaiting && (
+              <button
+                type="button"
+                onClick={() => void handleRecheckAccess()}
+                className="w-full py-2.5 rounded-md border border-border text-sm font-semibold text-foreground hover:bg-slate-50"
+              >
+                Check again
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              className={`w-full py-2.5 rounded-md text-sm font-semibold ${awaiting ? 'text-muted-foreground hover:text-foreground' : 'bg-coral-500 hover:bg-coral-600 text-white'}`}
+            >
+              Sign out
+            </button>
+          </div>
         </div>
         <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
         <InviteAcceptDialog
+          hasWorkspace={false}
           onJoining={setJoiningWorkspace}
           onJoinFailed={() => setJoiningWorkspace(null)}
           onJoined={handleJoinedWorkspace}
@@ -498,6 +603,9 @@ export default function App() {
             onSearch={handleHeaderSearch}
             isPlayingAudio={isPlayingAudio}
             onStopAudio={handleStopAudio}
+            invites={invites}
+            joiningInviteId={joiningInviteId}
+            onJoinInvite={handleJoinInvite}
           />
 
           <main className="flex-1 overflow-y-auto pb-24 md:pb-0">
@@ -546,6 +654,7 @@ export default function App() {
               <SettingsView
                 preferences={preferences}
                 onPreferencesSaved={setPreferences}
+                onProfileSaved={handleProfileSaved}
                 workspace={workspace}
                 usage={usage}
                 usageLoaded={usageLoaded}

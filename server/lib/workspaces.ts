@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { FieldValue } from 'firebase-admin/firestore';
 import { authAdmin, db } from './firebaseAdmin';
+import { log } from './log';
 import { planForWorkspace } from './plans';
+import { getUserProfile } from './projectRepo';
 
 // A Dubly workspace is a team: projects and the monthly minute allowance belong to it, and each member is an admin or an editor.
 export type WorkspaceRole = 'admin' | 'editor';
@@ -9,6 +12,8 @@ export interface WorkspaceMember {
   uid: string;
   email: string;
   name: string;
+  // A small data: URL the member chose in Settings; absent until they do.
+  avatar?: string;
   role: WorkspaceRole;
   addedAt: string;
   addedBy: string;
@@ -19,12 +24,27 @@ export interface Membership {
   role: WorkspaceRole;
 }
 
-export class WorkspaceAccessError extends Error {}
+// `NO_WORKSPACE`: an admin removed them, and they stay out until invited again. `AWAITING_INVITE`: they have been invited but have not joined, so they have nothing yet.
+export type WorkspaceAccessCode = 'NO_WORKSPACE' | 'AWAITING_INVITE';
+
+export class WorkspaceAccessError extends Error {
+  constructor(
+    message: string,
+    public code: WorkspaceAccessCode = 'NO_WORKSPACE'
+  ) {
+    super(message);
+  }
+}
 export class WorkspaceRequestError extends Error {}
+
+const REMOVED_MESSAGE = 'Your access to Dubly was removed by the workspace admin. Ask them to invite you again if this is a mistake.';
+const AWAITING_MESSAGE = 'You have not joined a workspace yet. Accept your invitation to start using Dubly.';
 
 const workspaceDoc = (id: string) => db.collection('workspaces').doc(id);
 const membersCol = (id: string) => workspaceDoc(id).collection('members');
-// uid -> the one workspace that user belongs to; `workspaceId: null` marks someone an admin removed.
+// uid -> the one workspace that user belongs to. `workspaceId: null` means no access: `removedFrom` is set when an admin removed them (permanent
+// until they are invited again), `awaitingInvite` for an account made from an invitation that has not been accepted yet. `createdViaInvite` marks
+// a login Dubly itself created from an invitation, which is deleted along with the membership.
 const pointerDoc = (uid: string) => db.collection('workspaceMembership').doc(uid);
 
 // Every API request resolves membership (the UI polls once a second), so it is cached briefly and cleared on any change.
@@ -48,9 +68,12 @@ export async function resolveMembership(uid: string): Promise<Membership> {
   let membership: Membership;
   if (pointer.exists) {
     const workspaceId = pointer.get('workspaceId') as string | null;
-    if (!workspaceId) throw new WorkspaceAccessError('You were removed from your Dubly workspace. Ask its admin to add you again.');
+    if (!workspaceId) {
+      if (pointer.get('removedFrom')) throw new WorkspaceAccessError(REMOVED_MESSAGE);
+      throw new WorkspaceAccessError(AWAITING_MESSAGE, 'AWAITING_INVITE');
+    }
     const member = await membersCol(workspaceId).doc(uid).get();
-    if (!member.exists) throw new WorkspaceAccessError('You are not a member of this workspace any more. Ask its admin to add you again.');
+    if (!member.exists) throw new WorkspaceAccessError(REMOVED_MESSAGE);
     membership = { workspaceId, role: member.get('role') as WorkspaceRole };
   } else {
     // Concurrent first requests (the app loads several things at once) share one creation instead of racing.
@@ -66,8 +89,10 @@ export async function resolveMembership(uid: string): Promise<Membership> {
 }
 
 // The first time someone uses Dubly they get their own workspace as its admin, with their existing projects and this month's usage copied in.
+// Someone with an invitation waiting gets nothing until they accept it: a workspace of their own would be a Starter plan they never asked for.
 async function createPersonalWorkspace(uid: string): Promise<Membership> {
   const user = await authAdmin.getUser(uid);
+  if (user.email && (await pendingInvitesFor(user.email)).length > 0) throw new WorkspaceAccessError(AWAITING_MESSAGE, 'AWAITING_INVITE');
   const profile = (await db.collection('users').doc(uid).get()).data() || {};
   const name = (typeof profile.name === 'string' && profile.name) || user.displayName || user.email?.split('@')[0] || 'Member';
   const workspaceId = `ws-${randomUUID()}`;
@@ -167,10 +192,42 @@ function toSummary(invite: StoredInvite): InviteSummary {
   };
 }
 
+// The name the person chose in Dubly's Settings, else their ScatterStudio profile name, else their login's.
 async function displayNameFor(uid: string): Promise<string> {
-  const [user, profile] = await Promise.all([authAdmin.getUser(uid), db.collection('users').doc(uid).get()]);
-  const profileName = profile.get('name');
-  return (typeof profileName === 'string' && profileName) || user.displayName || user.email?.split('@')[0] || 'Member';
+  const [user, profile] = await Promise.all([authAdmin.getUser(uid), getUserProfile(uid).catch(() => null)]);
+  return profile?.name || user.displayName || user.email?.split('@')[0] || 'Member';
+}
+
+// An invitation as its addressee sees it in their notifications; the secret link itself is never stored, so it is accepted by this id.
+export interface MyInvite {
+  id: string;
+  workspaceName: string;
+  role: WorkspaceRole;
+  invitedByName: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+// Live invitations addressed to an email: pending and not past their expiry, newest first.
+async function pendingInvitesFor(email: string): Promise<StoredInvite[]> {
+  const snap = await invitesCol().where('invitedEmail', '==', email.trim().toLowerCase()).where('status', '==', 'pending').get();
+  const now = Date.now();
+  return snap.docs
+    .map((d) => d.data() as StoredInvite)
+    .filter((inv) => new Date(inv.expiresAt).getTime() > now)
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export async function listInvitesFor(email: string | undefined): Promise<MyInvite[]> {
+  if (!email) return [];
+  return (await pendingInvitesFor(email)).map((inv) => ({
+    id: inv.id,
+    workspaceName: inv.workspaceName,
+    role: inv.role,
+    invitedByName: inv.invitedByName,
+    createdAt: inv.createdAt,
+    expiresAt: inv.expiresAt,
+  }));
 }
 
 // Invites an email without looking anyone up, creating or moving anything; the response never reveals whether the email has a login.
@@ -329,9 +386,10 @@ export async function createAccountForInvite(token: string, password: string): P
     throw new InviteError(409, 'ACCOUNT_EXISTS', 'This email already has an account. Sign in with it to join.');
   }
   await assertPlanAllowsTeam(invite.workspaceId, true);
+  let uid: string;
   try {
     // The invitation reached this inbox, which is the same proof a verification email would ask for.
-    await authAdmin.createUser({ email: invite.invitedEmail, password, emailVerified: true });
+    uid = (await authAdmin.createUser({ email: invite.invitedEmail, password, emailVerified: true })).uid;
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === 'auth/email-already-exists') {
@@ -340,12 +398,25 @@ export async function createAccountForInvite(token: string, password: string): P
     if (code === 'auth/invalid-password') throw new WorkspaceRequestError('Choose a stronger password (at least 8 characters).');
     throw err;
   }
+  try {
+    // The login exists only to join this team: until they accept, it has no workspace (and so no Starter plan of its own).
+    await pointerDoc(uid).set({ workspaceId: null, awaitingInvite: true, createdViaInvite: true });
+  } catch (err) {
+    await authAdmin.deleteUser(uid).catch(() => undefined);
+    throw err;
+  }
   return { email: invite.invitedEmail };
 }
 
-// Joins the caller to the invite's workspace, leaving their own workspace and projects in place to return to; accepting twice is a no-op.
+// Joins the caller to the invite's workspace from the link they were sent; accepting twice is a no-op.
 export async function acceptInvite(token: string, uid: string, callerEmail: string | undefined): Promise<Membership> {
-  const ref = invitesCol().doc(hashToken(String(token)));
+  return acceptInviteById(hashToken(String(token)), uid, callerEmail);
+}
+
+// The same, from the invitation's id as listed in the person's notifications. Without the secret link this rests on the signed-in
+// email alone, so the route only offers it to accounts whose email has been verified.
+export async function acceptInviteById(inviteId: string, uid: string, callerEmail: string | undefined): Promise<Membership> {
+  const ref = invitesCol().doc(inviteId);
   const name = await displayNameFor(uid);
   // Whether the caller's current workspace is a shared team is a policy check read up front, keeping the transaction to single-document reads.
   const before = await pointerDoc(uid).get();
@@ -356,7 +427,9 @@ export async function acceptInvite(token: string, uid: string, callerEmail: stri
   const result = await db.runTransaction(async (tx) => {
     const invite = usableInvite(await tx.get(ref), callerEmail);
     if (invite.status === 'accepted') {
-      if (invite.acceptedBy === uid) return { workspaceId: invite.workspaceId, role: invite.role };
+      // Opening a used link again only confirms a membership they still have; once an admin removes them, it is spent for good.
+      const member = invite.acceptedBy === uid ? await tx.get(membersCol(invite.workspaceId).doc(uid)) : null;
+      if (member?.exists) return { workspaceId: invite.workspaceId, role: member.get('role') as WorkspaceRole };
       throw new InviteError(404, 'INVITE_NOT_FOUND', INVITE_NOT_FOUND);
     }
     if (new Date(invite.expiresAt).getTime() <= Date.now()) {
@@ -375,13 +448,8 @@ export async function acceptInvite(token: string, uid: string, callerEmail: stri
     if (current !== beforeWorkspace) {
       throw new InviteError(409, 'MEMBERSHIP_CHANGED', 'Your workspace just changed. Open the invitation link again.');
     }
-    let personalWorkspaceId: string | null = pointer.exists ? ((pointer.get('personalWorkspaceId') as string | null) ?? null) : null;
-    if (current && current !== invite.workspaceId) {
-      if (inSharedTeam) {
-        throw new InviteError(409, 'IN_OTHER_TEAM', 'You are already part of another team workspace. Ask its admin to remove you first, then open this link again.');
-      }
-      // Remembered so that leaving the team later brings them back to their own projects.
-      personalWorkspaceId = current;
+    if (current && current !== invite.workspaceId && inSharedTeam) {
+      throw new InviteError(409, 'IN_OTHER_TEAM', 'You are already part of another team workspace. Ask its admin to remove you first, then open this link again.');
     }
 
     const now = new Date().toISOString();
@@ -395,7 +463,11 @@ export async function acceptInvite(token: string, uid: string, callerEmail: stri
         addedBy: invite.invitedBy,
       } satisfies WorkspaceMember);
     }
-    tx.set(pointerDoc(uid), { workspaceId: invite.workspaceId, personalWorkspaceId });
+    // A fresh pointer drops `awaitingInvite`/`removedFrom`; the mark on a login Dubly created is kept, so removing them later deletes it.
+    tx.set(pointerDoc(uid), {
+      workspaceId: invite.workspaceId,
+      ...(pointer.exists && pointer.get('createdViaInvite') === true ? { createdViaInvite: true } : {}),
+    });
     tx.update(ref, { status: 'accepted', acceptedAt: now, acceptedBy: uid });
     return {
       workspaceId: invite.workspaceId,
@@ -422,20 +494,54 @@ export async function changeRole(workspaceId: string, uid: string, role: Workspa
   invalidateMembership(uid);
 }
 
-// Removes workspace access only; the person's ScatterPie login itself is left alone, and if they joined from a workspace of their own they go back to it.
-export async function removeMember(workspaceId: string, uid: string): Promise<void> {
+// Takes a person out of Dubly for good, at once. The membership and a "removed" mark go in one atomic write, so from that moment every request
+// they make is refused, even with a session that is still valid; every session is then revoked, so they are signed out everywhere. Nothing
+// lets them back in on their own: only an admin inviting them again does. A login that Dubly itself created from an invitation is deleted
+// outright; one that existed before (the ScatterPie account is shared with ScatterStudio) is left alone, only locked out of Dubly.
+export async function removeMember(workspaceId: string, uid: string, actorUid: string): Promise<{ loginDeleted: boolean }> {
+  if (uid === actorUid) throw new WorkspaceRequestError('You cannot remove yourself. Ask another admin to remove you.');
   const member = await membersCol(workspaceId).doc(uid).get();
   if (!member.exists) throw new WorkspaceRequestError('That person is not in this workspace');
   if (member.get('role') === 'admin') await assertAnotherAdmin(workspaceId, uid);
-  await membersCol(workspaceId).doc(uid).delete();
 
   const pointer = await pointerDoc(uid).get();
-  const personal = pointer.exists ? (pointer.get('personalWorkspaceId') as string | null) : null;
-  const stillInPersonal = personal && personal !== workspaceId ? (await membersCol(personal).doc(uid).get()).exists : false;
-  await pointerDoc(uid).set(
-    stillInPersonal
-      ? { workspaceId: personal, personalWorkspaceId: null }
-      : { workspaceId: null, removedFrom: workspaceId, removedAt: new Date().toISOString() }
-  );
+  const createdViaInvite = pointer.exists && pointer.get('createdViaInvite') === true;
+  const batch = db.batch();
+  batch.delete(membersCol(workspaceId).doc(uid));
+  batch.set(pointerDoc(uid), {
+    workspaceId: null,
+    removedFrom: workspaceId,
+    removedAt: new Date().toISOString(),
+    ...(createdViaInvite ? { createdViaInvite: true } : {}),
+  });
+  await batch.commit();
   invalidateMembership(uid);
+
+  // The lock-out above already holds if either of these fails, so a failure is logged for follow-up rather than undoing the removal.
+  let loginDeleted = false;
+  try {
+    if (createdViaInvite) {
+      await authAdmin.deleteUser(uid);
+      loginDeleted = true;
+    } else {
+      await authAdmin.revokeRefreshTokens(uid);
+    }
+  } catch (err) {
+    log.error('member_session_revoke_failed', err, { userId: uid, workspaceId });
+  }
+  return { loginDeleted };
+}
+
+// Keeps a member's entry on the team screen in step with the name and picture they chose in Settings.
+export async function updateMemberProfile(workspaceId: string, uid: string, patch: { name?: string; avatar?: string | null }): Promise<void> {
+  const fields: Record<string, unknown> = {};
+  if (patch.name !== undefined) fields.name = patch.name;
+  if (patch.avatar !== undefined) fields.avatar = patch.avatar ?? FieldValue.delete();
+  if (!Object.keys(fields).length) return;
+  try {
+    await membersCol(workspaceId).doc(uid).update(fields);
+  } catch (err) {
+    // Removed a moment ago: there is no entry left to update.
+    if ((err as { code?: number }).code !== 5) throw err;
+  }
 }

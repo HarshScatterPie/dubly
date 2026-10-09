@@ -29,7 +29,7 @@ describe('GET /api/bootstrap', () => {
     expect(res.body.preferences).toEqual({ ...DEFAULT_PREFERENCES, burnCaptions: true });
     expect(res.body.usage).toMatchObject({ activePlan: 'Starter', minutesLimit: 50, minutesDubbed: 0 });
     expect(res.body.projects.map((p: { title: string }) => p.title)).toEqual(['First cut']);
-    expect(res.body.profile).toEqual({ name: 'Boot User', role: 'editor', workspace: 'x' });
+    expect(res.body.profile).toEqual({ name: 'Boot User', role: 'editor', workspace: 'x', avatar: null });
   });
 
   it('opens without a ScatterStudio profile and refuses anyone signed out', async () => {

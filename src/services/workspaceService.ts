@@ -7,6 +7,8 @@ export interface WorkspaceMember {
   uid: string;
   email: string;
   name: string;
+  // A small image (data: URL) the member chose in Settings.
+  avatar?: string;
   role: WorkspaceRole;
   addedAt: string;
   addedBy: string;
@@ -23,6 +25,16 @@ export interface WorkspaceInfo {
 export interface WorkspaceInvite {
   id: string;
   email: string;
+  role: WorkspaceRole;
+  invitedByName: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+// An invitation waiting for the signed-in person, as the notification bell lists it. Joining uses its id, not the emailed link.
+export interface MyInvite {
+  id: string;
+  workspaceName: string;
   role: WorkspaceRole;
   invitedByName: string;
   createdAt: string;
@@ -61,6 +73,8 @@ export const workspaceService = {
   claimInviteAccount: (token: string, password: string) => apiPostPublic<{ email: string }>('/api/invite-signup/claim', { token, password }),
   previewInvite: (token: string) => apiPost<InvitePreview>('/api/invites/preview', { token }),
   acceptInvite: (token: string) => apiPost<{ workspaceId: string; role: WorkspaceRole }>('/api/invites/accept', { token }),
+  myInvites: () => apiGet<{ invites: MyInvite[] }>('/api/invites/mine').then((r) => r.invites),
+  acceptInviteById: (inviteId: string) => apiPost<{ workspaceId: string; role: WorkspaceRole }>('/api/invites/accept-by-id', { inviteId }),
   changeRole: (uid: string, role: WorkspaceRole) => apiPatch<unknown>(`/api/workspace/members/${uid}`, { role }),
   removeMember: (uid: string) => apiDelete(`/api/workspace/members/${uid}`),
   getGlossary: () => apiGet<{ entries: GlossaryEntry[]; canEdit: boolean }>('/api/workspace/glossary'),

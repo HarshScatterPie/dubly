@@ -12,6 +12,8 @@ import {
   Settings,
 } from 'lucide-react';
 import { NavigationTab } from '../types';
+import type { MyInvite } from '../services/workspaceService';
+import { NotificationBell } from './Invitations';
 import scatterPieLogo from '../assets/scatterpie-logo.png';
 
 interface HeaderProps {
@@ -22,6 +24,10 @@ interface HeaderProps {
   onSearch: (query: string) => void;
   isPlayingAudio: boolean;
   onStopAudio: () => void;
+  // Workspace invitations waiting for this person, shown in the bell with a Join workspace button.
+  invites: MyInvite[];
+  joiningInviteId: string | null;
+  onJoinInvite: (invite: MyInvite) => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -32,6 +38,9 @@ export const Header: React.FC<HeaderProps> = ({
   onSearch,
   isPlayingAudio,
   onStopAudio,
+  invites,
+  joiningInviteId,
+  onJoinInvite,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const getTabDetails = (tab: NavigationTab) => {
@@ -117,6 +126,8 @@ export const Header: React.FC<HeaderProps> = ({
               <span>Stop Audio</span>
             </button>
           )}
+
+          <NotificationBell invites={invites} joiningInviteId={joiningInviteId} onJoin={onJoinInvite} />
 
           <button
             type="button"

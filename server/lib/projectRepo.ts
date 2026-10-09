@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { FieldValue } from 'firebase-admin/firestore';
 import type { DubbingProject, LanguageOutput, Plan, UserPreferences, UserUsageStats } from '../../src/types';
 import { DEFAULT_VOICE_ID, withPreferenceDefaults } from '../../src/data/preferences';
 import { db, getSignedDownloadUrl } from './firebaseAdmin';
@@ -457,7 +458,12 @@ export interface UserProfile {
   name: string;
   role: string;
   workspace: string;
+  // A small data: URL the person chose in Dubly's Settings.
+  avatar: string | null;
 }
+
+// What the person set in Dubly's own Settings; it lives under Dubly's `meta` tree, so ScatterStudio's `users/{uid}` document is never written.
+const dublyProfileDoc = (uid: string) => db.collection('users').doc(uid).collection('meta').doc('profile');
 
 /**
  * Reads the user's profile from `users/{uid}` directly — the parent doc, not one of Dubly's
@@ -467,21 +473,38 @@ export interface UserProfile {
  * empty (only Google sign-in ever fills it), so this is the actual source of truth for a
  * user's name here — and the one other ScatterStudio tools already show.
  *
+ * A name or picture the person set in Dubly's Settings wins over it.
+ *
  * Deliberately whitelists fields rather than returning the doc as-is: it also holds
  * `api_key`, which must never reach the client.
  */
 export async function getUserProfile(uid: string): Promise<UserProfile | null> {
   const hit = profileCache.get(uid);
   if (hit && Date.now() - hit.at < PROFILE_CACHE_MS) return hit.profile;
-  const snap = await db.collection('users').doc(uid).get();
+  const [snap, own] = await Promise.all([db.collection('users').doc(uid).get(), dublyProfileDoc(uid).get()]);
   const data = snap.exists ? snap.data() || {} : null;
-  const profile = data
-    ? {
-        name: typeof data.name === 'string' ? data.name : '',
-        role: typeof data.role === 'string' ? data.role : '',
-        workspace: typeof data.workspace === 'string' ? data.workspace : '',
-      }
-    : null;
+  const ownData = own.exists ? own.data() || {} : {};
+  const ownName = typeof ownData.displayName === 'string' ? ownData.displayName.trim() : '';
+  const avatar = typeof ownData.avatar === 'string' && ownData.avatar ? ownData.avatar : null;
+  const profile =
+    data || ownName || avatar
+      ? {
+          name: ownName || (typeof data?.name === 'string' ? data.name : ''),
+          role: typeof data?.role === 'string' ? data.role : '',
+          workspace: typeof data?.workspace === 'string' ? data.workspace : '',
+          avatar,
+        }
+      : null;
   profileCache.set(uid, { profile, at: Date.now() });
   return profile;
+}
+
+// Saves the name and/or picture (null clears it) the person chose in Dubly's Settings, and returns the profile as it now reads.
+export async function setUserProfile(uid: string, patch: { name?: string; avatar?: string | null }): Promise<UserProfile> {
+  const fields: Record<string, unknown> = { updatedAt: new Date().toISOString() };
+  if (patch.name !== undefined) fields.displayName = patch.name;
+  if (patch.avatar !== undefined) fields.avatar = patch.avatar ?? FieldValue.delete();
+  await dublyProfileDoc(uid).set(fields, { merge: true });
+  profileCache.delete(uid);
+  return (await getUserProfile(uid))!;
 }

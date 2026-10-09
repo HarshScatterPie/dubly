@@ -8,8 +8,8 @@ Firestore, in the Firebase project shared with ScatterStudio. The backend reache
 |---|---|---|
 | `workspaces/{ws}` | `name`, `createdAt`, `createdBy`, `plan` (`starter` when absent), `planUpdatedAt` | workspaces.ts, plans.ts |
 | `dublyPlans/{planId}` | `starter` and `enterprise`: `name`, `minutesPerMonth`, `paidExtras`, `extraRates` (extra allowance per dubbed minute for each paid extra), `teamInvites`. Seeded with the built-in values on first read; after that, edits here win (the server rereads within a minute) | plans.ts |
-| `workspaces/{ws}/members/{uid}` | `uid, email, name, role (admin\|editor), addedAt, addedBy` | workspaces.ts |
-| `workspaceMembership/{uid}` | `workspaceId` (null = removed), `personalWorkspaceId` (their own workspace to return to) | workspaces.ts |
+| `workspaces/{ws}/members/{uid}` | `uid, email, name, avatar? (small data: URL), role (admin\|editor), addedAt, addedBy` | workspaces.ts |
+| `workspaceMembership/{uid}` | `workspaceId`; when null the person has no access: `removedFrom`/`removedAt` (an admin removed them; permanent until re-invited) or `awaitingInvite` (invited, not joined). `createdViaInvite` marks a login Dubly created from an invitation (deleted on removal). Older documents may carry an unused `personalWorkspaceId` | workspaces.ts |
 | `workspaces/{ws}/projects/{id}` | Project metadata: title, languages, voice choices, status and progress, `languageOutputs` (per-language status + storage **paths**), `activeJobId`, `dubAttempts`, `segmentsStorage` | projectRepo.ts / projectStorage.ts |
 | `…/projects/{id}/content/transcript` | `{ segments: TranscriptSegment[] }` (with word timings) | projectStorage.ts |
 | `…/projects/{id}/languages/{code}` | `{ segments: LocalizedSegment[] }` for one target language | projectStorage.ts |
@@ -18,9 +18,10 @@ Firestore, in the Firebase project shared with ScatterStudio. The backend reache
 | `jobs/{jobId}` | Dub and transcription jobs (fields: [jobs.ts](../server/lib/jobs.ts) `DubJob`; a dub records the paid `extras` it was charged for) | jobs.ts |
 | `jobIdempotency/{sha256(ws\|project\|key)}` | `{ jobId, createdAt }` | jobs.ts |
 | `invites/{sha256(token)}` | `workspaceId, invitedEmail, role, status (pending\|accepted\|revoked), expiresAt, acceptedBy …` | workspaces.ts |
-| `shares/{sha256(token)}` | `workspaceId, projectId, languageCode, storagePath, expiresAt, revokedAt?` (older links: keyed by the raw token) | share.ts |
+| `shares/{sha256(token)}` | `workspaceId, projectId, languageCode, storagePath, captions? (false = no captions on the page; absent = on), expiresAt, revokedAt?` (older links: keyed by the raw token) | share.ts |
 | `users/{uid}/voices/{voiceId}` | Legacy: cloned voices from before voice cloning was removed. Nothing reads or writes them any more; safe to delete with their `users/{uid}/voices/*` samples in Storage | — |
 | `users/{uid}/meta/settings` | Provider choices, plus `preferences` (the user's dubbing defaults, see API.md → settings) | projectRepo.ts |
+| `users/{uid}/meta/profile` | `displayName`, `avatar` (small JPEG data: URL), `updatedAt`: the name and picture chosen in Dubly's Settings; they override ScatterStudio's `name` for display | projectRepo.ts |
 
 **Line fields.** A `TranscriptSegment` may carry `delivery` (how the line is said, heard during transcription). A `LocalizedSegment` may carry `delivery` (voice direction, editable), `qaFlags` (review flags) and `renderKey` (fingerprint of what its last render spoke). The server owns `renderKey`, render flags and slot timings: when lines are saved it keeps its own values for them and recomputes the text flags ([lineReview.ts](../server/lib/lineReview.ts)).
 

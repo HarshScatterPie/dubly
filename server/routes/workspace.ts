@@ -2,14 +2,17 @@ import type { Response } from 'express';
 import { Router } from '../lib/router';
 import { rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
-import { requireAdmin } from '../lib/auth';
+import { clearAccountStateCache, requireAdmin } from '../lib/auth';
+import { log } from '../lib/log';
 import {
   acceptInvite,
+  acceptInviteById,
   changeRole,
   createAccountForInvite,
   createInvite,
   getWorkspace,
   InviteError,
+  listInvitesFor,
   listPendingInvites,
   lookupInviteForSignup,
   previewInvite,
@@ -104,7 +107,10 @@ workspaceRouter.patch('/members/:uid', requireAdmin, validateBody(schemas.change
 
 workspaceRouter.delete('/members/:uid', requireAdmin, async (req, res) => {
   try {
-    await removeMember(req.workspaceId!, req.params.uid);
+    const { loginDeleted } = await removeMember(req.workspaceId!, req.params.uid, req.uid!);
+    // The removed person's next request must meet the revoked session, not a cached "still signed in".
+    clearAccountStateCache(req.params.uid);
+    log.info('member_removed', { workspaceId: req.workspaceId, removedUserId: req.params.uid, removedBy: req.uid, loginDeleted });
     res.status(204).send();
   } catch (err) {
     sendError(res, err);
@@ -143,8 +149,27 @@ inviteSignupRouter.post('/claim', validateBody(schemas.inviteSignup), async (req
 
 // Mounted behind requireAuth only: the invite is matched to the caller's signed-in email, whatever workspace they are in now.
 export const invitesRouter = Router();
+
+// The invitations waiting for the caller, for the notification bell and the "join your workspace" screen. Defined before the limiter below,
+// which is for guessing tokens: the bell asks every few minutes. Only a verified email sees them, because there is no secret link to prove
+// the caller got the invitation, so an address someone merely typed into an account must not be enough.
+invitesRouter.get('/mine', async (req, res) => {
+  res.json({ invites: req.emailVerified ? await listInvitesFor(req.email) : [] });
+});
+
 // Guessing invitation tokens is hopeless (256 bits), but there is no reason to let anyone try quickly.
 invitesRouter.use(rateLimit('invite-accept', [['user', rateRules.inviteAcceptPerUser]]));
+
+invitesRouter.post('/accept-by-id', validateBody(schemas.inviteId), async (req, res) => {
+  try {
+    if (!req.emailVerified) {
+      throw new InviteError(403, 'EMAIL_NOT_VERIFIED', 'Verify your email address first, or open the link from your invitation email.');
+    }
+    res.json(await acceptInviteById(String(req.body?.inviteId ?? ''), req.uid!, req.email));
+  } catch (err) {
+    sendError(res, err);
+  }
+});
 
 invitesRouter.post('/preview', validateBody(schemas.inviteToken), async (req, res) => {
   try {

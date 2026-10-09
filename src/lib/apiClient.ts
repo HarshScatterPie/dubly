@@ -6,11 +6,16 @@
 import { auth } from './firebase';
 
 export class ApiError extends Error {
-  constructor(message: string, public status: number) {
+  constructor(message: string, public status: number, public code?: string) {
     super(message);
     this.name = 'ApiError';
   }
 }
+
+// Broadcast when the server says the signed-in session has ended (401) or the account has lost its workspace (403 NO_WORKSPACE), so the
+// app can react wherever the request came from: a removed member is moved out within a second, whichever screen they are on.
+export const SESSION_ENDED_EVENT = 'dubly:session-ended';
+export const ACCESS_LOST_EVENT = 'dubly:access-lost';
 
 async function authHeader(): Promise<Record<string, string>> {
   const user = auth.currentUser;
@@ -22,16 +27,23 @@ async function authHeader(): Promise<Record<string, string>> {
 async function handle<T>(res: Response): Promise<T> {
   if (!res.ok) {
     let message = res.statusText;
+    let code: string | undefined;
     try {
       const body = await res.json();
       // Errors arrive as { error: { code, message, request_id } }; older servers sent { error: 'message' }.
       const error = body?.error;
       if (typeof error === 'string') message = error;
       else if (error?.message) message = error.request_id && res.status >= 500 ? `${error.message} (ref ${String(error.request_id).slice(0, 8)})` : error.message;
+      if (typeof error?.code === 'string') code = error.code;
     } catch {
       // response body wasn't JSON — keep statusText
     }
-    throw new ApiError(message, res.status);
+    // Only for calls that carried a session: the sign-in screen's own requests never reach here.
+    if (res.status === 401 && auth.currentUser) window.dispatchEvent(new Event(SESSION_ENDED_EVENT));
+    if (res.status === 403 && (code === 'NO_WORKSPACE' || code === 'AWAITING_INVITE')) {
+      window.dispatchEvent(new CustomEvent(ACCESS_LOST_EVENT, { detail: { code, message } }));
+    }
+    throw new ApiError(message, res.status, code);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

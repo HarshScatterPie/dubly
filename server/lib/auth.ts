@@ -11,6 +11,8 @@ declare global {
     interface Request {
       uid?: string;
       email?: string;
+      // Whether Firebase has verified that the caller owns `email`; anything that acts on the address alone requires it.
+      emailVerified?: boolean;
       workspaceId?: string;
       workspaceRole?: WorkspaceRole;
     }
@@ -56,6 +58,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     if (await isSessionRevoked(decoded.uid, decoded.auth_time)) throw new Error('revoked');
     req.uid = decoded.uid;
     req.email = decoded.email;
+    req.emailVerified = decoded.email_verified === true;
     addLogContext({ userId: decoded.uid });
   } catch {
     res.status(401).json({ error: 'Invalid or expired session. Please sign in again.' });
@@ -81,7 +84,7 @@ export async function requireWorkspace(req: Request, res: Response, next: NextFu
     next();
   } catch (err) {
     if (err instanceof WorkspaceAccessError) {
-      res.status(403).json({ error: err.message, code: 'NO_WORKSPACE' });
+      res.status(403).json({ error: err.message, code: err.code });
       return;
     }
     next(err);

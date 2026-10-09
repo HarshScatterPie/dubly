@@ -36,8 +36,8 @@ export interface TestUser {
 }
 
 // A real emulator account and a real ID token for it, verified by the same requireAuth production uses.
-export async function createUser(email: string, password = 'correct-horse-battery'): Promise<TestUser> {
-  const user = await authAdmin.createUser({ email, password });
+export async function createUser(email: string, password = 'correct-horse-battery', emailVerified = true): Promise<TestUser> {
+  const user = await authAdmin.createUser({ email, password, emailVerified });
   return { uid: user.uid, email, token: await signIn(email, password) };
 }
 

@@ -49,10 +49,13 @@ interface InviteAcceptDialogProps {
   onJoinFailed?: () => void;
   onJoined: (workspaceName: string) => void;
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
+  // False for someone with no workspace yet (a new invitee): there is no current workspace to mention.
+  hasWorkspace?: boolean;
 }
 
 // Shown after sign-in when the user arrived through an invitation link; nothing changes until they press Join.
-export const InviteAcceptDialog: React.FC<InviteAcceptDialogProps> = ({ onJoining, onJoinFailed, onJoined, onShowToast }) => {
+// "Not now" leaves the invitation waiting in their notifications (or on the join screen, for someone with no workspace yet).
+export const InviteAcceptDialog: React.FC<InviteAcceptDialogProps> = ({ onJoining, onJoinFailed, onJoined, onShowToast, hasWorkspace = true }) => {
   const [token] = useState(readToken);
   const [preview, setPreview] = useState<InvitePreview | null>(null);
   const [isJoining, setIsJoining] = useState(false);
@@ -117,8 +120,10 @@ export const InviteAcceptDialog: React.FC<InviteAcceptDialogProps> = ({ onJoinin
             </h3>
             <p className="text-xs text-[#64748B] mt-1 leading-relaxed">
               {preview.invitedByName} invited you as {preview.role === 'admin' ? 'an Admin' : 'an Editor'}. You will work in this
-              team&apos;s workspace. Projects in your current workspace stay there, and you return to them if you leave the team.
+              team&apos;s workspace.
+              {hasWorkspace ? ' Projects in your current workspace stay there and are not moved.' : ''}
             </p>
+            <p className="text-[11px] text-[#94A3B8] mt-2">Not now? The invitation waits in your notifications until you are ready.</p>
           </div>
         </div>
         <div className="flex items-center justify-end gap-3 pt-1">

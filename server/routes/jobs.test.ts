@@ -262,3 +262,42 @@ async function seed2(f: Fx): Promise<string> {
   await db.collection('workspaces').doc(f.workspaceId).collection('projects').doc(id).set({ ...base, id, targetLanguages: ['hi'] });
   return id;
 }
+
+describe('GET /api/projects/:id/progress', () => {
+  it('answers with just the progress fields, never cached', async () => {
+    const f = await seed();
+    await projectDoc(f).update({ status: 'processing', progressPercent: 42, currentProcessingMessage: '[1/2] Hindi: generating neural voice audio (4/10)...' });
+
+    const res = await fetch(`${api.baseUrl}/api/projects/${f.projectId}/progress`, { headers: { Authorization: `Bearer ${f.user.token}` } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    // No transcript, languages or signed URLs: that is the point of the endpoint.
+    expect(await res.json()).toEqual({
+      status: 'processing',
+      progressPercent: 42,
+      currentProcessingMessage: '[1/2] Hindi: generating neural voice audio (4/10)...',
+      updatedAt: expect.any(String),
+    });
+  });
+
+  it('tracks the full project through a finished dub', async () => {
+    const f = await seed();
+    await projectDoc(f).update({ status: 'completed', progressPercent: 100, currentProcessingMessage: null });
+    const progress = (await api.call('GET', `/api/projects/${f.projectId}/progress`, { token: f.user.token })).body;
+    const full = (await api.call('GET', `/api/projects/${f.projectId}`, { token: f.user.token })).body;
+    expect(progress.status).toBe(full.status);
+    expect(progress.progressPercent).toBe(full.progressPercent);
+  });
+
+  it('is a 404 for a project that does not exist or belongs to another workspace', async () => {
+    const f = await seed();
+    expect((await api.call('GET', '/api/projects/proj-nope/progress', { token: f.user.token })).status).toBe(404);
+    const outsider = await createUser('outsider@other.test');
+    expect((await api.call('GET', `/api/projects/${f.projectId}/progress`, { token: outsider.token })).status).toBe(404);
+  });
+
+  it('needs a signed-in user', async () => {
+    const f = await seed();
+    expect((await api.call('GET', `/api/projects/${f.projectId}/progress`)).status).toBe(401);
+  });
+});

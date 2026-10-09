@@ -4,11 +4,12 @@ import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
-import { bucket, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { bucket, downloadFileFromStorage, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
 import { isFaceScanAvailable, scanFaces } from '../lib/faceScan';
 import {
   createProject,
   deleteStoredProject,
+  getProjectProgress,
   getStoredProject,
   listStoredProjects,
   projectLanguages,
@@ -157,6 +158,14 @@ projectsRouter.get('/:id', async (req, res) => {
   res.json(withRetakeInfo(await toClientProject(stored), stored));
 });
 
+// For progress bars: status, percentage and message from one document read, where GET /:id reassembles the whole project.
+projectsRouter.get('/:id/progress', async (req, res) => {
+  const progress = await getProjectProgress(req.workspaceId!, req.params.id);
+  if (!progress) return res.status(404).json({ error: 'Project not found' });
+  res.setHeader('Cache-Control', 'no-store');
+  res.json(progress);
+});
+
 const PATCHABLE_FIELDS = [
   'title',
   'targetLanguage',
@@ -232,24 +241,27 @@ async function ingestSourceVideo(workspaceId: string, projectId: string, localVi
   // Looks for faces while the file uploads, so fitting lines to the speaker's mouth costs the user no extra wait.
   const faceScanning = scanFaces(localVideoPath, probe.durationSeconds).catch(() => null);
   const storagePath = `workspaces/${workspaceId}/projects/${projectId}/source${probe.ext}`;
-  await uploadFileToStorage(storagePath, localVideoPath, probe.contentType);
 
   const resolution = probe.width && probe.height ? `${probe.width} × ${probe.height} (${probe.height >= 1080 ? 'Full HD' : probe.height >= 720 ? 'HD' : 'SD'})` : 'Unknown';
   const sizeMb = fileSizeBytes / (1024 * 1024);
 
-  let videoThumbnailStoragePath: string | undefined;
-  if (probe.width && probe.height) {
+  const makeThumbnail = async (): Promise<string | undefined> => {
+    if (!(probe.width && probe.height)) return undefined;
+    const thumbLocalPath = path.join(path.dirname(localVideoPath), `${randomUUID()}.jpg`);
     try {
-      const thumbLocalPath = path.join(path.dirname(localVideoPath), `${randomUUID()}.jpg`);
       await extractThumbnail(localVideoPath, thumbLocalPath, probe.durationSeconds * 0.1, probe.durationSeconds);
       const thumbStoragePath = `workspaces/${workspaceId}/projects/${projectId}/thumbnail.jpg`;
       await uploadFileToStorage(thumbStoragePath, thumbLocalPath, 'image/jpeg');
-      videoThumbnailStoragePath = thumbStoragePath;
-      await rm(thumbLocalPath, { force: true });
+      return thumbStoragePath;
     } catch {
       // Thumbnail is cosmetic — fall back to the placeholder icon rather than failing the upload.
+      return undefined;
+    } finally {
+      await rm(thumbLocalPath, { force: true });
     }
-  }
+  };
+  // The thumbnail is cut from the same local file, so it no longer waits for the (large) source upload to finish.
+  const [, videoThumbnailStoragePath] = await Promise.all([uploadFileToStorage(storagePath, localVideoPath, probe.contentType), makeThumbnail()]);
 
   // A scan still running after the upload is given a short grace period, then left out rather than holding the response.
   const faceScan = await Promise.race([faceScanning, new Promise<null>((resolve) => setTimeout(() => resolve(null), FACE_SCAN_GRACE_MS).unref())]);
@@ -437,7 +449,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
     releaseSlot = await acquireHeavySlot(() => report(2, 'Waiting for a free processing slot'));
     await report(3, 'Fetching your video');
     // Checked by the route before the job was created.
-    await bucket.file(stored.videoStoragePath!).download({ destination: videoLocalPath });
+    await downloadFileFromStorage(stored.videoStoragePath!, videoLocalPath);
     await report(8, 'Extracting the audio track');
     await extractAudioForStt(videoLocalPath, audioLocalPath);
 

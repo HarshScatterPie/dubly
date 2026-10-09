@@ -1,5 +1,6 @@
 import { env } from './lib/env';
 import express from 'express';
+import compression from 'compression';
 import cors from 'cors';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -29,6 +30,9 @@ declare global {
     }
   }
 }
+
+// Vite output such as /assets/index-BlOOhHPn.js: the eight characters before the extension are a hash of the file's content.
+const HASHED_ASSET = /[\\/]assets[\\/].+-[A-Za-z0-9_-]{8}\.\w+$/;
 
 const DEFAULT_ERROR_CODES: Record<number, string> = {
   400: 'INVALID_REQUEST',
@@ -123,6 +127,8 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   });
   app.use(normalizeErrorResponses);
 
+  // JSON, scripts and styles shrink to a fraction on the wire; the server's own egress is billed, and a project with its transcript is large.
+  app.use(compression());
   app.use(securityHeaders);
   app.use(cors({ origin: env.webOrigin }));
   app.use(express.json({ limit: '2mb' }));
@@ -151,8 +157,17 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   // Serves the built frontend (`npm run build` -> dist/) when present, so one process can be the whole deployment; any unmatched GET gets index.html.
   const distDir = path.join(repoRoot, 'dist');
   if (options.serveFrontend !== false && existsSync(distDir)) {
-    app.use(express.static(distDir));
+    app.use(
+      express.static(distDir, {
+        setHeaders(res, filePath) {
+          // The build names everything under /assets after its content hash, so a file never changes under the same name and can be kept for good;
+          // everything else (index.html above all) is revalidated, so a deploy shows up on the next visit.
+          res.setHeader('Cache-Control', HASHED_ASSET.test(filePath) ? 'public, max-age=31536000, immutable' : 'no-cache');
+        },
+      })
+    );
     app.get(/^(?!\/api).*/, (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }

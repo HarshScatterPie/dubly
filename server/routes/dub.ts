@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import { Router } from '../lib/router';
 import path from 'node:path';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { bucket, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { bucket, downloadFileFromStorage, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
 import {
   getSettings,
   getStoredProject,
@@ -415,6 +415,9 @@ interface BackgroundBed {
   vocalsPath?: string;
 }
 
+// How often the voice-generation loop reports its progress; the UI polls about every 1.5 s, so this keeps the bar moving smoothly.
+const LINE_PROGRESS_EVERY_MS = 2500;
+
 // Identifies the exact upload the cached stems were made from; a re-upload lands on the same path, so size and length are part of it.
 const sourceKey = (stored: StoredProject) => `${stored.videoStoragePath}|${stored.videoDuration}|${stored.videoFileSize}`;
 
@@ -456,10 +459,7 @@ async function prepareBackgroundBed(
       await writeProjectForJob(job, { progressPercent: 10, currentProcessingMessage: 'Reusing the separated background audio...' }, { stage: 'separating_audio', progress: 10 });
       const background = path.join(jobDir, 'stem_background.m4a');
       const vocals = path.join(jobDir, 'stem_vocals.m4a');
-      await Promise.all([
-        bucket.file(cache.backgroundPath).download({ destination: background }),
-        bucket.file(cache.vocalsPath).download({ destination: vocals }),
-      ]);
+      await Promise.all([downloadFileFromStorage(cache.backgroundPath, background), downloadFileFromStorage(cache.vocalsPath, vocals)]);
       return { path: background, isVocalsRemoved: true, vocalsPath: vocals };
     } catch (err) {
       if (err instanceof JobCancelledError || err instanceof JobSupersededError) throw err;
@@ -670,6 +670,9 @@ async function renderLanguage(params: {
   // How long a take will actually play once the user's pitch and speed are applied.
   const playedSeconds = (audio: Buffer) => effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
 
+  // Each progress report is a Firestore transaction (two reads, two writes) that the loop waits for, and the bar and message only
+  // need to move every few seconds; a cancel request is noticed at the next report, so this also bounds how long one takes to land.
+  let lastLineReportAt = 0;
   for (let i = 0; i < finalSegments.length; i++) {
     const seg = finalSegments[i];
     // A segment with no text (e.g. a silent lead-in the STT step correctly
@@ -736,10 +739,14 @@ async function renderLanguage(params: {
       }
       takes.push({ index: i, audio, engine, speechText, style, voice, available, condensed: wasCondensed, sourceDb: null });
     }
-    await params.onProgress(
-      segments.length ? ((i + 1) / segments.length) * 0.6 : 0.6,
-      `${languageName}: generating neural voice audio (${i + 1}/${segments.length})...`
-    );
+    const reportedAt = Date.now();
+    if (reportedAt - lastLineReportAt >= LINE_PROGRESS_EVERY_MS || i === finalSegments.length - 1) {
+      lastLineReportAt = reportedAt;
+      await params.onProgress(
+        segments.length ? ((i + 1) / segments.length) * 0.6 : 0.6,
+        `${languageName}: generating neural voice audio (${i + 1}/${segments.length})...`
+      );
+    }
   }
 
   // The original line under each take: its level always, and the AI review when it is on. Read in groups so a long video never sits in memory whole.
@@ -986,7 +993,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     // Needed before stitching: the source audio becomes the bed the dub sits on, so
     // applause/music/ambience survive into the export instead of being replaced by silence.
     const videoLocalPath = path.join(jobDir, 'source.mp4');
-    await bucket.file(stored.videoStoragePath!).download({ destination: videoLocalPath });
+    await downloadFileFromStorage(stored.videoStoragePath!, videoLocalPath);
     const layout = await probeStreams(videoLocalPath).catch(() => null);
 
     const background = await prepareBackgroundBed(job, stored, videoLocalPath, jobDir, Boolean(stored.separateBackground));
@@ -1296,7 +1303,7 @@ async function renderCaptionedVideo(videoStoragePath: string, captionedStoragePa
     releaseSlot = await acquireHeavySlot();
     await mkdir(jobDir, { recursive: true });
     const sourceLocalPath = path.join(jobDir, 'dubbed.mp4');
-    await bucket.file(videoStoragePath).download({ destination: sourceLocalPath });
+    await downloadFileFromStorage(videoStoragePath, sourceLocalPath);
 
     // Laid out in the video's own pixels, so captions are the same size on a vertical short as on a landscape talk.
     const layout = await probeStreams(sourceLocalPath).catch(() => null);

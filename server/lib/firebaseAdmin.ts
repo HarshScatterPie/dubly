@@ -1,3 +1,4 @@
+import { stat } from 'node:fs/promises';
 import admin from 'firebase-admin';
 import { loadServiceAccount, useAdc } from './credentials';
 import { env } from './env';
@@ -98,13 +99,27 @@ export async function uploadBufferToStorage(
   await file.save(buffer, { contentType, resumable: false });
 }
 
+// Files up to this size go up in one request. A resumable upload opens a session first and can continue after a dropped connection,
+// which only pays off for big files; for the many small ones it costs extra round trips.
+const RESUMABLE_UPLOAD_ABOVE_BYTES = 32 * 1024 * 1024;
+
+// The storage client's default checksum (CRC32C) is computed in JavaScript on the main thread; MD5 is hashed natively and costs a fraction of the CPU.
+// The transfer is still verified end to end.
 export async function uploadFileToStorage(
   storagePath: string,
   localFilePath: string,
   contentType: string
 ): Promise<void> {
+  const { size } = await stat(localFilePath);
   await bucket.upload(localFilePath, {
     destination: storagePath,
     contentType,
+    resumable: size > RESUMABLE_UPLOAD_ABOVE_BYTES,
+    validation: 'md5',
   });
+}
+
+/** Downloads a stored object to a local file, verified with the same native checksum as uploads. */
+export async function downloadFileFromStorage(storagePath: string, destination: string): Promise<void> {
+  await bucket.file(storagePath).download({ destination, validation: 'md5' });
 }

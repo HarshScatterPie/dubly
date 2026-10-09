@@ -98,6 +98,7 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `MAX_DUBS_PER_WORKSPACE` | 2 | Dubs rendering at once per workspace; more are queued |
 | `MAX_ACTIVE_DUBS` | 4 | Dubs rendering at once on the server |
 | `MAX_HEAVY_REQUESTS` / `HEAVY_WAIT_SECONDS` | 3 / 600 | Concurrent transcriptions and caption renders / how long one waits before `503` |
+| `ONNX_WORKERS` | 2 (or fewer cores) | Worker threads for the face scan and voice-activity detection, started on demand. `0` runs them on the main thread, which freezes the API while they work |
 | `STORAGE_LIMIT_MB` / `ENFORCE_STORAGE_LIMIT` | 2048 / false | Allowance shown on the Usage page / refuse uploads past it |
 | `RATE_API_PER_MINUTE` | 600 | Any authenticated request, per user |
 | `RATE_TRANSCRIBE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 20 / 60 | |

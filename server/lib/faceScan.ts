@@ -5,13 +5,16 @@ import * as ort from 'onnxruntime-node';
 import type { FaceScan } from '../../src/types';
 import { SAFE_INPUT_OPTIONS } from './ffmpeg';
 import { ffmpegPath } from './mediaTools';
+import { createCpuSession } from './onnxSession';
+import { runOffThread } from './onnxPool';
 import { serverRoot } from './paths';
 
 /**
  * Looks at a dozen or so frames of an uploaded video to tell whether someone's face is on
  * screen — the case where each dubbed line has to fit the speaker's mouth. Runs the SCRFD
- * face detector (ONNX, CPU, ~3MB) in-process, the same way Silero VAD runs, so it needs no
- * Python and takes a second or two.
+ * face detector (ONNX, CPU, ~3MB) on the server itself, the same way Silero VAD runs, so it
+ * needs no Python and takes a second or two. The whole scan runs in a worker thread
+ * (onnxPool.ts), because ONNX Runtime would otherwise freeze the API while it infers.
  */
 export const FACE_DETECTOR = path.join(serverRoot, 'models', 'scrfd_2.5g_bnkps.onnx');
 
@@ -112,7 +115,7 @@ export function isFrontal(kps: Point[]): boolean {
 }
 
 // Scales the frame to fit the input (bilinear, as OpenCV's resize does), pads with black, and normalises to the model's range.
-function toInput(frame: Frame): { tensor: ort.Tensor; scale: number } {
+export function toInput(frame: Frame): { tensor: ort.Tensor; scale: number } {
   const { width, height, rgb } = frame;
   let newW: number;
   let newH: number;
@@ -127,20 +130,38 @@ function toInput(frame: Frame): { tensor: ort.Tensor; scale: number } {
   const data = new Float32Array(3 * plane).fill(-127.5 / 128);
   const sx = width / newW;
   const sy = height / newH;
+  // Where each output column samples from depends on x alone, so it is worked out once instead of for every row and channel.
+  const left = new Int32Array(newW);
+  const right = new Int32Array(newW);
+  const toRight = new Float64Array(newW);
+  const toLeft = new Float64Array(newW);
+  for (let x = 0; x < newW; x++) {
+    const fx = Math.min(width - 1, Math.max(0, (x + 0.5) * sx - 0.5));
+    const x0 = Math.floor(fx);
+    left[x] = x0 * 3;
+    right[x] = Math.min(width - 1, x0 + 1) * 3;
+    toRight[x] = fx - x0;
+    toLeft[x] = 1 - (fx - x0);
+  }
   for (let y = 0; y < newH; y++) {
     const fy = Math.min(height - 1, Math.max(0, (y + 0.5) * sy - 0.5));
     const y0 = Math.floor(fy);
-    const y1 = Math.min(height - 1, y0 + 1);
     const wy = fy - y0;
+    const toTop = 1 - wy;
+    const topRow = y0 * width * 3;
+    const bottomRow = Math.min(height - 1, y0 + 1) * width * 3;
+    const out = y * INPUT_SIZE;
     for (let x = 0; x < newW; x++) {
-      const fx = Math.min(width - 1, Math.max(0, (x + 0.5) * sx - 0.5));
-      const x0 = Math.floor(fx);
-      const x1 = Math.min(width - 1, x0 + 1);
-      const wx = fx - x0;
-      for (let c = 0; c < 3; c++) {
-        const top = rgb[(y0 * width + x0) * 3 + c] * (1 - wx) + rgb[(y0 * width + x1) * 3 + c] * wx;
-        const bottom = rgb[(y1 * width + x0) * 3 + c] * (1 - wx) + rgb[(y1 * width + x1) * 3 + c] * wx;
-        data[c * plane + y * INPUT_SIZE + x] = (Math.round(top * (1 - wy) + bottom * wy) - 127.5) / 128;
+      const wx = toRight[x];
+      const wl = toLeft[x];
+      const a = topRow + left[x];
+      const b = topRow + right[x];
+      const c = bottomRow + left[x];
+      const d = bottomRow + right[x];
+      for (let ch = 0; ch < 3; ch++) {
+        const top = rgb[a + ch] * wl + rgb[b + ch] * wx;
+        const bottom = rgb[c + ch] * wl + rgb[d + ch] * wx;
+        data[ch * plane + out + x] = (Math.round(top * toTop + bottom * wy) - 127.5) / 128;
       }
     }
   }
@@ -179,7 +200,7 @@ function parsePpm(buf: Buffer): Frame | null {
 let sessionPromise: Promise<ort.InferenceSession> | null = null;
 function getSession(): Promise<ort.InferenceSession> {
   if (!sessionPromise) {
-    sessionPromise = ort.InferenceSession.create(FACE_DETECTOR).catch((err) => {
+    sessionPromise = createCpuSession(FACE_DETECTOR).catch((err) => {
       sessionPromise = null;
       throw err;
     });
@@ -201,7 +222,8 @@ const median = (values: number[]) => {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 };
 
-async function sampleFaces(video: string, durationSeconds: number, deadline: number): Promise<Omit<FaceScan, 'hasFaces' | 'scannedAt'> | null> {
+/** The scan itself, in whichever thread calls it; the worker thread's entry point (onnxWorker.ts). */
+export async function sampleFacesLocal(video: string, durationSeconds: number, deadline: number): Promise<Omit<FaceScan, 'hasFaces' | 'scannedAt'> | null> {
   const session = await getSession();
   const count = durationSeconds > 600 ? 16 : 12;
   const duration = Math.max(0.5, durationSeconds);
@@ -250,7 +272,8 @@ async function sampleFaces(video: string, durationSeconds: number, deadline: num
 export async function scanFaces(video: string, durationSeconds: number, timeoutMs = 90_000): Promise<FaceScan | null> {
   if (!isFaceScanAvailable() || !(durationSeconds > 0)) return null;
   try {
-    const raw = await sampleFaces(video, durationSeconds, Date.now() + timeoutMs);
+    const deadline = Date.now() + timeoutMs;
+    const raw = await runOffThread('faceScan', { video, durationSeconds, deadline }, () => sampleFacesLocal(video, durationSeconds, deadline));
     return raw && { ...raw, hasFaces: faceScanVerdict(raw), scannedAt: new Date().toISOString() };
   } catch (err) {
     console.error('[faceScan] failed', err);

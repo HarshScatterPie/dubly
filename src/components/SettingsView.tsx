@@ -316,7 +316,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   const jumpTo = (id: string) => document.getElementById(`settings-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   return (
-    <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-fade-in">
+    <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 animate-fade-in">
       <div className="mb-6">
         <span className="text-[11px] font-bold uppercase tracking-wider text-[#94A3B8]">Settings</span>
         <h2 className="text-2xl sm:text-3xl font-extrabold text-[#0F172A] tracking-tight">Make Dubly work your way</h2>

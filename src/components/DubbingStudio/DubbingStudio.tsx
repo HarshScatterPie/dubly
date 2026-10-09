@@ -1088,7 +1088,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   );
 
   return (
-    <div ref={studioTopRef} className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 scroll-mt-4">
+    <div ref={studioTopRef} className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 scroll-mt-4">
       {/* Studio Header & Stepper */}
       <div className="space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">

@@ -74,6 +74,7 @@ const BOOT_WAIT_MS = 10_000;
 const EMPTY_USAGE: UserUsageStats = {
   minutesDubbed: 0,
   minutesLimit: 50,
+  renewsMonthly: true,
   totalProjects: 0,
   storageUsedMb: 0,
   storageLimitMb: 2048,
@@ -695,16 +696,7 @@ export default function App() {
             {activeTab === 'glossary' && <GlossaryView onShowToast={showToast} />}
 
             {activeTab === 'usage' && (
-              <UsageView
-                usage={usage}
-                onUpgrade={() => {
-                  showToast(
-                    'Plan Upgrades Coming Soon',
-                    'Billing isn\'t wired up yet — this is a real usage panel, not a real checkout.',
-                    'info'
-                  );
-                }}
-              />
+              <UsageView usage={usage} onShowToast={showToast} />
             )}
 
             {activeTab === 'workspace' && (

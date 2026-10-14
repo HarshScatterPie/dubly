@@ -17,20 +17,21 @@ export async function setPlanCommand(target: string, planArg?: string): Promise<
   const workspace = await db.collection('workspaces').doc(workspaceId).get();
   if (!workspace.exists) throw new Error(`No workspace ${workspaceId}`);
   const label = `${workspace.get('name') || 'Unnamed'} (${workspaceId})`;
+  const allowance = (plan: { minutesPerMonth: number; renewsMonthly: boolean }) => `${plan.minutesPerMonth} min${plan.renewsMonthly ? '/month' : ' in total'}`;
   if (!planArg) {
     const plan = await getPlan(await workspacePlanId(workspaceId));
-    return `${label} is on ${plan.name}: ${plan.minutesPerMonth} min/month, paid extras ${plan.paidExtras ? 'on' : 'off'}, teammates ${plan.teamInvites ? 'allowed' : 'not allowed'}.`;
+    return `${label} is on ${plan.name}: ${allowance(plan)}, paid extras ${plan.paidExtras ? 'on' : 'off'}, teammates ${plan.teamInvites ? 'allowed' : 'not allowed'}.`;
   }
-  if (!isPlanId(planArg)) throw new Error(`Unknown plan "${planArg}". Use starter or enterprise.`);
+  if (!isPlanId(planArg)) throw new Error(`Unknown plan "${planArg}". Use free, starter or enterprise.`);
   await setWorkspacePlan(workspaceId, planArg);
   const plan = await getPlan(planArg);
-  return `${label} moved to ${plan.name}: ${plan.minutesPerMonth} min/month. The server picks it up within a minute.`;
+  return `${label} moved to ${plan.name}: ${allowance(plan)}. The server picks it up within a minute.`;
 }
 
 if (process.argv[1]?.endsWith('set_plan.ts')) {
   const [target, plan] = process.argv.slice(2);
   if (!target) {
-    console.log('Usage: npx tsx server/scripts/set_plan.ts <workspace id | member email> [starter | enterprise]');
+    console.log('Usage: npx tsx server/scripts/set_plan.ts <workspace id | member email> [free | starter | enterprise]');
     process.exit(1);
   }
   setPlanCommand(target, plan).then(

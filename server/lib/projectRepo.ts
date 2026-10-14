@@ -237,6 +237,7 @@ export async function deleteStoredProject(workspaceId: string, id: string): Prom
 const DEFAULT_USAGE: UserUsageStats = {
   minutesDubbed: 0,
   minutesLimit: DEFAULT_PLANS.starter.minutesPerMonth,
+  renewsMonthly: true,
   totalProjects: 0,
   storageUsedMb: 0,
   storageLimitMb: 2048,
@@ -251,7 +252,7 @@ const DEFAULT_USAGE: UserUsageStats = {
 };
 
 // Taken from the workspace's plan on every read, never trusted from (or written to) the usage document.
-const PLAN_FIELDS = ['minutesLimit', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites', 'voiceEngines'] as const;
+const PLAN_FIELDS = ['minutesLimit', 'renewsMonthly', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites', 'voiceEngines'] as const;
 
 // Minutes reset on the 1st of every month, India time, since that is where the team and its users are.
 const USAGE_TIME_ZONE = 'Asia/Kolkata';
@@ -271,10 +272,15 @@ function nextResetIso(date = new Date()): string {
 
 type StoredUsage = UserUsageStats & { usagePeriod?: string };
 
-// A stored ledger from an earlier month starts this month at zero minutes; lifetime counters carry over, and the limit comes from the plan.
+// The usage period of a plan whose allowance is a one-time total (Free): it never rolls over.
+const LIFETIME_PERIOD = 'lifetime';
+const periodFor = (plan: Plan) => (plan.renewsMonthly ? monthKey() : LIFETIME_PERIOD);
+
+// A stored ledger from an earlier period starts at zero minutes (a new month, or a move between Free and a monthly plan); lifetime counters
+// carry over, and the limit comes from the plan.
 function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
   const current = { ...DEFAULT_USAGE, ...stored };
-  const period = monthKey();
+  const period = periodFor(plan);
   if (current.usagePeriod !== period) {
     current.minutesDubbed = 0;
     current.usagePeriod = period;
@@ -282,6 +288,7 @@ function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
   return {
     ...current,
     minutesLimit: plan.minutesPerMonth,
+    renewsMonthly: plan.renewsMonthly,
     activePlan: plan.name,
     planId: plan.id,
     paidExtrasAllowed: plan.paidExtras,
@@ -308,7 +315,7 @@ export async function getUsage(workspaceId: string): Promise<UserUsageStats> {
   }
   // Storage is measured from the bucket rather than trusted from the old counter; the counter is only a fallback if listing fails.
   const storageUsedMb = await workspaceStorageBytes(workspaceId).then(bytesToMb, () => usage.storageUsedMb);
-  return { ...usage, storageUsedMb, storageLimitMb: limits.storageLimitMb, resetsAt: nextResetIso() };
+  return { ...usage, storageUsedMb, storageLimitMb: limits.storageLimitMb, ...(plan.renewsMonthly ? { resetsAt: nextResetIso() } : {}) };
 }
 
 export class QuotaExceededError extends Error {}
@@ -338,6 +345,13 @@ export async function prepareReservation(
   const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
   const remaining = roundMinutes(usage.minutesLimit - usage.minutesDubbed);
   if (minutes > remaining + 0.001) {
+    if (!plan.renewsMonthly) {
+      throw new QuotaExceededError(
+        remaining <= 0
+          ? `You've used all ${usage.minutesLimit} free dubbing minutes. Request a quota increase on the Usage page to keep dubbing.`
+          : `This dub needs ${roundMinutes(minutes)} min but only ${remaining} free min are left. Dub fewer languages, or request a quota increase on the Usage page.`
+      );
+    }
     const resetDate = new Date(nextResetIso()).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: USAGE_TIME_ZONE });
     throw new QuotaExceededError(
       remaining <= 0

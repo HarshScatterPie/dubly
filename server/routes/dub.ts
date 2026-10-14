@@ -51,6 +51,7 @@ import {
   measureLoudness,
   muxVideoWithAudio,
   normalizeLoudness,
+  probeMedia,
   probeStreams,
   runFfmpeg,
   SAFE_INPUT_OPTIONS,
@@ -178,6 +179,7 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     return;
   }
   if (await refuseUnvoiced(res, workspaceId, languagesToRender)) return;
+  if (refuseOversizedText(res, stored, languagesToRender)) return;
   // Paid extras the starter switched on (and their plan allows) make each dubbed minute use more of the allowance.
   const { extras, rate } = await chargedExtras(workspaceId, uid);
   const minutesPerLanguage = (stored.videoDuration / 60) * rate;
@@ -192,6 +194,7 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
       minutes: minutesPerLanguage * languagesToRender.length,
       idempotencyKey: req.get('Idempotency-Key') || undefined,
       extras,
+      sourceSeconds: stored.videoDuration,
     },
     rate
   );
@@ -219,6 +222,41 @@ async function refuseUnvoiced(res: Response, workspaceId: string, languageCodes:
   const names = unvoiced.map(getLanguageName).join(' and ');
   res.status(400).json({ error: `No voice can speak ${names} right now. Remove it from this project to dub the other languages.`, code: 'LANGUAGE_NOT_VOICED' });
   return true;
+}
+
+// The most text one language may voice per second of video: several times real speech (~15-20 characters a second), with a floor for
+// short clips. Voices are billed per character while a dub is charged by video length, so a short video cannot carry hours of text.
+const MAX_TEXT_CHARS_PER_VIDEO_SECOND = 60;
+const MIN_TEXT_CHARS_PER_LANGUAGE = 2000;
+
+export function oversizedTextLanguages(stored: StoredProject, languageCodes: string[], videoSeconds = stored.videoDuration): string[] {
+  const limit = Math.max(MIN_TEXT_CHARS_PER_LANGUAGE, Math.ceil(videoSeconds * MAX_TEXT_CHARS_PER_VIDEO_SECOND));
+  return languageCodes.filter((code) => segmentsForLanguage(stored, code).reduce((sum, s) => sum + s.translatedText.trim().length, 0) > limit);
+}
+
+function refuseOversizedText(res: Response, stored: StoredProject, languageCodes: string[]): boolean {
+  const tooLong = oversizedTextLanguages(stored, languageCodes);
+  if (tooLong.length === 0) return false;
+  const names = tooLong.map(getLanguageName).join(' and ');
+  res.status(400).json({ error: `The ${names} lines are far longer than this video can hold. Shorten them before dubbing.`, code: 'TEXT_TOO_LONG' });
+  return true;
+}
+
+export const PROJECT_CHANGED_MESSAGE = 'The video or its lines changed after this dub was started, so it was stopped and not charged. Start it again.';
+
+// A job's charge is fixed when it is created, and the project can change while it waits in the queue. True when what it would now render
+// is more than it paid for: a longer video uploaded over the charged one, far more text than that video holds, or lines edited after a retake.
+export function uncoveredWork(job: Pick<DubJob, 'languages' | 'minutesReserved' | 'sourceSeconds'>, stored: StoredProject, measuredSeconds: number, rate: number): boolean {
+  // Jobs created before charges were pinned to a video have nothing to compare against.
+  if (!job.sourceSeconds) return false;
+  if (Math.max(measuredSeconds, stored.videoDuration) > job.sourceSeconds + 1) return true;
+  if (oversizedTextLanguages(stored, job.languages, job.sourceSeconds).length > 0) return true;
+  // A full dub always covers its retake price; a retake covers only the lines that had changed when it was charged (rounded to a tenth).
+  const chargedPerLanguage = job.languages.length ? job.minutesReserved / job.languages.length : 0;
+  return job.languages.some((code) => {
+    const plan = retakePlan(stored, code);
+    return plan !== null && plan.minutes * rate > chargedPerLanguage + 0.05;
+  });
 }
 
 // Job, project ownership and minute reservation are one transaction: a double click or a second teammate gets a 409, never a second charge.
@@ -267,6 +305,7 @@ dubRouter.post('/:id/languages/:code/retake', refuseWhenDraining, dubLimit, asyn
     return;
   }
   if (await refuseUnvoiced(res, workspaceId, [languageCode])) return;
+  if (refuseOversizedText(res, stored, [languageCode])) return;
 
   const { extras, rate } = await chargedExtras(workspaceId, req.uid!);
   const minutes = Math.round(plan.minutes * rate * 10) / 10;
@@ -280,6 +319,7 @@ dubRouter.post('/:id/languages/:code/retake', refuseWhenDraining, dubLimit, asyn
       minutes,
       idempotencyKey: req.get('Idempotency-Key') || undefined,
       extras,
+      sourceSeconds: stored.videoDuration,
     },
     rate
   );
@@ -1016,6 +1056,13 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
     const videoLocalPath = path.join(jobDir, 'source.mp4');
     await downloadFileFromStorage(stored.videoStoragePath!, videoLocalPath);
     const layout = await probeStreams(videoLocalPath).catch(() => null);
+    // Measured on the file actually downloaded: the project document and the stored video are not replaced in one step.
+    if (job.sourceSeconds) {
+      const measuredSeconds = layout?.durationSeconds || (await probeMedia(videoLocalPath)).durationSeconds;
+      if (uncoveredWork(job, stored, measuredSeconds, allowanceRate(plan.extraRates, job.extras ?? NO_EXTRAS))) {
+        throw new HttpError(409, 'PROJECT_CHANGED', PROJECT_CHANGED_MESSAGE);
+      }
+    }
 
     const background = await prepareBackgroundBed(job, stored, videoLocalPath, jobDir, Boolean(stored.separateBackground));
 

@@ -72,6 +72,9 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` | 8787 | Listen port |
+| `NEW_WORKSPACE_PLAN` | free | Plan a newly created workspace starts on (`free`, `starter`, `enterprise`); existing workspaces keep theirs |
+| `QUOTA_REQUEST_TO` | the SMTP account (`SMTP_USER`) | Where "Request Quota Increase" forms are emailed; they are also stored in `dublyQuotaRequests` |
+| `HOST` | every interface | Listen address. Behind nginx on the same VM set `127.0.0.1`, so nobody can reach the app around the proxy and forge the `X-Forwarded-For` that per-IP limits trust |
 | `WEB_ORIGIN` | http://localhost:3000 | The only CORS origin allowed |
 | `VERTEX_PROJECT_ID`, `VERTEX_GEMINI_LOCATION`, `GEMINI_STT_MODEL`, `GEMINI_TRANSLATE_MODEL` | —, global, gemini-3.5-flash-lite ×2 | AI providers |
 | `TTS_ENGINE` | cloud | `cloud` offers Gemini 2.5 Flash voices (every plan) and Chirp 3 HD voices (Enterprise), both through Google Cloud TTS with no Gemini API key. Chirp 3 HD also voices any line Gemini cannot, and premium voices are off. Santali cannot be dubbed. **Raise the Vertex AI quota** for `gemini-2.5-flash-tts` in the `global` region (about 10 requests a minute by default, measured 2026-09-29), or most lines of a dub fall back to Chirp 3 HD. `chirp` offers only Chirp 3 HD voices; re-takes are off too, and Odia and Santali cannot be dubbed. `gemini` voices each line on its voice's own engine (Gemini 3.8 Flash-Lite, Gemini 3.8 Flash or Chirp 3 HD, as the workspace's plan allows) and needs a paid `GEMINI_API_KEY` |

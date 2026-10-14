@@ -113,10 +113,10 @@ shareCreateRouter.delete('/:id/shares/:shareId', async (req, res) => {
 // Mounted without auth: this is what the recipient opens.
 export const publicShareRouter = Router();
 
-// Links made before tokens were hashed were stored under the raw token; they expire within a day of this change.
-async function findShare(token: string) {
-  const hashed = await sharesCol().doc(shareIdFor(token)).get();
-  return hashed.exists ? hashed : sharesCol().doc(token).get();
+// Only ever by the token's hash: a share's id is not secret (members list it, and it appears in request logs), so it must not open the link.
+// Links stored under their raw token, from before hashing (2026-09-24), all expired within a day.
+function findShare(token: string) {
+  return sharesCol().doc(shareIdFor(token)).get();
 }
 
 // The page carries the dub's captions inline, read from Firestore; a burst of viewers of one link shares a single read for a few minutes.

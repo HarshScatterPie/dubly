@@ -45,6 +45,8 @@ export interface DubJob {
   result?: Record<string, unknown> | null;
   // The paid extras this dub was charged for; the render uses exactly these, whatever the settings say later.
   extras?: PaidExtrasChoice;
+  // Length of the source video (seconds) the charge was worked out from; a longer video swapped in before the run starts is refused.
+  sourceSeconds?: number;
 }
 
 export const HEARTBEAT_INTERVAL_MS = 15_000;
@@ -110,6 +112,7 @@ export interface StartDubJobInput {
   minutes: number;
   idempotencyKey?: string;
   extras?: PaidExtrasChoice;
+  sourceSeconds?: number;
 }
 
 // Creates the job, takes the project and reserves minutes in one transaction; a repeated Idempotency-Key returns the earlier job.
@@ -184,6 +187,7 @@ async function startDubJobOnce(input: StartDubJobInput): Promise<{ job: DubJob; 
       errorCode: null,
       errorMessage: null,
       ...(input.extras ? { extras: input.extras } : {}),
+      ...(input.sourceSeconds ? { sourceSeconds: input.sourceSeconds } : {}),
     };
     reservation.commit();
     tx.set(jobsCol().doc(job.id), job);

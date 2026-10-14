@@ -32,6 +32,13 @@ describe('plan maths', () => {
       teamInvites: true,
     });
     expect(toPlan('starter', { minutesPerMonth: 'lots', paidExtras: 'yes' })).toMatchObject({ minutesPerMonth: 50, paidExtras: false });
+    expect(toPlan('starter', { renewsMonthly: 'no' }).renewsMonthly).toBe(true);
+  });
+
+  it('gives Free five minutes in total that never renew, with no extras or teammates', () => {
+    expect(toPlan('free', undefined)).toMatchObject({ name: 'Free', minutesPerMonth: 5, renewsMonthly: false, paidExtras: false, teamInvites: false });
+    expect(toPlan('starter', undefined).renewsMonthly).toBe(true);
+    expect(toPlan('enterprise', undefined).renewsMonthly).toBe(true);
   });
 
   it('gives Starter Gemini 3.8 Flash-Lite voices only, and Enterprise every engine', () => {

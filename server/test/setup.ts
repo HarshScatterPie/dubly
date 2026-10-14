@@ -12,3 +12,6 @@ if (!process.env.GCLOUD_PROJECT.startsWith('demo-')) {
 for (const name of ['SMTP_HOST', 'SMTP_USER', 'SMTP_PASS', 'MAIL_FROM']) process.env[name] = '';
 // Tests see the Gemini 3.8 voice engines, whatever the developer's server/.env says; the other settings are tested by switching env.ttsEngine.
 process.env.TTS_ENGINE = 'gemini';
+// New workspaces start on Starter here, which most tests' minute arithmetic assumes; the Free plan is tested by switching env.newWorkspacePlan.
+process.env.NEW_WORKSPACE_PLAN = 'starter';
+process.env.QUOTA_REQUEST_TO = '';

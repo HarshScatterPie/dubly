@@ -182,7 +182,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {!collapsed && (
           <div className="p-3 mx-2.5 mb-2 bg-white/5 rounded-lg">
             <div className="flex items-center justify-between text-xs mb-1.5">
-              <span className="text-slate-400 text-[11px] font-medium">Monthly Dubbing</span>
+              <span className="text-slate-400 text-[11px] font-medium">{usage.renewsMonthly === false ? 'Free Dubbing Minutes' : 'Monthly Dubbing'}</span>
               <span className="text-coral-600 font-mono text-[11px] font-semibold">
                 {usage.minutesDubbed} / {usage.minutesLimit}m
               </span>
@@ -193,6 +193,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 style={{ width: `${Math.min(100, minutesPercent)}%` }}
               />
             </div>
+            {usage.renewsMonthly === false && usage.minutesDubbed >= usage.minutesLimit && (
+              <p className="mt-1.5 text-[10px] text-slate-500">Used up · request more on the Usage page</p>
+            )}
             {usage.resetsAt && (
               <p className="mt-1.5 text-[10px] text-slate-500">
                 {usage.minutesDubbed >= usage.minutesLimit ? 'Limit reached · refreshes ' : 'Refreshes '}

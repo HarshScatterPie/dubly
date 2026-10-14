@@ -7,6 +7,11 @@ import { projectLanguages, segmentsForLanguage, type StoredProject } from './pro
 export const RETAKE_MIN_SECONDS = 6;
 // Usage is kept in tenths of a minute (projectRepo.roundMinutes), so a retake is priced in whole tenths and the quote is what gets charged.
 const BILLING_STEP_SECONDS = 6;
+// Faster than anyone speaks (real speech is ~15-20 characters a second): past it the text, not the slot, sets how long a line is billed,
+// so a long line saved with a tiny slot is not re-voiced nearly free.
+export const MAX_CHARS_PER_SECOND = 40;
+
+const billedLineSeconds = (s: LocalizedSegment) => Math.max(0, s.endTime - s.startTime, s.translatedText.trim().length / MAX_CHARS_PER_SECOND);
 
 type VoiceSettings = Pick<StoredProject, 'voiceEmotion' | 'voiceSpeed' | 'voicePitch'>;
 
@@ -40,7 +45,7 @@ export function retakePlan(stored: StoredProject, languageCode: string): RetakeI
   // Renders made before fingerprints existed have nothing to compare against; those languages are re-dubbed as a whole.
   if (!segments.some((s) => s.renderKey)) return null;
   const changed = segments.filter((s) => s.renderKey !== currentLineKey(stored, languageCode, s));
-  const seconds = changed.reduce((sum, s) => sum + Math.max(0, s.endTime - s.startTime), 0);
+  const seconds = changed.reduce((sum, s) => sum + billedLineSeconds(s), 0);
   const fullMinutes = stored.videoDuration / 60;
   const billedSeconds = Math.ceil(Math.max(seconds, RETAKE_MIN_SECONDS) / BILLING_STEP_SECONDS) * BILLING_STEP_SECONDS;
   const minutes = changed.length ? Math.min(fullMinutes, billedSeconds / 60) : 0;

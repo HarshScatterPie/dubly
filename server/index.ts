@@ -17,9 +17,8 @@ const RECONCILE_EVERY_MS = 60_000;
 const SWEEP_EVERY_MS = 60 * 60 * 1000;
 
 const app = createApp();
-const server = app.listen(env.port, () => {
-  console.log(`Dubly API listening on http://localhost:${env.port}`);
-});
+const onListening = () => console.log(`Dubly API listening on http://${env.host || 'localhost'}:${env.port}`);
+const server = env.host ? app.listen(env.port, env.host, onListening) : app.listen(env.port, onListening);
 
 async function reconcile(reason: string): Promise<void> {
   try {

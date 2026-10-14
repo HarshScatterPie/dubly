@@ -78,9 +78,15 @@ describe('share links', () => {
     expect((await fetch(`${api.baseUrl}${created.body.path}`)).status).toBe(200);
   });
 
-  it('keeps links made before tokens were hashed working until they expire', async () => {
+  it('opens a link only by its token: neither its id nor a record stored under a raw token opens the video', async () => {
     const user = await createUser('legacy-share@team.test');
     const { projectId, base } = await finishedProject(user);
+    const created = await api.call('POST', `/api/projects/${projectId}/share`, { token: user.token, body: { languageCode: 'hi' } });
+    expect((await fetch(`${api.baseUrl}${created.body.path}`)).status).toBe(200);
+    // The id is listed to members and appears in request logs, so it must not work as the link.
+    expect((await fetch(`${api.baseUrl}/api/share/${created.body.shareId}`)).status).toBe(404);
+    expect((await fetch(`${api.baseUrl}/api/share/${created.body.shareId}/captions.vtt`)).status).toBe(404);
+
     await db.collection('shares').doc('legacyRawToken123456').set({
       uid: user.uid,
       projectId,
@@ -90,7 +96,7 @@ describe('share links', () => {
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + 3600_000).toISOString(),
     });
-    expect((await fetch(`${api.baseUrl}/api/share/legacyRawToken123456`)).status).toBe(200);
+    expect((await fetch(`${api.baseUrl}/api/share/legacyRawToken123456`)).status).toBe(404);
   });
 });
 

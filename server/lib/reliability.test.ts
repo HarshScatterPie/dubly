@@ -163,9 +163,10 @@ describe('structured logging', () => {
       'GET /api/share/abcdefghijklmnop',
       'https://storage.googleapis.com/b/o?X-Goog-Signature=deadbeef&x=1',
       '{"password":"hunter2","private_key":"xyz"}',
+      'GET /?invite=inviteTok3n_secret-value -> 200',
     ].join('\n');
     const out = redact(text);
-    for (const secret of [jwt, 'hf_AbCdEfGhIjKlMnOpQrStUv', 'AIzaSyD0000000000000000fakeTestKey00000', 'MIIEv', 'abcdefghijklmnop', 'deadbeef', 'hunter2', '"xyz"']) {
+    for (const secret of [jwt, 'hf_AbCdEfGhIjKlMnOpQrStUv', 'AIzaSyD0000000000000000fakeTestKey00000', 'MIIEv', 'abcdefghijklmnop', 'deadbeef', 'hunter2', '"xyz"', 'inviteTok3n_secret-value']) {
       expect(out).not.toContain(secret);
     }
   });

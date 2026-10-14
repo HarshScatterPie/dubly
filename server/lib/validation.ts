@@ -167,6 +167,20 @@ export const schemas = {
   // An invitation's id is the SHA-256 of its token, as 64 hex characters.
   inviteId: z.object({ inviteId: z.string().regex(/^[a-f0-9]{64}$/, 'Invalid invitation id') }),
   inviteSignup: z.object({ token: z.string().min(10).max(200), password: z.string().min(8).max(128) }),
+  // The Usage page's "Request Quota Increase" form; the requester's email and workspace come from the session, never the body.
+  quotaRequest: z.object({
+    name: z.string().trim().min(1).max(80),
+    company: z.string().trim().max(120).optional(),
+    phone: z
+      .string()
+      .trim()
+      .max(30)
+      .regex(/^[0-9+()\-.\s]*$/, 'Invalid phone number')
+      .optional(),
+    plan: z.enum(['starter', 'enterprise', 'custom']),
+    minutesPerMonth: z.number().int().min(1).max(100_000),
+    message: z.string().trim().min(1).max(2000),
+  }),
 };
 
 // Replaces req.body with its parsed value (unknown top-level fields dropped) or answers 400 naming the bad fields, never echoing values.

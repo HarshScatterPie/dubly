@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { LocalizedSegment } from '../../src/types';
 import type { StoredProject } from './projectRepo';
-import { currentLineKey, lineRenderKey, RETAKE_MIN_SECONDS, retakePlan } from './retake';
+import { currentLineKey, lineRenderKey, MAX_CHARS_PER_SECOND, RETAKE_MIN_SECONDS, retakePlan } from './retake';
 
 const seg = (n: number, text: string): LocalizedSegment => ({
   id: `loc-hi-seg-${n}`,
@@ -73,6 +73,16 @@ describe('retake plan', () => {
     project.localizedSegments[2] = { ...project.localizedSegments[2], delivery: 'whispering' };
     // Eight seconds round up to the next tenth of a minute, the step usage is kept in.
     expect(retakePlan(project, 'hi')!.minutes).toBeCloseTo(0.2);
+  });
+
+  it('bills a long line by how long it takes to say, however small the slot saved with it', () => {
+    const project = renderedProject();
+    // Thirty seconds of text in a zero-length slot: billed as thirty seconds, not as the six-second floor.
+    project.localizedSegments.push({ ...seg(9, 'क'.repeat(MAX_CHARS_PER_SECOND * 30)), endTime: 90 });
+    const plan = retakePlan(project, 'hi')!;
+    expect(plan.changedLineIds).toEqual(['loc-hi-seg-9']);
+    expect(plan.seconds).toBeCloseTo(30);
+    expect(plan.minutes).toBeCloseTo(0.5);
   });
 
   it('treats a new voice as every line changed, never charging more than a full re-dub', () => {

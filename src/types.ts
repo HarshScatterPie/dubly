@@ -319,17 +319,19 @@ export interface ToastMessage {
 }
 
 export interface UserUsageStats {
-  /** Minutes dubbed this calendar month; resets on the 1st. */
+  /** Minutes dubbed this calendar month (resets on the 1st), or in total on a plan that does not renew. */
   minutesDubbed: number;
   minutesLimit: number;
-  /** When this month's minutes refresh (ISO); set by the server. */
+  /** Whether the allowance refreshes every month; false for Free, whose minutes are a one-time total. */
+  renewsMonthly: boolean;
+  /** When this month's minutes refresh (ISO); set by the server, absent on a plan that does not renew. */
   resetsAt?: string;
   totalProjects: number;
   storageUsedMb: number;
   storageLimitMb: number;
   languagesUsed: number;
   wordsTranslated: number;
-  /** The workspace plan's display name (Starter, Enterprise), read from the plan in the database. */
+  /** The workspace plan's display name (Free, Starter, Enterprise), read from the plan in the database. */
   activePlan: string;
   planId: PlanId;
   /** Whether this plan lets its users switch on the paid extras. */
@@ -342,14 +344,17 @@ export interface UserUsageStats {
   voiceEngines: VoiceEngine[];
 }
 
-export type PlanId = 'starter' | 'enterprise';
+export type PlanId = 'free' | 'starter' | 'enterprise';
 export type PaidExtra = 'aiReview' | 'premiumVoices' | 'paceRetakes';
 
 /** A workspace plan, stored in Firestore (`dublyPlans/{id}`) so its limits change without a deploy. */
 export interface Plan {
   id: PlanId;
   name: string;
+  /** The plan's allowance of dubbed minutes: each month, or in total when `renewsMonthly` is false. */
   minutesPerMonth: number;
+  /** False for a one-time allowance (Free) that is never topped up; true for the monthly plans. */
+  renewsMonthly: boolean;
   paidExtras: boolean;
   extraRates: Record<PaidExtra, number>;
   /** Whether workspace admins can invite teammates; without it the workspace is its owner alone. */

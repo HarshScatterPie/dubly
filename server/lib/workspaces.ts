@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { authAdmin, db } from './firebaseAdmin';
 import { log } from './log';
-import { planForWorkspace } from './plans';
+import { newWorkspacePlanId, planForWorkspace } from './plans';
 import { getUserProfile } from './projectRepo';
 
 // A Dubly workspace is a team: projects and the monthly minute allowance belong to it, and each member is an admin or an editor.
@@ -88,8 +88,9 @@ export async function resolveMembership(uid: string): Promise<Membership> {
   return membership;
 }
 
-// The first time someone uses Dubly they get their own workspace as its admin, with their existing projects and this month's usage copied in.
-// Someone with an invitation waiting gets nothing until they accept it: a workspace of their own would be a Starter plan they never asked for.
+// The first time someone uses Dubly they get their own workspace as its admin, on the new-workspace plan (Free), with their existing projects
+// and this month's usage copied in. Someone with an invitation waiting gets nothing until they accept it: a workspace of their own would be a
+// plan they never asked for.
 async function createPersonalWorkspace(uid: string): Promise<Membership> {
   const user = await authAdmin.getUser(uid);
   if (user.email && (await pendingInvitesFor(user.email)).length > 0) throw new WorkspaceAccessError(AWAITING_MESSAGE, 'AWAITING_INVITE');
@@ -105,6 +106,9 @@ async function createPersonalWorkspace(uid: string): Promise<Membership> {
       name: (typeof profile.workspace === 'string' && profile.workspace) || `${name}'s workspace`,
       createdAt: now,
       createdBy: uid,
+      // Recorded explicitly: a workspace with no plan field is on Starter, which older workspaces rely on.
+      plan: newWorkspacePlanId(),
+      planUpdatedAt: now,
     });
     tx.set(membersCol(workspaceId).doc(uid), {
       uid,
@@ -218,9 +222,19 @@ async function pendingInvitesFor(email: string): Promise<StoredInvite[]> {
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
-export async function listInvitesFor(email: string | undefined): Promise<MyInvite[]> {
+// The invitation a login Dubly made from a link was created for. Holding that link proved the account may join that one workspace, and nothing
+// more: the inviting admin holds the same link, so it never stands in for proof of the inbox.
+async function claimedInviteOf(uid: string): Promise<string | null> {
+  const pointer = await pointerDoc(uid).get();
+  return pointer.exists ? ((pointer.get('claimedInviteId') as string | undefined) ?? null) : null;
+}
+
+// Invitations the caller may see and accept by id: everything addressed to a verified email, else only the one their login was made from.
+export async function listInvitesFor(email: string | undefined, uid: string, emailVerified: boolean): Promise<MyInvite[]> {
   if (!email) return [];
-  return (await pendingInvitesFor(email)).map((inv) => ({
+  const claimed = emailVerified ? null : await claimedInviteOf(uid);
+  if (!emailVerified && !claimed) return [];
+  return (await pendingInvitesFor(email)).filter((inv) => emailVerified || inv.id === claimed).map((inv) => ({
     id: inv.id,
     workspaceName: inv.workspaceName,
     role: inv.role,
@@ -388,8 +402,9 @@ export async function createAccountForInvite(token: string, password: string): P
   await assertPlanAllowsTeam(invite.workspaceId, true);
   let uid: string;
   try {
-    // The invitation reached this inbox, which is the same proof a verification email would ask for.
-    uid = (await authAdmin.createUser({ email: invite.invitedEmail, password, emailVerified: true })).uid;
+    // Not marked verified: the inviting admin also holds this link, so it does not prove who reads the inbox. A verified flag would let the
+    // admin's chosen password collect any other workspace's invitation to this address (`/api/invites/mine`, `accept-by-id`).
+    uid = (await authAdmin.createUser({ email: invite.invitedEmail, password, emailVerified: false })).uid;
   } catch (err) {
     const code = (err as { code?: string }).code;
     if (code === 'auth/email-already-exists') {
@@ -400,7 +415,7 @@ export async function createAccountForInvite(token: string, password: string): P
   }
   try {
     // The login exists only to join this team: until they accept, it has no workspace (and so no Starter plan of its own).
-    await pointerDoc(uid).set({ workspaceId: null, awaitingInvite: true, createdViaInvite: true });
+    await pointerDoc(uid).set({ workspaceId: null, awaitingInvite: true, createdViaInvite: true, claimedInviteId: invite.id });
   } catch (err) {
     await authAdmin.deleteUser(uid).catch(() => undefined);
     throw err;
@@ -413,8 +428,13 @@ export async function acceptInvite(token: string, uid: string, callerEmail: stri
   return acceptInviteById(hashToken(String(token)), uid, callerEmail);
 }
 
+// Whether the caller may accept this invitation by id, without its link: a verified email, or the invitation their login was made from.
+export async function mayAcceptById(inviteId: string, uid: string, emailVerified: boolean): Promise<boolean> {
+  return emailVerified || (await claimedInviteOf(uid)) === inviteId;
+}
+
 // The same, from the invitation's id as listed in the person's notifications. Without the secret link this rests on the signed-in
-// email alone, so the route only offers it to accounts whose email has been verified.
+// email alone, so the route only offers it where `mayAcceptById` allows.
 export async function acceptInviteById(inviteId: string, uid: string, callerEmail: string | undefined): Promise<Membership> {
   const ref = invitesCol().doc(inviteId);
   const name = await displayNameFor(uid);

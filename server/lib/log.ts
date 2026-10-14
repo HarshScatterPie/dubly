@@ -31,7 +31,8 @@ const SECRET_PATTERNS: [RegExp, string][] = [
   [/\bAIza[0-9A-Za-z_-]{30,}/g, '[api-key-redacted]'],
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, '[private-key-redacted]'],
   [/(\/api\/share\/)[A-Za-z0-9_-]{8,}/g, '$1[redacted]'],
-  [/([?&](?:X-Goog-Signature|Signature|token|access_token)=)[^&\s"']+/gi, '$1[redacted]'],
+  // `invite`: an invitation link (/?invite=...) can create the invitee's login, and arrives as a page load the access log records.
+  [/([?&](?:X-Goog-Signature|Signature|token|access_token|invite)=)[^&\s"']+/gi, '$1[redacted]'],
   [/("?(?:password|idToken|refreshToken|private_key|api_key|apiKey)"?\s*[:=]\s*)"[^"]*"/gi, '$1"[redacted]"'],
 ];
 

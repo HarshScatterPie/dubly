@@ -64,8 +64,9 @@ chmod 600 "$SHARED"/credentials/* 2>/dev/null || true
 # Operational settings for this VM (not secrets); read by dubly.service. Existing values are never overwritten.
 if [ ! -e "$SHARED/runtime.env" ]; then
   cat > "$SHARED/runtime.env" <<'ENV'
-# nginx on this VM is one proxy hop in front of Dubly.
+# nginx on this VM is one proxy hop in front of Dubly, and the only way in: the app listens on loopback alone.
 TRUST_PROXY=1
+HOST=127.0.0.1
 # Sized for a 2 vCPU / 2 GB machine; raise with the machine size.
 MAX_ACTIVE_DUBS=2
 MAX_DUBS_PER_WORKSPACE=2

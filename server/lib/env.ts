@@ -7,6 +7,13 @@ dotenv.config({ path: process.env.DUBLY_ENV_FILE ? path.resolve(process.env.DUBL
 
 export const env = {
   port: Number(process.env.PORT) || 8787,
+  // Address to listen on; empty means every interface. Behind a proxy on the same machine set 127.0.0.1, so nobody can reach the app
+  // around the proxy (and forge the X-Forwarded-For that per-IP limits trust).
+  host: process.env.HOST || '',
+  // Plan a newly created workspace starts on (free, starter or enterprise); existing workspaces keep theirs.
+  newWorkspacePlan: process.env.NEW_WORKSPACE_PLAN || 'free',
+  // Where quota-increase requests from the Usage page are emailed; empty means the SMTP account itself. They are stored in Firestore either way.
+  quotaRequestTo: process.env.QUOTA_REQUEST_TO || '',
   vertexProjectId: process.env.VERTEX_PROJECT_ID || '',
   // Gemini 3.x is only served from the `global` endpoint; regional ones like us-central1 404.
   vertexGeminiLocation: process.env.VERTEX_GEMINI_LOCATION || 'global',

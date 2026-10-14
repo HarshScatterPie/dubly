@@ -260,12 +260,12 @@ describe('workspace invitations', () => {
       expect([401, 403], path).toContain(res.status);
       if (res.status === 403) expect(res.body.error.code).toBe('NO_WORKSPACE');
     }
-    // ...the link they used to join is spent...
-    expect((await accept(member, link.body.token)).status).toBe(404);
-    // ...and a brand-new sign-in gets nowhere either, with no workspace quietly made for them.
+    // ...a brand-new sign-in gets nowhere either, with no workspace quietly made for them...
     await new Promise((r) => setTimeout(r, 1100));
     const fresh = await signIn(member.email);
     expect((await api.call('GET', '/api/projects', { token: fresh })).status).toBe(403);
+    // ...and the link they used to join is spent. Checked with the fresh session: the old one may already be refused as revoked (401).
+    expect((await api.call('POST', '/api/invites/accept', { token: fresh, body: { token: link.body.token } })).status).toBe(404);
     expect((await db.collection('workspaceMembership').doc(member.uid).get()).get('workspaceId')).toBeNull();
   });
 
@@ -550,6 +550,26 @@ describe('people who have been invited but have not joined', () => {
     expect((await acceptById(bystander.token, 'not-an-id')).status).toBe(400);
     // The emailed link still works for the unverified account, as it always did.
     expect((await accept(unverified, body.token)).status).toBe(200);
+  });
+
+  it('never lets a login made from one team’s link collect another team’s invitation to that address', async () => {
+    // An admin holds every link they create, so a login made from it proves nothing about who reads the inbox.
+    const attacker = await createUser('admin@attacker.test');
+    await workspaceOf(attacker);
+    const victimAdmin = await createUser('admin@victim.test');
+    const victimWs = await workspaceOf(victimAdmin);
+    const bait = (await invite(attacker, 'newhire@victim.test')).body;
+    expect((await claim(bait.token, 'attacker-chosen-password')).status).toBe(201);
+    const login = await authAdmin.getUserByEmail('newhire@victim.test');
+    expect(login.emailVerified).toBe(false);
+    const token = await signIn('newhire@victim.test', 'attacker-chosen-password');
+
+    const real = (await invite(victimAdmin, 'newhire@victim.test')).body;
+    expect((await mine(token)).body.invites.map((i: { id: string }) => i.id)).toEqual([bait.invite.id]);
+    const refused = await acceptById(token, real.invite.id);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error.code).toBe('EMAIL_NOT_VERIFIED');
+    expect((await db.collection('workspaces').doc(victimWs.id).collection('members').doc(login.uid).get()).exists).toBe(false);
   });
 });
 

@@ -48,4 +48,6 @@ export const rateRules = {
   // Unauthenticated: looking up a link and creating its account, per caller address.
   inviteSignupPerIp: rule('INVITE_SIGNUP_PER_HOUR', 40, HOUR),
   shareViewPerIp: rule('SHARE_VIEW_PER_MINUTE', 60, 60 * 1000),
+  // Quota-increase requests email the team, so a few a day per person is plenty.
+  quotaRequestPerUser: rule('QUOTA_REQUEST_PER_DAY', 5, 24 * HOUR),
 };

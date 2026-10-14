@@ -2,7 +2,8 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
-import { runDubJob, setDubPipelineForTests, type PipelineResult } from './dub';
+import { runDubJob, setDubPipelineForTests, uncoveredWork, type PipelineResult } from './dub';
+import { currentLineKey } from '../lib/retake';
 import {
   getJob,
   jobDirFor,
@@ -15,7 +16,7 @@ import {
   type DubJob,
 } from '../lib/jobs';
 import { startDraining } from '../lib/lifecycle';
-import { currentUsagePeriod } from '../lib/projectRepo';
+import { currentUsagePeriod, type StoredProject } from '../lib/projectRepo';
 import { clearPlanCaches, setWorkspacePlan } from '../lib/plans';
 
 let api: TestApi;
@@ -235,6 +236,75 @@ describe('dub jobs: one run per project', () => {
     expect(res.status).toBe(503);
     expect(res.body.error.code).toBe('SERVER_RESTARTING');
     expect(await minutesUsed(f)).toBe(0);
+  });
+});
+
+describe('dub charges cover what is rendered', () => {
+  const line = (n: number, text: string) => ({
+    id: `loc-hi-seg-${n}`,
+    segmentId: `seg-${n}`,
+    startTime: n * 10,
+    endTime: n * 10 + 4,
+    speaker: 'Speaker 1',
+    sourceText: `line ${n}`,
+    translatedText: text,
+    isEdited: false,
+  });
+
+  it('refuses, before charging, lines far longer than the video can hold', async () => {
+    const f = await seedProject();
+    // Two minutes of video hold at most 7,200 characters of one language; this is one more.
+    const long = line(1, 'क'.repeat(120 * 60 + 1));
+    await projectDoc(f).update({ localizedSegments: [long], 'languageOutputs.hi.localizedSegments': [long] });
+    const res = await startDub(f);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('TEXT_TOO_LONG');
+    expect(await minutesUsed(f)).toBe(0);
+    expect((await db.collection('jobs').get()).size).toBe(0);
+  });
+
+  it('records on the job the video length it was charged for', async () => {
+    const f = await seedProject();
+    setDubPipelineForTests(async () => success(['hi', 'ta']));
+    const res = await startDub(f);
+    expect((await settledJob(res.body.jobId))?.sourceSeconds).toBe(120);
+  });
+
+  it('refuses at run time a longer video or more text than the job was charged for', () => {
+    const stored = { videoDuration: 120, targetLanguage: 'hi', targetLanguages: ['hi'], localizedSegments: [line(1, 'नमस्ते')], languageOutputs: {} } as unknown as StoredProject;
+    const job = { languages: ['hi'], minutesReserved: 2, sourceSeconds: 120 };
+    expect(uncoveredWork(job, stored, 120, 1)).toBe(false);
+    // A longer video uploaded over the charged one, whether the downloaded file or the project document shows it first.
+    expect(uncoveredWork(job, stored, 3600, 1)).toBe(true);
+    expect(uncoveredWork(job, { ...stored, videoDuration: 3600 }, 120, 1)).toBe(true);
+    // Text added while the job waited in the queue.
+    expect(uncoveredWork(job, { ...stored, localizedSegments: [line(1, 'क'.repeat(7201))] }, 120, 1)).toBe(true);
+    // Jobs created before charges were pinned to a video are left as they were.
+    expect(uncoveredWork({ ...job, sourceSeconds: undefined }, stored, 3600, 1)).toBe(false);
+  });
+
+  it('lets a retake re-voice only the lines it was charged for', () => {
+    const base = {
+      videoDuration: 120,
+      targetLanguage: 'hi',
+      targetLanguages: ['hi'],
+      finalDubbedVideoStoragePath: 'workspaces/w/projects/p/dubbed_hi.mp4',
+      selectedVoiceId: 'google-hi-charon',
+      voiceEmotion: 'friendly',
+      voiceSpeed: 1,
+      voicePitch: 1,
+      languageOutputs: {},
+    } as unknown as StoredProject;
+    const rendered = { ...base, localizedSegments: [1, 2, 3].map((n) => line(n, `पंक्ति ${n}`)).map((s) => ({ ...s, renderKey: currentLineKey(base, 'hi', s) })) };
+    const edited = (count: number) => ({ ...rendered, localizedSegments: rendered.localizedSegments.map((s, i) => (i < count ? { ...s, translatedText: `${s.translatedText}!` } : s)) });
+    // One edited line was charged the six-second floor, a tenth of a minute.
+    const retake = { languages: ['hi'], minutesReserved: 0.1, sourceSeconds: 120 };
+    expect(uncoveredWork(retake, edited(1), 120, 1)).toBe(false);
+    // Every line edited after that charge: refused, not re-voiced for free.
+    expect(uncoveredWork(retake, edited(3), 120, 1)).toBe(true);
+    // A full re-dub covers any edits, with or without paid extras.
+    expect(uncoveredWork({ ...retake, minutesReserved: 2 }, edited(3), 120, 1)).toBe(false);
+    expect(uncoveredWork({ ...retake, minutesReserved: 3 }, edited(3), 120, 1.5)).toBe(false);
   });
 });
 

@@ -6,10 +6,22 @@ import { env } from './env';
 
 // Written to Firestore the first time each plan is read, then owned there: edit dublyPlans/{id} to change a limit, a rate, invites or voice engines.
 export const DEFAULT_PLANS: Record<PlanId, Plan> = {
+  // Where every new workspace starts: a few minutes to try Dubly, once. More comes through a quota request (Usage page).
+  free: {
+    id: 'free',
+    name: 'Free',
+    minutesPerMonth: 5,
+    renewsMonthly: false,
+    paidExtras: false,
+    extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
+    teamInvites: false,
+    voiceEngines: ['gemini-flash-lite'],
+  },
   starter: {
     id: 'starter',
     name: 'Starter',
     minutesPerMonth: 50,
+    renewsMonthly: true,
     paidExtras: false,
     extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
     teamInvites: false,
@@ -20,6 +32,7 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     id: 'enterprise',
     name: 'Enterprise',
     minutesPerMonth: 120,
+    renewsMonthly: true,
     paidExtras: true,
     extraRates: { aiReview: 0.25, premiumVoices: 0.5, paceRetakes: 0.25 },
     teamInvites: true,
@@ -27,8 +40,13 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
   },
 };
 
-// A workspace with no plan recorded is on Starter.
+// A workspace with no plan recorded (every one made before Free existed) is on Starter.
 export const DEFAULT_PLAN_ID: PlanId = 'starter';
+
+// The plan a newly created workspace is put on (NEW_WORKSPACE_PLAN, Free unless set).
+export function newWorkspacePlanId(): PlanId {
+  return isPlanId(env.newWorkspacePlan) ? env.newWorkspacePlan : 'free';
+}
 
 const PLAN_IDS = Object.keys(DEFAULT_PLANS) as PlanId[];
 // Prefixed because this Firestore project is shared with ScatterStudio, which may have its own `plans`.
@@ -54,6 +72,7 @@ export function toPlan(id: PlanId, data: Record<string, unknown> | undefined): P
     id,
     name: typeof data?.name === 'string' && data.name.trim() ? data.name.trim() : base.name,
     minutesPerMonth: Number.isFinite(minutes) && minutes >= 0 ? minutes : base.minutesPerMonth,
+    renewsMonthly: typeof data?.renewsMonthly === 'boolean' ? data.renewsMonthly : base.renewsMonthly,
     paidExtras: typeof data?.paidExtras === 'boolean' ? data.paidExtras : base.paidExtras,
     extraRates: Object.fromEntries(
       PAID_EXTRAS.map((key) => {

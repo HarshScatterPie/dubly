@@ -28,7 +28,8 @@ Base path `/api`. Every endpoint except `/api/healthz` and `/api/share/:token` r
 | GET/PUT | `/api/settings` | Per-user settings: provider choices (`auto` \| `vertex`) and `preferences`, the defaults a new dub starts from (`defaultTargetLanguages` ≤ 10, `defaultVoiceId`, `translationStyle`, `adaptExpressions`, `voiceEmotion`, `voiceSpeed` 0.75–1.25, `expressiveVoices`, `separateBackground`, `autoLipSync`, `burnCaptions`). PUT merges: only the fields sent change. `expressiveVoices: false` voices that user's dubs and previews steadily, without delivery direction or performed laughs and sighs |
 | POST | `/api/profile/sign-out-everywhere` | Revokes every session of the caller's account, this one included (`204`); their tokens are refused from then on |
 | GET | `/api/bootstrap` | Everything the app opens with, in one response: `{ workspace, preferences, usage, projects, profile }` (same shapes as the separate endpoints). The client caches it per account in the browser and refreshes it on every visit |
-| GET | `/api/usage` | Monthly minutes (used, limit, reset time), storage measured from the bucket, and the workspace plan: `activePlan`, `planId`, `paidExtrasAllowed`, `extraRates`, `teamInvites` |
+| GET | `/api/usage` | Minutes (used, limit; `renewsMonthly` false and no `resetsAt` on Free, whose minutes are a one-time total), storage measured from the bucket, and the workspace plan: `activePlan`, `planId`, `paidExtrasAllowed`, `extraRates`, `teamInvites` |
+| POST | `/api/usage/quota-request` | "Request Quota Increase": `{ name, company?, phone?, plan: starter|enterprise|custom, minutesPerMonth, message }`. The requester and workspace come from the session. Stored and emailed to `QUOTA_REQUEST_TO` (else the SMTP account); `201 { id, emailed }`. 5 a day per user |
 
 ### Workspace and invitations
 | Method | Path | Who | Notes |

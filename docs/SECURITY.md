@@ -13,6 +13,7 @@
   - Joining needs the private link, whose token is 256-bit and stored only as a SHA-256 hash, **and** a signed-in account with the invited email.
   - Links expire after 7 days, can be withdrawn, are single-use per user and idempotent. "Not for you", "revoked" and "doesn't exist" all give the same answer.
   - Someone already in another team with other members can't be pulled out by an invite.
+  - A login created from a link (`/api/invite-signup/claim`) is **not** marked email-verified: the inviting admin holds the same link, so it proves nothing about the inbox. Without a verified email, the bell (`/api/invites/mine`) and `accept-by-id` offer that login only the invitation it was made from; any other team's invitation needs its own emailed link.
 - **Tests:** `server/routes/workspace.test.ts` and `server/routes/*.test.ts` include cross-tenant tests covering projects, jobs, shares and voices.
 
 ## Uploads and media

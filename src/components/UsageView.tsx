@@ -3,26 +3,29 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Clock,
   HardDrive,
-  Sparkles,
+  Gauge,
   ShieldCheck,
   Zap,
   Globe2,
   FileCheck,
 } from 'lucide-react';
 import { UserUsageStats } from '../types';
+import { QuotaRequestDialog } from './QuotaRequestDialog';
 
 interface UsageViewProps {
   usage: UserUsageStats;
-  onUpgrade?: () => void;
+  onShowToast: (title: string, description?: string, type?: 'success' | 'error' | 'info' | 'warning') => void;
 }
 
-export const UsageView: React.FC<UsageViewProps> = ({ usage, onUpgrade }) => {
+export const UsageView: React.FC<UsageViewProps> = ({ usage, onShowToast }) => {
+  const [requestOpen, setRequestOpen] = useState(false);
   const minutesPercent = Math.min(100, Math.round((usage.minutesDubbed / usage.minutesLimit) * 100));
   const storagePercent = Math.min(100, Math.round((usage.storageUsedMb / usage.storageLimitMb) * 100));
+  const minutesLeft = Math.max(0, Math.round((usage.minutesLimit - usage.minutesDubbed) * 10) / 10);
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fade-in">
@@ -39,13 +42,15 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onUpgrade }) => {
 
         <button
           type="button"
-          onClick={onUpgrade}
+          onClick={() => setRequestOpen(true)}
           className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold shadow-md shadow-[0_0_15px_rgba(240,86,55,0.3)] transition-all"
         >
-          <Sparkles className="w-4 h-4 text-[#D94B2E]" />
-          <span>Upgrade to Studio Pro</span>
+          <Gauge className="w-4 h-4" />
+          <span>Request Quota Increase</span>
         </button>
       </div>
+
+      <QuotaRequestDialog isOpen={requestOpen} usage={usage} onClose={() => setRequestOpen(false)} onShowToast={onShowToast} />
 
       {/* Primary Quota Metric Cards */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -66,9 +71,11 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onUpgrade }) => {
               <span className="text-sm text-[#94A3B8] font-mono">/ {usage.minutesLimit} mins</span>
             </div>
             <p className="text-[11px] text-[#64748B]">
-              {usage.resetsAt
-                ? `Refreshes on ${new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long' })} · ${Math.max(0, Math.round((usage.minutesLimit - usage.minutesDubbed) * 10) / 10)} min left this month`
-                : 'Resets automatically on the 1st of every month'}
+              {usage.renewsMonthly === false
+                ? `${minutesLeft} free min left · a one-time allowance that does not refresh`
+                : usage.resetsAt
+                  ? `Refreshes on ${new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long' })} · ${minutesLeft} min left this month`
+                  : 'Resets automatically on the 1st of every month'}
             </p>
           </div>
 
@@ -156,14 +163,14 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onUpgrade }) => {
               You are currently on the <strong className="text-[#D94B2E]">{usage.activePlan}</strong> plan
             </p>
             <p className="text-xs text-[#64748B] mt-1">
-              {usage.minutesLimit} dubbing minutes a month · {usage.paidExtrasAllowed ? 'Paid extras included' : 'No paid extras'} ·{' '}
-              {usage.teamInvites ? 'Invite your team' : 'Just you, no teammates'}
+              {usage.renewsMonthly !== false ? `${usage.minutesLimit} dubbing minutes a month` : `${usage.minutesLimit} free dubbing minutes in total`} ·{' '}
+              {usage.paidExtrasAllowed ? 'Paid extras included' : 'No paid extras'} · {usage.teamInvites ? 'Invite your team' : 'Just you, no teammates'}
             </p>
           </div>
 
           <div className="flex items-center gap-2">
             <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#F05637]/20 text-[#D94B2E] border border-[#F05637]/40">
-              Active Billing Cycle
+              {usage.renewsMonthly !== false ? 'Active Billing Cycle' : 'Free Plan'}
             </span>
           </div>
         </div>

@@ -15,6 +15,7 @@ import {
   listInvitesFor,
   listPendingInvites,
   lookupInviteForSignup,
+  mayAcceptById,
   previewInvite,
   removeMember,
   revokeInvite,
@@ -152,9 +153,10 @@ export const invitesRouter = Router();
 
 // The invitations waiting for the caller, for the notification bell and the "join your workspace" screen. Defined before the limiter below,
 // which is for guessing tokens: the bell asks every few minutes. Only a verified email sees them, because there is no secret link to prove
-// the caller got the invitation, so an address someone merely typed into an account must not be enough.
+// the caller got the invitation, so an address someone merely typed into an account must not be enough. A login made from an invitation
+// link sees just that invitation.
 invitesRouter.get('/mine', async (req, res) => {
-  res.json({ invites: req.emailVerified ? await listInvitesFor(req.email) : [] });
+  res.json({ invites: await listInvitesFor(req.email, req.uid!, req.emailVerified === true) });
 });
 
 // Guessing invitation tokens is hopeless (256 bits), but there is no reason to let anyone try quickly.
@@ -162,10 +164,11 @@ invitesRouter.use(rateLimit('invite-accept', [['user', rateRules.inviteAcceptPer
 
 invitesRouter.post('/accept-by-id', validateBody(schemas.inviteId), async (req, res) => {
   try {
-    if (!req.emailVerified) {
+    const inviteId = String(req.body?.inviteId ?? '');
+    if (!(await mayAcceptById(inviteId, req.uid!, req.emailVerified === true))) {
       throw new InviteError(403, 'EMAIL_NOT_VERIFIED', 'Verify your email address first, or open the link from your invitation email.');
     }
-    res.json(await acceptInviteById(String(req.body?.inviteId ?? ''), req.uid!, req.email));
+    res.json(await acceptInviteById(inviteId, req.uid!, req.email));
   } catch (err) {
     sendError(res, err);
   }

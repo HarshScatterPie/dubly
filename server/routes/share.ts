@@ -135,7 +135,8 @@ async function captionLinesFor(shareId: string, share: StoredShare): Promise<Cap
 
 // The ScatterPie logo on the page, served from here so the page needs nothing from any other site.
 let logoPng: Buffer | null = null;
-publicShareRouter.get('/_assets/scatterpie-logo.png', async (_req, res) => {
+// Public like the page, so limited by address like it, in a bucket of its own so loading the logo never uses up page views.
+publicShareRouter.get('/_assets/scatterpie-logo.png', rateLimit('share-asset', [['ip', rateRules.shareViewPerIp]]), async (_req, res) => {
   logoPng ??= await readFile(path.join(serverRoot, 'assets', 'scatterpie-logo.png'));
   res.status(200).type('png').setHeader('Cache-Control', 'public, max-age=86400').send(logoPng);
 });

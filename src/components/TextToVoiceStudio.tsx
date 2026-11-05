@@ -263,6 +263,10 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                 <span>{wordCount} words</span>
                 <span>•</span>
                 <span className="text-[#D94B2E] font-semibold">~{estDurationSec}s audio</span>
+                <span>•</span>
+                <span title="A voiceover uses your plan's minutes by the length the voice speaks. Voice samples and repeats of the same voiceover are free.">
+                  uses plan minutes
+                </span>
               </div>
             </div>
 

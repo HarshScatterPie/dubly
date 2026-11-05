@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto';
 import { env } from './env';
 import { log } from './log';
 import { mapWithConcurrency } from './concurrency';
+import { readCachedText, ttsCacheKey, writeCachedText } from './ttsCache';
 import { vertexGenerateJson, type VertexPart } from './vertexClient';
 
 // AI review: Gemini on Vertex hears each dubbed take next to its original line and flags what a native viewer would notice, so the render can re-record it.
@@ -93,6 +95,24 @@ async function reviewBatch(batch: ReviewLine[], languageName: string): Promise<M
   return parseReviewResponse(raw, batch.map((l) => l.id));
 }
 
+// The same take of the same line next to the same original always gets the verdict it got before. A retake of one edited line
+// re-renders the whole language, and unchanged lines come back from the voice cache byte for byte, so only takes the reviewer
+// has not heard are sent; the rest keep their verdict, and with it the same re-recording.
+function verdictKey(line: ReviewLine, languageName: string): string {
+  const digest = (audio?: Buffer) => (audio ? createHash('sha256').update(audio).digest('hex') : '');
+  return ttsCacheKey(['dub-review', 'v1', env.geminiReviewModel, languageName, line.script, line.delivery ?? '', digest(line.original), digest(line.dubbed)]);
+}
+
+function parseCachedVerdict(raw: string | null): LineVerdict | null {
+  if (!raw) return null;
+  try {
+    const verdict = JSON.parse(raw) as LineVerdict;
+    return typeof verdict?.ok === 'boolean' ? verdict : null;
+  } catch {
+    return null;
+  }
+}
+
 // Verdicts for every line the reviewer answered; a line missing from the map was not reviewed (a failed batch), never "bad".
 // `onBatchDone` is told how many of the batches have finished (failed ones included), so a caller can show the review moving.
 export async function reviewDubbedLines(
@@ -100,20 +120,33 @@ export async function reviewDubbedLines(
   languageName: string,
   onBatchDone?: (done: number, total: number) => void
 ): Promise<Map<string, LineVerdict>> {
+  const verdicts = new Map<string, LineVerdict>();
+  const keys = new Map<string, string>();
+  const unheard: ReviewLine[] = [];
+  for (const line of lines) {
+    const key = verdictKey(line, languageName);
+    keys.set(line.id, key);
+    const cached = parseCachedVerdict(await readCachedText(key));
+    if (cached) verdicts.set(line.id, cached);
+    else unheard.push(line);
+  }
+
   const batches: ReviewLine[][] = [];
-  for (let i = 0; i < lines.length; i += LINES_PER_REQUEST) batches.push(lines.slice(i, i + LINES_PER_REQUEST));
+  for (let i = 0; i < unheard.length; i += LINES_PER_REQUEST) batches.push(unheard.slice(i, i + LINES_PER_REQUEST));
   let finished = 0;
-  const results = await mapWithConcurrency(batches, PARALLEL_REQUESTS, async (batch) => {
+  await mapWithConcurrency(batches, PARALLEL_REQUESTS, async (batch) => {
     try {
-      return await reviewBatch(batch, languageName);
+      for (const [id, verdict] of await reviewBatch(batch, languageName)) {
+        verdicts.set(id, verdict);
+        await writeCachedText(keys.get(id)!, JSON.stringify(verdict));
+      }
     } catch (err) {
       log.warn('dub_review_batch_failed', { lines: batch.length, error: (err as Error)?.message }, '[review] a review batch failed; its lines keep their first take');
-      return new Map<string, LineVerdict>();
     } finally {
       onBatchDone?.(++finished, batches.length);
     }
   });
-  return new Map(results.flatMap((m) => [...m]));
+  return verdicts;
 }
 
 // The style prompt for a retake: the original direction plus what the reviewer asked for.

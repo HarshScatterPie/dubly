@@ -217,6 +217,15 @@ export function detectSpeechBounds(wav: Buffer, sliceStart: number, line: { star
 export interface WavSlicer {
   slice: (startSeconds: number, endSeconds: number) => Promise<Buffer | null>;
   close: () => Promise<void>;
+  durationSeconds: number;
+}
+
+/** Length of a 16-bit PCM WAV file from its header, without starting an ffprobe process; null for anything else. */
+export async function wavFileDurationSeconds(filePath: string): Promise<number | null> {
+  const wav = await openWavSlicer(filePath).catch(() => null);
+  if (!wav) return null;
+  await wav.close();
+  return wav.durationSeconds;
 }
 
 // Cuts line-length clips out of a long 16-bit PCM WAV on disk without loading it (a 60-minute 16 kHz track is ~115 MB).
@@ -258,6 +267,7 @@ export async function openWavSlicer(filePath: string): Promise<WavSlicer | null>
         return pcmToWav(pcm, sampleRate, channels, 16);
       },
       close: () => handle.close(),
+      durationSeconds: totalFrames / sampleRate,
     };
   } catch {
     await handle.close();

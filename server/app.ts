@@ -9,6 +9,8 @@ import multer from 'multer';
 import { HttpError } from './lib/httpError';
 import { log, withLogContext } from './lib/log';
 import { requireAuth, requireWorkspace } from './lib/auth';
+import { rateLimit } from './lib/rateLimit';
+import { rateRules } from './lib/limits';
 import { repoRoot } from './lib/paths';
 import { healthRouter } from './routes/health';
 import { settingsRouter } from './routes/settings';
@@ -147,10 +149,9 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   app.use('/api/invites', requireAuth, invitesRouter);
   // Projects belong to a workspace: every request is resolved to the caller's workspace and role first.
   app.use('/api/workspace', requireAuth, requireWorkspace, workspaceRouter);
-  app.use('/api/projects', requireAuth, requireWorkspace, projectsRouter);
-  app.use('/api/projects', requireAuth, requireWorkspace, dubRouter);
-  app.use('/api/projects', requireAuth, requireWorkspace, shareCreateRouter);
-  app.use('/api/projects', requireAuth, requireWorkspace, jobsRouter);
+  // One mount for all four routers, tried in order: mounted separately, a job poll was signed in, resolved to its workspace
+  // and counted against the per-user rate limit four times over, so ordinary polling ran into 429s.
+  app.use('/api/projects', requireAuth, requireWorkspace, projectsRouter, dubRouter, shareCreateRouter, jobsRouter);
   // Public on purpose: recipients of a share link are not Dubly users.
   app.use('/api/share', publicShareRouter);
 
@@ -166,7 +167,7 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
         },
       })
     );
-    app.get(/^(?!\/api).*/, (_req, res) => {
+    app.get(/^(?!\/api).*/, rateLimit('page', [['ip', rateRules.pagePerIp]]), (_req, res) => {
       res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distDir, 'index.html'));
     });

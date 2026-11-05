@@ -77,6 +77,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onShowToast }) => {
                   ? `Refreshes on ${new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long' })} · ${minutesLeft} min left this month`
                   : 'Resets automatically on the 1st of every month'}
             </p>
+            <p className="text-[11px] text-[#94A3B8]">Dubs use their video's length; Studio voiceovers and line previews use the length of the voice.</p>
           </div>
 
           <div className="space-y-1.5 pt-2">

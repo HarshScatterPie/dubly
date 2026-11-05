@@ -18,7 +18,18 @@ export const limits = {
   // Storage allowance per workspace, shown on the Usage page (STORAGE_LIMIT_MB); refused at upload only when ENFORCE_STORAGE_LIMIT=true.
   storageLimitMb: num('STORAGE_LIMIT_MB', 2048),
   enforceStorageLimit: process.env.ENFORCE_STORAGE_LIMIT === 'true',
+  // Charged voice clips (Studio voiceovers, line previews) being made at once per workspace (MAX_VOICE_CLIPS_IN_FLIGHT).
+  voiceClipsInFlightPerWorkspace: num('MAX_VOICE_CLIPS_IN_FLIGHT', 2),
 };
+
+// The most text one language may carry per second of video: several times real speech (~15-20 characters a second), with a floor for
+// short clips. Model calls are billed by text while minutes are charged by video length, so a short video cannot carry hours of text.
+const MAX_TEXT_CHARS_PER_VIDEO_SECOND = 60;
+const MIN_TEXT_CHARS_PER_LANGUAGE = 2000;
+
+export function maxTextCharsFor(videoSeconds: number): number {
+  return Math.max(MIN_TEXT_CHARS_PER_LANGUAGE, Math.ceil(videoSeconds * MAX_TEXT_CHARS_PER_VIDEO_SECOND));
+}
 
 export interface RateRule {
   max: number;
@@ -48,6 +59,8 @@ export const rateRules = {
   // Unauthenticated: looking up a link and creating its account, per caller address.
   inviteSignupPerIp: rule('INVITE_SIGNUP_PER_HOUR', 40, HOUR),
   shareViewPerIp: rule('SHARE_VIEW_PER_MINUTE', 60, 60 * 1000),
+  // The app's page itself (index.html for every client-side route), per caller address; far above what any person loads.
+  pagePerIp: rule('PAGE_PER_MINUTE', 300, 60 * 1000),
   // Quota-increase requests email the team, so a few a day per person is plenty.
   quotaRequestPerUser: rule('QUOTA_REQUEST_PER_DAY', 5, 24 * HOUR),
 };

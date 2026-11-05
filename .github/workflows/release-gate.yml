@@ -1,0 +1,134 @@
+name: Release gate
+
+# What must hold before a commit may reach the VM, beyond CI's correctness checks: a whole dub within its time, memory and
+# model-call budgets (no model work paid for twice), the production server starting and serving correctly, the frontend
+# within its size budget, and no critical advisory or open high/critical code-scanning alert. The VM deploys a commit only
+# when this workflow and CI have both passed for it (deploy/vm/autodeploy.sh).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pipeline:
+    name: Dub performance and model-call budgets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      # The Firestore/Auth/Storage emulators run on Java.
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Firebase emulator downloads
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ hashFiles('package-lock.json') }}
+
+      - name: Install
+        run: npm ci
+
+      - name: Make the test video (two voices, about 3 minutes)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq espeak-ng
+          bash server/perf/make-video.sh "$RUNNER_TEMP/perf.mp4"
+
+      # Upload, analyse, translate, dub, re-dub unchanged, add a language, dub it and retake one line; see server/perf/pipeline.perf.ts.
+      - name: Dub it end to end within budget
+        env:
+          PERF_VIDEO: ${{ runner.temp }}/perf.mp4
+          PERF_RESULT: ${{ runner.temp }}/perf-result.json
+        run: npm run test:perf
+
+      - name: Keep the measurements
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: perf-result
+          path: ${{ runner.temp }}/perf-result.json
+          if-no-files-found: ignore
+
+  production-start:
+    name: Production start, headers and bundle size
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: npm
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Cache Firebase emulator downloads
+        uses: actions/cache@v5
+        with:
+          path: ~/.cache/firebase/emulators
+          key: firebase-emulators-${{ hashFiles('package-lock.json') }}
+
+      - name: Install
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Bundle within budget
+        run: node server/perf/bundle-budget.mjs
+
+      - name: Start like production and smoke-test it
+        run: npx firebase emulators:exec --config firebase.test.json --only firestore,auth,storage --project demo-dubly "node server/perf/prod-smoke.mjs"
+
+  security:
+    name: Advisories, workflows and code scanning
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      # CI already refuses high advisories in what ships; this also refuses critical ones in the build and test tooling.
+      - name: No critical advisory in any dependency, no high one in what ships
+        run: |
+          npm audit --audit-level=critical
+          npm audit --omit=dev --audit-level=high
+
+      - name: Workflows are valid (actionlint)
+        run: docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.12 -color
+
+      # Only for main: pull requests are scanned on their own ref and reviewed there.
+      - name: No open high or critical code-scanning alert
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Not a gap: every signed-in route is limited per user in requireAuth (server/lib/auth.ts) and every public one per
+          # address (server/lib/rateLimit.ts). CodeQL only recognises third-party rate-limit packages, so it reports them all.
+          ALLOWED_RULES: js/missing-rate-limiting
+        run: bash .github/scripts/code-scanning-gate.sh

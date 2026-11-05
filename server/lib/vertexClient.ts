@@ -14,6 +14,9 @@ import { glossaryInstruction, glossaryMisses, relevantEntries, withoutKeptTerms 
 import type { GlossaryEntry, SpeakerProfile } from '../../src/types';
 import { acceptHeardPerformance, sanitizePerformanceTags, stripPerformanceTags } from './performance';
 import { mergeSpeakerProfiles } from './speakerProfiles';
+import { readCachedText, ttsCacheKey, writeCachedText } from './ttsCache';
+import { mapWithConcurrency } from './concurrency';
+import { wavFileDurationSeconds } from './audioUtils';
 
 export interface RawSttWord {
   text: string;
@@ -219,9 +222,11 @@ export async function vertexTranslateSegments(
   return result;
 }
 
-// Rewrites romanized Hinglish into Devanagari (English words kept in Latin) purely for the TTS voice, which pronounces Devanagari far more reliably.
-export async function vertexHinglishToSpeechScript(lines: { id: string; text: string }[]): Promise<Record<string, string>> {
-  if (lines.length === 0) return {};
+// Lines per Hinglish conversion request: a whole long video in one answer can come back truncated and unreadable.
+const SPEECH_SCRIPT_BATCH_LINES = 150;
+const SPEECH_SCRIPT_PARALLEL = 3;
+
+async function requestHinglishSpeechScript(lines: { id: string; text: string }[]): Promise<Record<string, string>> {
   const ai = getClient();
   const prompt = `Convert each romanized Hinglish line below into the form a Hindi text-to-speech voice reads best: write the Hindi words in Devanagari, keep genuine English words in Latin letters, and keep punctuation and bracketed tags such as [laughing] exactly as they are. Do not translate, add, drop or reorder any words — only change the script.
 Return ONLY {"translations": [{"id": "<same id>", "translatedText": "<converted line>"}]}.
@@ -236,9 +241,52 @@ ${JSON.stringify(lines)}`;
     })
   );
   logGeminiCallCost('hinglish-speech-script', env.geminiTranslateModel, response.usageMetadata);
-  const converted = response.text ? parseTranslationResponse(response.text) : {};
-  for (const line of lines) if (converted[line.id] !== undefined) converted[line.id] = sanitizePerformanceTags(converted[line.id], line.text);
-  return converted;
+  return response.text ? parseTranslationResponse(response.text) : {};
+}
+
+/**
+ * Rewrites romanized Hinglish into Devanagari (English words kept in Latin) purely for the TTS voice, which pronounces
+ * Devanagari far more reliably. Every render sends every line, so a line converted before is read from the cache rather
+ * than bought again, and the same text is converted once however often it occurs. Throws only when no line could be
+ * converted; lines missing from the result are voiced as written.
+ */
+export async function vertexHinglishToSpeechScript(lines: { id: string; text: string }[]): Promise<Record<string, string>> {
+  const cacheKey = (text: string) => ttsCacheKey(['hinglish-speech-script', 'v1', env.geminiTranslateModel, text]);
+  const byText = new Map<string, string>();
+  const toConvert = new Map<string, { id: string; text: string }>();
+  for (const line of lines) {
+    if (byText.has(line.text) || toConvert.has(line.text)) continue;
+    const cached = await readCachedText(cacheKey(line.text));
+    if (cached !== null) byText.set(line.text, cached);
+    else toConvert.set(line.text, line);
+  }
+
+  const pending = [...toConvert.values()];
+  const batches: (typeof pending)[] = [];
+  for (let i = 0; i < pending.length; i += SPEECH_SCRIPT_BATCH_LINES) batches.push(pending.slice(i, i + SPEECH_SCRIPT_BATCH_LINES));
+  let firstError: unknown = null;
+  await mapWithConcurrency(batches, SPEECH_SCRIPT_PARALLEL, async (batch) => {
+    try {
+      const converted = await requestHinglishSpeechScript(batch);
+      for (const line of batch) {
+        if (converted[line.id] === undefined) continue;
+        const speech = sanitizePerformanceTags(converted[line.id], line.text);
+        byText.set(line.text, speech);
+        await writeCachedText(cacheKey(line.text), speech);
+      }
+    } catch (err) {
+      firstError ??= err;
+      console.error(`[vertexClient] Hinglish speech-script conversion failed for ${batch.length} lines; they are voiced as written`, err);
+    }
+  });
+  if (firstError && byText.size === 0) throw firstError;
+
+  const result: Record<string, string> = {};
+  for (const line of lines) {
+    const speech = byText.get(line.text);
+    if (speech !== undefined) result[line.id] = speech;
+  }
+  return result;
 }
 
 // Shortens one dubbed line so it can be spoken inside its on-screen slot without being rushed.
@@ -250,6 +298,24 @@ export async function vertexCondenseLine(
   currentSeconds: number,
   // Glossary renderings present in the line; a shortened line that drops one is rejected.
   protectedTerms: string[] = []
+): Promise<string | null> {
+  // A line the last render shortened is saved shortened, but one that could not be shortened asks again on every re-render
+  // (a retake of any other line included) and pays for a voice for each new attempt; the answer it got is kept instead.
+  const cacheKey = ttsCacheKey(['condense', 'v1', env.geminiTranslateModel, targetLanguageCode, text, targetSeconds.toFixed(2), currentSeconds.toFixed(2), ...protectedTerms]);
+  const cached = await readCachedText(cacheKey);
+  if (cached !== null) return cached || null;
+  const shortened = await requestCondensedLine(text, targetLanguageCode, targetLanguageName, targetSeconds, currentSeconds, protectedTerms);
+  await writeCachedText(cacheKey, shortened ?? '');
+  return shortened;
+}
+
+async function requestCondensedLine(
+  text: string,
+  targetLanguageCode: string,
+  targetLanguageName: string,
+  targetSeconds: number,
+  currentSeconds: number,
+  protectedTerms: string[]
 ): Promise<string | null> {
   const ai = getClient();
   const keepRatio = Math.max(0.4, Math.min(0.95, targetSeconds / currentSeconds));
@@ -493,13 +559,18 @@ async function captureSpeakerReferences(
 // Chunks sent to Gemini at once after the first; enough to cut wall time ~3x without tripping per-minute quotas.
 const STT_PARALLEL_CHUNKS = 3;
 
+// The track and its chunks are plain 16 kHz WAV, so their length is in the header. An ffprobe process per chunk, all
+// started at once (129 for an hour of video), cost seconds of CPU on a two-core server; ffprobe stays the fallback.
+async function audioSeconds(filePath: string): Promise<number> {
+  return (await wavFileDurationSeconds(filePath)) ?? (await probeMedia(filePath)).durationSeconds;
+}
+
 export async function vertexTranscribe(
   filePath: string,
   // Called as each chunk finishes (with the language detected so far), so the UI shows real progress and callers can start dependent work early.
   onChunkDone?: (done: number, total: number, language: string) => void | Promise<void>
 ): Promise<RawSttResult> {
-  const probe = await probeMedia(filePath);
-  if (probe.durationSeconds <= VERTEX_MAX_CHUNK_SECONDS) {
+  if ((await audioSeconds(filePath)) <= VERTEX_MAX_CHUNK_SECONDS) {
     const single = await vertexTranscribeSingle(filePath);
     await onChunkDone?.(1, 1, single.language);
     return single;
@@ -514,7 +585,7 @@ export async function vertexTranscribe(
     // Chunks are not exactly VERTEX_MAX_CHUNK_SECONDS long (ffmpeg splits on packet
     // boundaries), so each chunk's offset is the sum of the real durations before it,
     // not a fixed stride that would drift further out of sync the longer the video runs.
-    const durations = await Promise.all(chunkPaths.map(async (p) => (await probeMedia(p)).durationSeconds));
+    const durations = await Promise.all(chunkPaths.map(audioSeconds));
     const offsets = durations.map((_, i) => durations.slice(0, i).reduce((a, b) => a + b, 0));
 
     let detectedLanguage = 'unknown';

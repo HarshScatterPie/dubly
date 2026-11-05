@@ -210,7 +210,7 @@ function modelUsable(model: string, bcp47: string): boolean {
   return Date.now() >= (geminiPausedUntil.get(model) ?? 0) && (geminiRefusals.get(`${model}|${bcp47}`) ?? 0) < GEMINI_REFUSALS_BEFORE_SKIP;
 }
 
-// The route's models that would take a line in this language right now, in the order they are tried; the router reads the cache in the same order.
+// The route's models that would take a line in this language right now, in the order they are tried.
 export function usableGeminiTtsModels(route: TtsRoute, bcp47: string): string[] {
   return route.gemini.filter((model) => modelUsable(model, bcp47));
 }

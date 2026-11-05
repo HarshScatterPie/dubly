@@ -3,7 +3,7 @@ import { isPerformanceTag, stripPerformanceTags } from './performance';
 import { getLanguageBcp47, getLanguageName, toolLanguageCode } from './languageMeta';
 import { isVertexConfigured, vertexTranscribe, vertexTranslateSegments, type RawSttResult, type TranscriptWindow } from './vertexClient';
 import type { TranslatableSegment, TranslationContext } from './translatePrompt';
-import { googleSynthesizeSpeech, isGoogleTtsConfigured, ttsRouteFor, usableGeminiTtsModels, type TtsEngine } from './googleTtsClient';
+import { googleSynthesizeSpeech, isGoogleTtsConfigured, ttsRouteFor, type TtsEngine } from './googleTtsClient';
 import { isGeminiSpeechConfigured } from './geminiSpeech';
 import { readTtsCache, ttsCacheKey, writeTtsCache } from './ttsCache';
 import { trimSilence } from './audioUtils';
@@ -105,9 +105,11 @@ export async function routeTranslateSegments(
 
 // Cleans text the voice would otherwise read literally or stumble on: stage directions, stray quotes, missing final punctuation. Performance tags are kept for the voice to act.
 export function normalizeTextForSpeech(raw: string): string {
+  // A bracket's contents never span another opening bracket, so each match attempt stops at the next one: linear on any line,
+  // where `[^)]*` on both sides of a word list backtracked quadratically through a long run of unclosed parentheses.
   let text = raw
-    .replace(/\[([^\]]*)\]/g, (whole, inner: string) => (isPerformanceTag(inner) ? ` [${inner.trim().toLowerCase().replace(/\s+/g, ' ')}] ` : ' '))
-    .replace(/\([^)]*(music|laugh|applause|noise|inaudible|silence)[^)]*\)/gi, ' ')
+    .replace(/\[([^[\]]*)\]/g, (whole, inner: string) => (isPerformanceTag(inner) ? ` [${inner.trim().toLowerCase().replace(/\s+/g, ' ')}] ` : ' '))
+    .replace(/\(([^()]*)\)/g, (whole, inner: string) => (/music|laugh|applause|noise|inaudible|silence/i.test(inner) ? ' ' : whole))
     .replace(/[“”„"«»]/g, '')
     .replace(/^['‘’]+|['‘’]+$/g, '')
     .replace(/[*_#~`|<>{}]/g, ' ')
@@ -161,7 +163,10 @@ export async function routeSynthesizeSpeech(
   const takeSuffix = take > 0 ? [`take-${take}`] : [];
   const chirpKey = ttsCacheKey([override, voice.id, targetLanguageCode, text, ...takeSuffix]);
   const geminiKeyFor = (model: string) => ttsCacheKey([override, 'gemini', model, voice.id, targetLanguageCode, style, text, ...takeSuffix]);
-  // Looked up in the order the route would voice the line: a Chirp 3 HD voice's own take first, a Gemini voice's models best first.
+  // Looked up in the order the route would voice the line: a Chirp 3 HD voice's own take first, a Gemini voice's models best first,
+  // then the take Chirp 3 HD made when Gemini could not (out of quota). That take used to be reused only while Gemini was off, so a
+  // retake or re-dub bought every such unchanged line again, from Gemini or from Chirp once the quota ran out again, and an
+  // unchanged line could come back in a different voice.
   if (route.chirp === 'first') {
     const cachedChirp = await readTtsCache(chirpKey);
     if (cachedChirp) return { provider: 'vertex', engine: 'chirp', audio: trimSilence(cachedChirp), fromCache: true };
@@ -170,7 +175,7 @@ export async function routeSynthesizeSpeech(
     const cachedGemini = await readTtsCache(geminiKeyFor(model));
     if (cachedGemini) return { provider: 'vertex', engine: 'gemini', model, audio: trimSilence(cachedGemini), fromCache: true };
   }
-  if (route.chirp === 'fallback' && usableGeminiTtsModels(route, bcp47).length === 0) {
+  if (route.chirp === 'fallback') {
     const cachedChirp = await readTtsCache(chirpKey);
     if (cachedChirp) return { provider: 'vertex', engine: 'chirp', audio: trimSilence(cachedChirp), fromCache: true };
   }

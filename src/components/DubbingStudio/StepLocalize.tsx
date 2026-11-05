@@ -595,7 +595,13 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
           >
             {isTranslating ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
             <span>
-              {isTranslating ? 'Translating…' : hasGeneratedTranslation ? 'Regenerate translation' : 'Translate'}
+              {isTranslating
+                ? 'Translating…'
+                : !hasGeneratedTranslation
+                  ? 'Translate'
+                  : selectedLangs.every((lang) => translatedLanguageCodes.includes(lang.code))
+                    ? 'Regenerate translation'
+                    : 'Translate new languages'}
             </span>
           </button>
         )}

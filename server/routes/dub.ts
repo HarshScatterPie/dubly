@@ -33,7 +33,7 @@ import {
 import { refuseWhenDraining, trackBackgroundWork } from '../lib/lifecycle';
 import { enqueueDub, queueStats } from '../lib/dubQueue';
 import { rateLimit } from '../lib/rateLimit';
-import { rateRules } from '../lib/limits';
+import { maxTextCharsFor, rateRules } from '../lib/limits';
 import { acquireHeavySlot } from '../lib/heavyWork';
 import { HttpError } from '../lib/httpError';
 import { invalidateStorageUsage } from '../lib/storageUsage';
@@ -224,13 +224,9 @@ async function refuseUnvoiced(res: Response, workspaceId: string, languageCodes:
   return true;
 }
 
-// The most text one language may voice per second of video: several times real speech (~15-20 characters a second), with a floor for
-// short clips. Voices are billed per character while a dub is charged by video length, so a short video cannot carry hours of text.
-const MAX_TEXT_CHARS_PER_VIDEO_SECOND = 60;
-const MIN_TEXT_CHARS_PER_LANGUAGE = 2000;
-
+// Voices are billed per character while a dub is charged by video length, so a language may voice only so much text (see maxTextCharsFor).
 export function oversizedTextLanguages(stored: StoredProject, languageCodes: string[], videoSeconds = stored.videoDuration): string[] {
-  const limit = Math.max(MIN_TEXT_CHARS_PER_LANGUAGE, Math.ceil(videoSeconds * MAX_TEXT_CHARS_PER_VIDEO_SECOND));
+  const limit = maxTextCharsFor(videoSeconds);
   return languageCodes.filter((code) => segmentsForLanguage(stored, code).reduce((sum, s) => sum + s.translatedText.trim().length, 0) > limit);
 }
 
@@ -710,9 +706,11 @@ async function renderLanguage(params: {
   // How long a take will actually play once the user's pitch and speed are applied.
   const playedSeconds = (audio: Buffer) => effectiveClipSeconds(getWavDurationSeconds(audio), stored.voicePitch, stored.voiceSpeed);
 
-  // Each progress report is a Firestore transaction (two reads, two writes) that the loop waits for, and the bar and message only
-  // need to move every few seconds; a cancel request is noticed at the next report, so this also bounds how long one takes to land.
+  // Each progress report is a Firestore transaction (two reads, two writes), about half a second from this server to the
+  // database, and the bar and message only need to move every few seconds. A report runs while the next lines are voiced
+  // and is awaited before the next one starts, so a cancel request (or a lost project) still stops the run within one report.
   let lastLineReportAt = 0;
+  let lineReport: Promise<void> = Promise.resolve();
   for (let i = 0; i < finalSegments.length; i++) {
     const seg = finalSegments[i];
     // A segment with no text (e.g. a silent lead-in the STT step correctly
@@ -737,7 +735,10 @@ async function renderLanguage(params: {
       const fitLimit = available * MAX_COMPRESSION;
       const fitTarget = available;
       let spokenSeconds = playedSeconds(audio);
-      let wasCondensed = false;
+      // A line an earlier render already shortened keeps that wording. Shortening it again on every re-render (a retake of any
+      // other line included) cost a rewrite and a voice each time and kept changing a line nobody had edited.
+      const condensedBefore = seg.qaFlags?.includes('condensed') ?? false;
+      let wasCondensed = condensedBefore;
 
       // Pace first: a voice asked to speed up or take its time still sounds like a person; audio stretched afterwards does not.
       const pace = params.paceRetakes && engine === 'gemini' ? paceRequest(spokenSeconds, slot, available, spokenSeconds > 0 ? getWavDurationSeconds(audio) / spokenSeconds : 1) : null;
@@ -755,7 +756,7 @@ async function renderLanguage(params: {
       }
 
       // Too long to fit even at the fastest natural pace: rewrite it shorter rather than gabble or overlap. Hand-edited lines are left as the user wrote them.
-      if (!seg.isEdited && spokenSeconds > fitLimit) {
+      if (!seg.isEdited && !condensedBefore && spokenSeconds > fitLimit) {
         try {
           const condensed = await vertexCondenseLine(seg.translatedText, languageCode, languageName, fitTarget * 1.1, spokenSeconds, protectedTerms);
           if (condensed) {
@@ -782,12 +783,16 @@ async function renderLanguage(params: {
     const reportedAt = Date.now();
     if (reportedAt - lastLineReportAt >= LINE_PROGRESS_EVERY_MS || i === finalSegments.length - 1) {
       lastLineReportAt = reportedAt;
-      await params.onProgress(
+      await lineReport;
+      lineReport = params.onProgress(
         segments.length ? ((i + 1) / segments.length) * 0.6 : 0.6,
         `${languageName}: generating neural voice audio (${i + 1}/${segments.length})...`
       );
+      // Awaited at the next report or after the loop; this only keeps a failure from counting as unhandled in between.
+      lineReport.catch(() => undefined);
     }
   }
+  await lineReport;
 
   // The original line under each take: its level always, and the AI review when it is on. Read in groups so a long video never sits in memory whole.
   const verdicts = new Map<string, LineVerdict>();
@@ -1348,7 +1353,7 @@ async function captionedExportState(
   if (!start) return { status: 'failed', error: 'No captioned render is in progress. Start the download again.' };
 
   const entry: { promise: Promise<void>; error?: string } = { promise: Promise.resolve() };
-  entry.promise = renderCaptionedVideo(videoStoragePath, captionedStoragePath, segments, `${projectId}-captions-${languageCode}`)
+  entry.promise = renderCaptionedVideo(videoStoragePath, captionedStoragePath, segments)
     .then(() => {
       captionRenders.delete(captionedStoragePath);
     })
@@ -1363,9 +1368,9 @@ async function captionedExportState(
   return { status: 'rendering' };
 }
 
-async function renderCaptionedVideo(videoStoragePath: string, captionedStoragePath: string, segments: LocalizedSegment[], label: string): Promise<void> {
-  // Unique per render: scratch files are never shared.
-  const jobDir = path.join(tmpDir, 'jobs', `${label}-${randomUUID()}`);
+async function renderCaptionedVideo(videoStoragePath: string, captionedStoragePath: string, segments: LocalizedSegment[]): Promise<void> {
+  // Unique per render: scratch files are never shared. Nothing from the request is part of the path.
+  const jobDir = path.join(tmpDir, 'jobs', `captions-${randomUUID()}`);
   let releaseSlot: (() => void) | undefined;
   try {
     releaseSlot = await acquireHeavySlot();

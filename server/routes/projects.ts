@@ -1,3 +1,4 @@
+import type { Response } from 'express';
 import { Router } from '../lib/router';
 import multer from 'multer';
 import path from 'node:path';
@@ -17,6 +18,8 @@ import {
   toClientProject,
   updateStoredProject,
   getSettings,
+  assertMinutesToDub,
+  QuotaExceededError,
   type StoredLanguageOutput,
   type StoredProject,
 } from '../lib/projectRepo';
@@ -25,7 +28,7 @@ import { validateMedia } from '../lib/mediaValidation';
 import { assertSafeDownloadUrl, streamToFile } from '../lib/safeDownload';
 import { refuseWhenDraining } from '../lib/lifecycle';
 import { rateLimit } from '../lib/rateLimit';
-import { limits, rateRules } from '../lib/limits';
+import { limits, maxTextCharsFor, rateRules } from '../lib/limits';
 import { acquireHeavySlot } from '../lib/heavyWork';
 import { routeTranscribe, routeTranslateSegments } from '../lib/modelRouter';
 import { alignSegmentsWithinWindows, detectSpeechRegions, retimeWords } from '../lib/forcedAlign';
@@ -120,7 +123,11 @@ const upload = multer({
         cb(err as Error, uploadDir);
       }
     },
-    filename: (_req, file, cb) => cb(null, `${randomUUID()}${path.extname(file.originalname)}`),
+    // A fresh id names the file; of the client's name only a known video extension is kept, so nothing it sends shapes the path.
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `${randomUUID()}${/^\.(mp4|mov|webm|m4v|mkv)$/.test(ext) ? ext : ''}`);
+    },
   }),
   limits: { fileSize: MAX_SOURCE_VIDEO_BYTES },
   fileFilter: (_req, file, cb) => {
@@ -135,6 +142,18 @@ const upload = multer({
 // Scoped by workspace: any member can open any of the workspace's projects.
 async function requireProject(workspaceId: string, id: string) {
   return getStoredProject(workspaceId, id);
+}
+
+// Analysis and translation are paid model calls, so they need minutes enough to dub the video once (see assertMinutesToDub).
+async function refuseWithoutMinutesToDub(res: Response, workspaceId: string, stored: StoredProject): Promise<boolean> {
+  try {
+    await assertMinutesToDub(workspaceId, stored.videoDuration);
+    return false;
+  } catch (err) {
+    if (!(err instanceof QuotaExceededError)) throw err;
+    res.status(403).json({ error: err.message, code: 'QUOTA_EXCEEDED' });
+    return true;
+  }
 }
 
 projectsRouter.post('/', validateBody(schemas.createProject), async (req, res) => {
@@ -299,13 +318,16 @@ projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['us
   const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
   if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
+  // Always true (multer wrote it there under a name of our own); checked so no later change can let a request steer a path.
+  const localPath = path.resolve(req.file.path);
+  if (!localPath.startsWith(path.resolve(uploadDir) + path.sep)) return res.status(400).json({ error: 'The upload could not be read' });
 
   try {
     await assertStorageAvailable(req.workspaceId!, req.file.size);
-    const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, req.file.path, req.file.originalname, req.file.size);
+    const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, localPath, req.file.originalname, req.file.size);
     res.json(await toClientProject(updated));
   } finally {
-    await rm(req.file.path, { force: true });
+    await rm(localPath, { force: true });
   }
 });
 
@@ -349,6 +371,7 @@ projectsRouter.post('/:id/transcribe', refuseWhenDraining, transcribeLimit, asyn
   const stored = await requireProject(req.workspaceId!, req.params.id);
   if (!stored) return res.status(404).json({ error: 'Project not found' });
   if (!stored.videoStoragePath) return res.status(400).json({ error: 'Upload a video before analyzing' });
+  if (await refuseWithoutMinutesToDub(res, req.workspaceId!, stored)) return;
 
   let job: DubJob;
   try {
@@ -488,8 +511,7 @@ async function runTranscriptionPipeline(job: DubJob, stored: StoredProject): Pro
     let timedSegments = cleanSegments;
     await report(84, 'Syncing every line to the exact moment it is spoken');
     try {
-      const probe = await probeMedia(audioLocalPath);
-      const regions = await detectSpeechRegions(audioLocalPath, probe.durationSeconds);
+      const regions = await detectSpeechRegions(audioLocalPath, audioSeconds);
       if (regions.length > 0) {
         // Aligns the sanitized lines; aligning rawSegments put the removed filler loops back and dragged every real line off its speech.
         // Chunk by chunk, so a chunk that came back short cannot drag the lines of every other chunk across its gap.
@@ -584,6 +606,16 @@ projectsRouter.post('/:id/translate', translateLimit, validateBody(schemas.trans
     // explicitly asked to regenerate, or the style/adaptation settings changed under it.
     const settingsChanged = finalStyle !== stored.translationStyle || finalAdapt !== stored.adaptExpressions;
     const regenerate = Boolean(req.body?.regenerate) || settingsChanged;
+
+    // Only a request that asks the model for something is checked; reusing translations that already exist costs nothing.
+    if (sourceLines.length > 0 && targets.some((code) => regenerate || segmentsForLanguage(stored, code).length === 0)) {
+      // The transcript can be edited, and translation is billed by its text, so it may hold no more than its video could voice.
+      const sourceChars = translatable.reduce((sum, s) => sum + s.text.trim().length, 0);
+      if (sourceChars > maxTextCharsFor(stored.videoDuration)) {
+        return res.status(400).json({ error: 'The transcript is far longer than this video can hold. Shorten it before translating.', code: 'TEXT_TOO_LONG' });
+      }
+      if (await refuseWithoutMinutesToDub(res, req.workspaceId!, stored)) return;
+    }
 
     const perLanguage = await mapWithConcurrency(targets, TRANSLATE_CONCURRENCY, async (languageCode) => {
       const existing = segmentsForLanguage(stored, languageCode);

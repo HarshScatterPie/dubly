@@ -270,7 +270,8 @@ function nextResetIso(date = new Date()): string {
   return new Date(`${nextYear}-${String(nextMonth).padStart(2, '0')}-01T00:00:00+05:30`).toISOString();
 }
 
-type StoredUsage = UserUsageStats & { usagePeriod?: string };
+// voiceSecondsCarry: seconds of voice clips not yet charged, because the ledger counts minutes in tenths (see settleVoiceMinutes).
+type StoredUsage = UserUsageStats & { usagePeriod?: string; voiceSecondsCarry?: number };
 
 // The usage period of a plan whose allowance is a one-time total (Free): it never rolls over.
 const LIFETIME_PERIOD = 'lifetime';
@@ -283,6 +284,7 @@ function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
   const period = periodFor(plan);
   if (current.usagePeriod !== period) {
     current.minutesDubbed = 0;
+    current.voiceSecondsCarry = 0;
     current.usagePeriod = period;
   }
   return {
@@ -315,7 +317,9 @@ export async function getUsage(workspaceId: string): Promise<UserUsageStats> {
   }
   // Storage is measured from the bucket rather than trusted from the old counter; the counter is only a fallback if listing fails.
   const storageUsedMb = await workspaceStorageBytes(workspaceId).then(bytesToMb, () => usage.storageUsedMb);
-  return { ...usage, storageUsedMb, storageLimitMb: limits.storageLimitMb, ...(plan.renewsMonthly ? { resetsAt: nextResetIso() } : {}) };
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { voiceSecondsCarry, ...shown } = usage;
+  return { ...shown, storageUsedMb, storageLimitMb: limits.storageLimitMb, ...(plan.renewsMonthly ? { resetsAt: nextResetIso() } : {}) };
 }
 
 export class QuotaExceededError extends Error {}
@@ -333,32 +337,46 @@ export async function reserveDubMinutes(workspaceId: string, minutes: number): P
   });
 }
 
+// How a refusal names what needed the minutes, and what the person can do instead.
+interface ChargeWording {
+  needs: (minutes: number) => string;
+  instead: string;
+}
+const DUB_WORDING: ChargeWording = { needs: (m) => `This dub needs ${m} min`, instead: 'Dub fewer languages' };
+const VOICE_WORDING: ChargeWording = { needs: (m) => `This voice clip needs up to ${m} min`, instead: 'Use a shorter text' };
+const VIDEO_WORDING: ChargeWording = { needs: (m) => `Dubbing this video needs ${m} min`, instead: 'Use a shorter video' };
+
+// Throws the refusal when `minutes` is more than the allowance has left.
+function assertCovered(usage: StoredUsage, plan: Plan, minutes: number, wording: ChargeWording): void {
+  const remaining = roundMinutes(usage.minutesLimit - usage.minutesDubbed);
+  if (minutes <= remaining + 0.001) return;
+  if (!plan.renewsMonthly) {
+    throw new QuotaExceededError(
+      remaining <= 0
+        ? `You've used all ${usage.minutesLimit} free dubbing minutes. Request a quota increase on the Usage page to keep dubbing.`
+        : `${wording.needs(roundMinutes(minutes))} but only ${remaining} free min are left. ${wording.instead}, or request a quota increase on the Usage page.`
+    );
+  }
+  const resetDate = new Date(nextResetIso()).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: USAGE_TIME_ZONE });
+  throw new QuotaExceededError(
+    remaining <= 0
+      ? `You've used all ${usage.minutesLimit} dubbing minutes for this month. They refresh on ${resetDate}.`
+      : `${wording.needs(roundMinutes(minutes))} but only ${remaining} min are left this month. ${wording.instead}, or wait until ${resetDate}.`
+  );
+}
+
 // Read half of a reservation inside a larger transaction: checks the allowance now and returns commit() for after the caller reads.
 export async function prepareReservation(
   tx: FirebaseFirestore.Transaction,
   workspaceId: string,
-  minutes: number
+  minutes: number,
+  wording: ChargeWording = DUB_WORDING
 ): Promise<{ period: string; commit: () => void }> {
   const ref = usageDoc(workspaceId);
   const plan = await planForWorkspace(workspaceId);
   const snap = await tx.get(ref);
   const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
-  const remaining = roundMinutes(usage.minutesLimit - usage.minutesDubbed);
-  if (minutes > remaining + 0.001) {
-    if (!plan.renewsMonthly) {
-      throw new QuotaExceededError(
-        remaining <= 0
-          ? `You've used all ${usage.minutesLimit} free dubbing minutes. Request a quota increase on the Usage page to keep dubbing.`
-          : `This dub needs ${roundMinutes(minutes)} min but only ${remaining} free min are left. Dub fewer languages, or request a quota increase on the Usage page.`
-      );
-    }
-    const resetDate = new Date(nextResetIso()).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', timeZone: USAGE_TIME_ZONE });
-    throw new QuotaExceededError(
-      remaining <= 0
-        ? `You've used all ${usage.minutesLimit} dubbing minutes for this month. They refresh on ${resetDate}.`
-        : `This dub needs ${roundMinutes(minutes)} min but only ${remaining} min are left this month. Dub fewer languages, or wait until ${resetDate}.`
-    );
-  }
+  assertCovered(usage, plan, minutes, wording);
   return {
     period: usage.usagePeriod!,
     commit: () => tx.set(ref, { ...ledgerOf(usage), minutesDubbed: roundMinutes(usage.minutesDubbed + minutes) }, { merge: true }),
@@ -390,6 +408,59 @@ export async function prepareRefund(
     refunded,
     commit: () => tx.set(ref, { ...ledgerOf(usage), minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - minutes)) }, { merge: true }),
   };
+}
+
+/**
+ * Holds minutes for a voice clip (a Studio voiceover or a line preview) before it is made, so clips started together cannot all slip
+ * under the allowance; settleVoiceMinutes then swaps the hold for what the clip really took. Returns the usage period to settle in.
+ */
+export async function reserveVoiceMinutes(workspaceId: string, minutes: number): Promise<string> {
+  return db.runTransaction(async (tx) => {
+    const reservation = await prepareReservation(tx, workspaceId, minutes, VOICE_WORDING);
+    reservation.commit();
+    return reservation.period;
+  });
+}
+
+// Seconds that make up one tenth of a minute, the step the ledger counts in.
+const SECONDS_PER_TENTH = 6;
+
+/**
+ * Gives back a clip's hold and charges the seconds it actually voiced (0 for a clip that failed or came from the cache). The ledger
+ * counts tenths of a minute, so whole 6-second steps are charged and the rest is carried to the next clip: a 4-second preview costs
+ * 4 seconds over time, not a rounded-up 6 (or a rounded-away 0).
+ */
+export async function settleVoiceMinutes(workspaceId: string, reservedMinutes: number, voicedSeconds: number, period: string): Promise<void> {
+  const ref = usageDoc(workspaceId);
+  const plan = await planForWorkspace(workspaceId);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
+    // The period rolled over while the clip was being made: the new one starts from zero and holds nothing of it.
+    if (usage.usagePeriod !== period) return;
+    const carried = (usage.voiceSecondsCarry ?? 0) + Math.max(0, voicedSeconds);
+    const tenths = Math.floor(carried / SECONDS_PER_TENTH + 1e-9);
+    tx.set(
+      ref,
+      {
+        ...ledgerOf(usage),
+        minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - reservedMinutes + tenths / 10)),
+        voiceSecondsCarry: Math.round((carried - tenths * SECONDS_PER_TENTH) * 1000) / 1000,
+      },
+      { merge: true }
+    );
+  });
+}
+
+/**
+ * Analysis and translation are model calls that only pay off in a dub, so they need the allowance left to dub the video at least once
+ * (one language, no paid extras). Refused like that dub would be; nothing is charged.
+ */
+export async function assertMinutesToDub(workspaceId: string, videoSeconds: number): Promise<void> {
+  const [snap, plan] = await Promise.all([usageDoc(workspaceId).get(), planForWorkspace(workspaceId)]);
+  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
+  // Rounded up to the tenth, so a refusal never reads "needs 5 min but 5 are left" for a video a few seconds over.
+  assertCovered(usage, plan, Math.max(0.1, Math.ceil(((videoSeconds || 0) / 60) * 10 - 1e-9) / 10), VIDEO_WORDING);
 }
 
 export function projectRef(workspaceId: string, projectId: string) {

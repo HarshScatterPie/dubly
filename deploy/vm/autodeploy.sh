@@ -20,22 +20,30 @@ LIVE=$(cat "$CURRENT/REVISION" 2>/dev/null || true)
 # A commit whose CI failed, or whose deploy failed its health check, is not retried; the next push is.
 [ -e "$STATE/skip-$HEAD" ] && exit 0
 
-# CI gate: only the "CI" workflow's run for exactly this commit counts.
+# Gate: every required workflow's run for exactly this commit must have passed (CI: correctness; Release gate: performance,
+# model-call budgets, production start, advisories and code scanning). One that failed rules the commit out; one still
+# running (or not started) means check again next tick.
+REQUIRED="${DUBLY_REQUIRED_WORKFLOWS:-CI,Release gate}"
 RESULT=$(curl -fsS -H 'Accept: application/vnd.github+json' \
-  "https://api.github.com/repos/$REPO/actions/runs?head_sha=$HEAD&per_page=20" |
-  "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{const r=(JSON.parse(s).workflow_runs||[]).find(w=>w.name==="CI");console.log(r?`${r.status}/${r.conclusion}`:"none")})') || { log "GitHub API unavailable"; exit 0; }
+  "https://api.github.com/repos/$REPO/actions/runs?head_sha=$HEAD&per_page=50" |
+  REQUIRED="$REQUIRED" "$NODE" -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
+    const runs=JSON.parse(s).workflow_runs||[];
+    const states=process.env.REQUIRED.split(",").map(name=>{const r=runs.find(w=>w.name===name);return [name,r?`${r.status}/${r.conclusion}`:"none"]});
+    const failed=states.filter(([,st])=>st.startsWith("completed/")&&st!=="completed/success");
+    console.log(failed.length?`completed/failure (${failed.map(([n,st])=>`${n}: ${st}`).join(", ")})`:states.every(([,st])=>st==="completed/success")?"completed/success":"pending");
+  })') || { log "GitHub API unavailable"; exit 0; }
 
 case "$RESULT" in
   completed/success) ;;
   completed/*)
-    log "CI did not pass for $HEAD ($RESULT); not deploying it"
+    log "required checks did not pass for $HEAD ($RESULT); not deploying it"
     touch "$STATE/skip-$HEAD"
     exit 0
     ;;
-  *) exit 0 ;; # CI still running (or not started yet): check again next tick
+  *) exit 0 ;; # still running (or not started yet): check again next tick
 esac
 
-log "CI passed for $HEAD; deploying (live: ${LIVE:-none})"
+log "required checks ($REQUIRED) passed for $HEAD; deploying (live: ${LIVE:-none})"
 status=0
 "$HERE/deploy.sh" "$HEAD" || status=$?
 if [ "$status" -eq 75 ]; then

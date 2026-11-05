@@ -385,7 +385,8 @@ export function extractThumbnail(
 
 /** Escapes a filesystem path for use inside an ffmpeg filtergraph argument (colons and backslashes are filtergraph syntax characters — this matters especially on Windows, where drive-letter paths like `C:\...` would otherwise be misparsed). */
 function escapeFilterPath(p: string): string {
-  return p.replace(/\\/g, '/').replace(/:/g, '\\:');
+  // One pass, so no backslash is left unescaped: Windows separators become forward slashes and colons are escaped.
+  return p.replace(/[\\:]/g, (c) => (c === ':' ? '\\:' : '/'));
 }
 
 /**

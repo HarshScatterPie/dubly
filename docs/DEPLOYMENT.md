@@ -11,9 +11,14 @@ One process runs everything: the API, the built frontend, jobs, and scheduled ma
 | Process | `dubly.service` (systemd, user `harsh.vardhan`), Node 24 from `/opt/node-24`, `KillMode=mixed`, `TimeoutStopSec=40` |
 | Code | `~/dubly` → symlink to `~/dubly-releases/<commit>` (the three newest are kept) |
 | Secrets and shared files | `~/dubly-shared/`: `server.env`, `web.env` (VITE client config), `credentials/`, `cache/`, `runtime.env` (capacity limits and `TRUST_PROXY`) |
-| Deploys | `dubly-autodeploy.timer` runs every 2 min: if `main` has a new commit **and that commit's CI run passed**, `deploy/vm/deploy.sh` builds it in a new release folder, switches, restarts, checks `/api/healthz`, and switches back if unhealthy |
+| Deploys | `dubly-autodeploy.timer` runs every 2 min: if `main` has a new commit **and that commit's CI and Release gate runs both passed**, `deploy/vm/deploy.sh` builds it in a new release folder, switches, restarts, checks `/api/healthz`, and switches back if unhealthy |
 
-**How a change reaches production:** push to `main` → CI runs (≈5 min) → within 2 minutes of CI passing, the VM deploys it. A commit whose CI fails is never deployed.
+**How a change reaches production:** push to `main` → CI and the Release gate run side by side (the gate takes longest, ≈15–20 min, mostly waiting for GitHub's CodeQL scan of the same commit) → within 2 minutes of both passing, the VM deploys it. A commit that fails either is never deployed. The workflows the VM waits for can be changed with `DUBLY_REQUIRED_WORKFLOWS` in `runtime.env`.
+
+**What the Release gate checks** (`.github/workflows/release-gate.yml`; each job writes its numbers to the run's summary page):
+- **Dub performance and model-call budgets** (`npm run test:perf`, `server/perf/pipeline.perf.ts`): uploads a generated two-voice video, analyses, translates, dubs, re-dubs it unchanged, adds Hinglish, dubs that and retakes one line, all through the real API with real ffmpeg, voice activity and face detection against the Firebase emulators; only Google's models are faked (instant, counted, with the ~10 a minute Gemini 2.5 TTS quota). It fails if a step pays for model work it already had (a re-dub with nothing changed must make **no** model call; a one-line retake at most 3 voice and 4 text calls), or exceeds its time per video minute, main-thread stall, API latency during a dub, or memory budget. `PERF_BUDGET_SCALE` scales the time budgets.
+- **Production start, headers and bundle size**: the frontend's gzip size (`server/perf/bundle-budget.mjs`), then the server started exactly as `dubly.service` starts it (`server/perf/prod-smoke.mjs`): boot time, the built app and its security and cache headers, the API refusing unsigned requests, a 400-request burst, memory, and a clean stop on SIGTERM.
+- **Advisories, workflows and code scanning**: no critical advisory in any dependency and no high one in what ships, valid workflows (actionlint), and no open high or critical CodeQL alert on `main` (it waits for CodeQL to finish analysing the commit). `js/missing-rate-limiting` is allowed: CodeQL only recognises third-party rate-limit packages, while every route it reports is limited by `server/lib/rateLimit.ts` or `requireAuth`. Dismiss those alerts as false positives on GitHub to keep the Security tab readable.
 
 **Setup (already done once; re-runnable):** on the VM run `bash ~/dubly/deploy/vm/install.sh`. It installs checksum-verified Node 24, adopts the old hand-copied install as a `legacy-…` release, moves secrets into `~/dubly-shared`, and installs and enables the units.
 
@@ -107,17 +112,19 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `RATE_TRANSCRIBE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 20 / 60 | |
 | `RATE_TRANSLATE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 40 / 120 | |
 | `RATE_DUB_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 30 / 90 | Dub starts |
-| `RATE_TTS_PER_HOUR` | 200 | Text-to-voice generations (no text length limit) |
+| `RATE_TTS_PER_HOUR` | 200 | Text-to-voice generations and previews (no text length limit; charged clips use plan minutes) |
+| `MAX_VOICE_CLIPS_IN_FLIGHT` | 2 | Charged voice clips (Studio voiceovers, line previews) being made at once per workspace; more get `429 VOICE_BUSY` |
 | `RATE_EXPORT_PER_HOUR` | 30 | Export and captioned-render requests |
 | `RATE_IMPORT_SAMPLE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | 20 / 30 | |
 | `RATE_INVITE_ACCEPT_PER_HOUR` | 30 | Invite preview and accept |
 | `RATE_INVITE_PER_HOUR` / `RATE_INVITE_PER_WORKSPACE_DAY` | 20 / 100 | Invitations created (each may send an email), per admin and per workspace |
-| `RATE_SHARE_VIEW_PER_MINUTE` | 60 | Public share page, per IP |
+| `RATE_SHARE_VIEW_PER_MINUTE` | 60 | Public share page, per IP (its logo has a separate bucket of the same size) |
+| `RATE_PAGE_PER_MINUTE` | 300 | The app page (`index.html` for every client-side route), per IP |
 
 The monthly minute allowance is 120 minutes per workspace, set in `server/lib/projectRepo.ts`.
 
 ## Releasing
-1. Merge to `main` with CI green: typecheck, tests, build, audit, secret scan, image build.
+1. Merge to `main` with CI green (typecheck, tests, build, audit, secret scan, image build) and the Release gate green (see above).
 2. Build `dubly:<sha>` and push it to your registry.
 3. On the host: pull, then `docker stop dubly` (it drains), then `docker run … dubly:<sha>`. Queued dubs survive the restart. Dubs that were rendering and don't finish within the grace period are marked failed and refunded, and users see "interrupted by a server restart".
 4. Smoke test: `/api/healthz`, then sign in and open a project.

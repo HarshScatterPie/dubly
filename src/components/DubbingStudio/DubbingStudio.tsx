@@ -585,6 +585,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // STEP 3: Generate Translation — every selected language in one call.
   const handleGenerateTranslation = async () => {
     if (!projectId || targetLanguageCodes.length === 0) return;
+    // With a new language ticked the button translates just that one, instead of re-buying (and overwriting edits in) the rest.
+    const addsLanguages = targetLanguageCodes.some((code) => !(languageOutputs[code]?.localizedSegments?.length));
     setIsTranslating(true);
     try {
       const project = await translationService.translateSegments(
@@ -594,7 +596,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         adaptExpressions,
         // Only the explicit "Regenerate" press re-buys translations that already exist;
         // a first pass (or an added language) reuses whatever is already there.
-        hasGeneratedTranslation
+        hasGeneratedTranslation && !addsLanguages
       );
       const active = targetLanguageCodes.includes(activeLanguageCode) ? activeLanguageCode : targetLanguageCodes[0];
       setActiveLanguageCode(active);

@@ -12,6 +12,7 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test": "firebase emulators:exec --config firebase.test.json --only firestore,auth,storage --project demo-dubly \"vitest run\"",
+    "test:perf": "firebase emulators:exec --config firebase.test.json --only firestore,auth,storage --project demo-dubly \"vitest run --config vitest.perf.config.ts\"",
     "typecheck": "tsc --noEmit",
     "start": "node --import tsx server/index.ts"
   },
@@ -53,11 +54,11 @@
     "autoprefixer": "^10.4.21",
     "concurrently": "^9.1.2",
     "esbuild": "^0.25.0",
-    "firebase-tools": "^13.35.1",
+    "firebase-tools": "^15.34.0",
     "tailwindcss": "^4.1.14",
     "typescript": "~5.8.2",
     "vite": "^6.2.3",
-    "vitest": "^3.2.7"
+    "vitest": "^4.1.12"
   },
   "engines": {
     "node": ">=22"

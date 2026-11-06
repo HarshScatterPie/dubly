@@ -9,7 +9,9 @@ import multer from 'multer';
 import { HttpError } from './lib/httpError';
 import { log, withLogContext } from './lib/log';
 import { requireAuth, requireWorkspace } from './lib/auth';
-import { rateLimit } from './lib/rateLimit';
+import { pingMongo } from './lib/mongo';
+import { clientIp, rateLimit } from './lib/rateLimit';
+import { rateLimit as ipRateLimit, ipKeyGenerator } from 'express-rate-limit';
 import { rateRules } from './lib/limits';
 import { repoRoot } from './lib/paths';
 import { healthRouter } from './routes/health';
@@ -23,6 +25,8 @@ import { profileRouter } from './routes/profile';
 import { publicShareRouter, shareCreateRouter } from './routes/share';
 import { inviteSignupRouter, invitesRouter, workspaceRouter } from './routes/workspace';
 import { jobsRouter } from './routes/jobs';
+import { authRouter } from './routes/auth';
+import { mediaRouter } from './routes/media';
 
 declare global {
   // eslint-disable-next-line @typescript-eslint/no-namespace
@@ -71,16 +75,18 @@ export function normalizeErrorResponses(req: express.Request, res: express.Respo
   next();
 }
 
-// Reported, not enforced, until the UI has been exercised under it; see docs/SECURITY.md for the switch to enforcing.
+// Enforced: scripts only from this site, nothing framed, no plugins; the only outside sources are Google Fonts, Unsplash images and the sample videos.
+// Every stored file is served by this server (/api/media), so media needs no other origin beyond the sample videos.
 const APP_CSP = [
   "default-src 'self'",
-  "script-src 'self' https://apis.google.com",
+  "script-src 'self'",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   'font-src https://fonts.gstatic.com',
-  "img-src 'self' data: blob: https://images.unsplash.com https://storage.googleapis.com",
-  "media-src 'self' data: blob: https://storage.googleapis.com https://interactive-examples.mdn.mozilla.net https://images-assets.nasa.gov",
-  "connect-src 'self' data: blob: https://identitytoolkit.googleapis.com https://securetoken.googleapis.com https://storage.googleapis.com",
-  'frame-src https://*.firebaseapp.com',
+  "img-src 'self' data: blob: https://images.unsplash.com",
+  "media-src 'self' data: blob: https://interactive-examples.mdn.mozilla.net https://images-assets.nasa.gov",
+  "connect-src 'self' data: blob:",
+  "frame-src 'none'",
+  "form-action 'self'",
   "object-src 'none'",
   "base-uri 'self'",
   "frame-ancestors 'none'",
@@ -91,17 +97,19 @@ export function securityHeaders(req: express.Request, res: express.Response, nex
   // Signed media URLs must not leak to other sites through the Referer header.
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('X-Frame-Options', 'DENY');
-  // Google sign-in opens a popup that must be able to report back.
-  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
   res.setHeader('Permissions-Policy', 'microphone=(self), camera=(), geolocation=()');
   if (req.secure) res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  res.setHeader('Content-Security-Policy-Report-Only', APP_CSP);
+  res.setHeader('Content-Security-Policy', APP_CSP);
   next();
 }
 
-// Share tokens are bearer secrets, so they never go into logs.
+// Share tokens and media signatures are bearer secrets, and email-link tokens are as good as a password, so none of them go into logs.
 export function redactUrl(url: string): string {
-  return url.replace(/(\/api\/share\/)[^/?#]+/, '$1[redacted]');
+  return url
+    .replace(/(\/api\/share\/)[^/?#]+/, '$1[redacted]')
+    .replace(/(\/api\/media\/)[^?#]*(\?[^#]*)?/, '$1[redacted]')
+    .replace(/([?&](?:invite|verify|reset|token)=)[^&#]+/g, '$1[redacted]');
 }
 
 export function createApp(options: { serveFrontend?: boolean; logRequests?: boolean } = {}): express.Express {
@@ -132,10 +140,35 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   // JSON, scripts and styles shrink to a fraction on the wire; the server's own egress is billed, and a project with its transcript is large.
   app.use(compression());
   app.use(securityHeaders);
-  app.use(cors({ origin: env.webOrigin }));
+  // Only Dubly's own pages may call the API from a browser, with the session cookie.
+  app.use(cors({ origin: env.webOrigin, credentials: true }));
+  // A flat ceiling per caller address on every request, before any work is done; the per-route and per-user limits sit on top of it.
+  // The address is the visitor's own also behind the Cloudflare front door (clientIp), with IPv6 grouped by /56 so one host cannot rotate.
+  app.use(
+    ipRateLimit({
+      windowMs: rateRules.allPerIp.windowMs,
+      limit: rateRules.allPerIp.max,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      keyGenerator: (req) => ipKeyGenerator(clientIp(req) ?? 'unknown'),
+      validate: { trustProxy: false, xForwardedForHeader: false },
+      handler: (_req, res, _next, options) => {
+        res.status(options.statusCode).json({ error: 'Too many requests from your network. Please wait a minute.', code: 'RATE_LIMITED' });
+      },
+    })
+  );
   app.use(express.json({ limit: '2mb' }));
 
-  app.get('/api/healthz', (_req, res) => res.json({ ok: true }));
+  // Liveness plus the database: a server that cannot reach MongoDB is not healthy, whatever else works.
+  app.get('/api/healthz', async (_req, res) => {
+    const database = await pingMongo();
+    res.status(database ? 200 : 503).json({ ok: database, database });
+  });
+
+  // Sign-up, sign-in and account links (public; each route decides what needs a session).
+  app.use('/api/auth', authRouter);
+  // Stored files for players and downloads; the signed URL is the permission (see routes/media.ts).
+  app.use('/api/media', mediaRouter);
 
   app.use('/api/health', requireAuth, healthRouter);
   app.use('/api/profile', requireAuth, profileRouter);

@@ -1,8 +1,8 @@
 // Release gate: starts the server the way production's systemd unit does (`node --import tsx server/index.ts`, built frontend,
-// NODE_ENV=production) against the Firebase emulators, and fails unless it boots quickly, serves the app with its security
+// NODE_ENV=production) against a throwaway MongoDB (MONGODB_URI/MONGODB_DB), and fails unless it boots quickly, serves the app with its security
 // and cache headers, keeps the API behind sign-in, answers a burst of requests fast without errors, stays small in memory and
 // shuts down cleanly.
-// Run inside `firebase emulators:exec` after `npm run build`. PERF_BUDGET_SCALE multiplies the time budgets.
+// Run after `npm run build` with a MongoDB replica set reachable. PERF_BUDGET_SCALE multiplies the time budgets.
 import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { appendFile } from 'node:fs/promises';

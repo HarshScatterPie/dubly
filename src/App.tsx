@@ -88,14 +88,16 @@ const EMPTY_USAGE: UserUsageStats = {
   voiceEngines: DEFAULT_VOICE_ENGINES,
 };
 
-// Why the server refuses this account a workspace: removed by an admin (`NO_WORKSPACE`), or invited and not yet joined (`AWAITING_INVITE`).
+// Why the server refuses this account a workspace: removed by an admin (`NO_WORKSPACE`), invited and not yet joined (`AWAITING_INVITE`),
+// or a new account whose email is not confirmed yet (`EMAIL_NOT_VERIFIED`).
 interface WorkspaceAccessProblem {
   code: string;
   message: string;
 }
 
 export default function App() {
-  const { user, loading: authLoading, signOut, primeProfile } = useAuth();
+  const { user, loading: authLoading, signOut, primeProfile, resendVerification } = useAuth();
+  const [verifyMail, setVerifyMail] = useState<'idle' | 'sending' | 'sent' | 'logged'>('idle');
   // True while a visit with nothing cached waits for its startup data behind the loading screen.
   const [booting, setBooting] = useState(false);
   // Set once startup data is in, so tab switches refresh lists only after that and never race it.
@@ -396,7 +398,7 @@ export default function App() {
       if (user) writeBootCache(user.uid, data);
     } catch (err) {
       const code = (err as ApiError).code;
-      if (code === 'NO_WORKSPACE' || code === 'AWAITING_INVITE') setWorkspaceAccessError({ code, message: (err as Error).message });
+      if (code === 'NO_WORKSPACE' || code === 'AWAITING_INVITE' || code === 'EMAIL_NOT_VERIFIED') setWorkspaceAccessError({ code, message: (err as Error).message });
       else showToast('Could Not Check', (err as Error).message, 'error');
     }
     void refreshInvites();
@@ -408,7 +410,15 @@ export default function App() {
 
   const handleStartDubbing = (sampleId?: string) => openStudio({ sampleId: sampleId || null });
 
-  const handleRedubProject = (project: DubbingProject) => openStudio({ redubProject: project });
+  // A listed project carries no lines, and dubbing more languages starts from its transcript, so the whole project is fetched first.
+  const handleRedubProject = async (project: DubbingProject) => {
+    const whole = project.summary ? await projectService.get(project.id).catch(() => null) : project;
+    if (!whole) {
+      showToast('Could Not Open Project', 'Try again in a moment.', 'error');
+      return;
+    }
+    openStudio({ redubProject: whole });
+  };
 
   const handleSaveProject = async (newProj: DubbingProject) => {
     setProjects((prev) => [newProj, ...prev.filter((p) => p.id !== newProj.id)]);
@@ -425,8 +435,14 @@ export default function App() {
   // Finished projects open in the project workspace; unfinished ones reopen in the studio at the step they reached.
   const handleOpenWorkspace = async (listed: DubbingProject) => {
     if (activeTab !== 'workspace') workspaceReturnTabRef.current = activeTab;
+    // A listed project leaves its lines out; the workspace shows them, so it opens on the whole project.
     if (projectProgress(listed).complete) {
-      setActiveWorkspaceProject(listed);
+      const whole = listed.summary ? await projectService.get(listed.id).catch(() => null) : listed;
+      if (!whole) {
+        showToast('Could Not Open Project', 'Try again in a moment.', 'error');
+        return;
+      }
+      setActiveWorkspaceProject(whole);
       setActiveTab('workspace');
       return;
     }
@@ -435,7 +451,11 @@ export default function App() {
       return;
     }
     // The list can be minutes old; the project may have moved on since.
-    const project = await projectService.get(listed.id).catch(() => listed);
+    const project = await projectService.get(listed.id).catch(() => null);
+    if (!project) {
+      showToast('Could Not Open Project', 'Try again in a moment.', 'error');
+      return;
+    }
     const progress = projectProgress(project);
     if (progress.complete) {
       setActiveWorkspaceProject(project);
@@ -510,6 +530,43 @@ export default function App() {
   // sees their invitation(s) with a Join button and nothing of Dubly; someone an admin removed sees that, and can only sign out.
   if (workspaceAccessError) {
     const awaiting = workspaceAccessError.code === 'AWAITING_INVITE';
+    if (workspaceAccessError.code === 'EMAIL_NOT_VERIFIED') {
+      const resend = async () => {
+        setVerifyMail('sending');
+        try {
+          setVerifyMail((await resendVerification()) ? 'sent' : 'logged');
+        } catch (err) {
+          setVerifyMail('idle');
+          showToast('Could Not Send', (err as Error).message, 'error');
+        }
+      };
+      return (
+        <div className="min-h-screen bg-background flex items-center justify-center px-4 py-8">
+          <div className="w-full max-w-sm glass-panel rounded-2xl p-8 space-y-5 shadow-lg">
+            <div className="text-center space-y-2">
+              <h1 className="text-lg font-bold text-foreground">Confirm your email</h1>
+              <p className="text-sm text-muted-foreground">
+                Open the link we sent to <strong>{user.email}</strong> to start using Dubly. It works for 24 hours.
+              </p>
+            </div>
+            {verifyMail === 'sent' && <p className="text-xs text-center text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-3">A new link is on its way. Check the spam folder too.</p>}
+            {verifyMail === 'logged' && <p className="text-xs text-center text-muted-foreground">Email is not set up on this server, so the link was written to the server log.</p>}
+            <div className="space-y-2">
+              <button type="button" onClick={() => void handleRecheckAccess()} className="w-full py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white text-sm font-semibold">
+                I have confirmed it
+              </button>
+              <button type="button" disabled={verifyMail === 'sending'} onClick={() => void resend()} className="w-full py-2.5 rounded-md border border-border text-sm font-semibold text-foreground hover:bg-slate-50 disabled:opacity-60">
+                {verifyMail === 'sending' ? 'Sending…' : 'Send a new link'}
+              </button>
+              <button type="button" onClick={() => void signOut()} className="w-full py-2.5 rounded-md text-sm font-semibold text-muted-foreground hover:text-foreground">
+                Sign out
+              </button>
+            </div>
+          </div>
+          <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
+        </div>
+      );
+    }
     return (
       <div className="min-h-screen bg-background flex items-center justify-center px-4 py-8">
         <div className="w-full max-w-sm glass-panel rounded-2xl p-8 space-y-5 shadow-lg">

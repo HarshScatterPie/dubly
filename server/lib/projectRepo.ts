@@ -1,10 +1,12 @@
 import { randomUUID } from 'node:crypto';
-import { FieldValue } from 'firebase-admin/firestore';
-import type { DubbingProject, LanguageOutput, Plan, UserPreferences, UserUsageStats } from '../../src/types';
+import type { ClientSession } from 'mongodb';
+import type { DubbingProject, LanguageOutput, Plan, SegmentCounts, UserPreferences, UserUsageStats } from '../../src/types';
 import { DEFAULT_VOICE_ID, withPreferenceDefaults } from '../../src/data/preferences';
-import { db, getSignedDownloadUrl } from './firebaseAdmin';
+import { col, mergeUpdate, withTransaction } from './mongo';
+import { getSignedDownloadUrl } from './mediaStore';
+import { getUser, updateUserProfile } from './accounts';
 import { DEFAULT_PROVIDER_SETTINGS, type ProviderSettings } from './modelRouter';
-import { applyPlan, loadProject, planProjectWrite } from './projectStorage';
+import { applyPlan, deleteProjectDocuments, insertPlan, loadProject, loadProjectMeta, loadProjectSummaries, loadProjects, planProjectWrite, projectsCol } from './projectStorage';
 import { bytesToMb, invalidateStorageUsage, workspaceStorageBytes } from './storageUsage';
 import { limits } from './limits';
 import { DEFAULT_PLANS, planForWorkspace } from './plans';
@@ -16,8 +18,8 @@ export interface StoredLanguageOutput extends Omit<LanguageOutput, 'dubbedAudioU
 }
 
 /**
- * Firestore stores bucket-relative storage paths, never signed URLs (those expire).
- * A fresh signed URL is minted from the stored path every time a project is read.
+ * Records store storage paths (GridFS filenames), never signed URLs (those expire).
+ * A signed URL is minted from the stored path every time a project is read.
  */
 export interface StoredProject
   extends Omit<
@@ -35,6 +37,7 @@ export interface StoredProject
   dubAttempts?: number;
   // Separated stems of the current source, kept so a retake or another language skips the (slow) separation.
   stemsCache?: StemsCache;
+  segmentCounts?: SegmentCounts;
 }
 
 export interface StemsCache {
@@ -73,18 +76,14 @@ export function segmentsForLanguage(
   return stored.languageOutputs?.[languageCode]?.localizedSegments || [];
 }
 
-// Projects and the monthly allowance belong to the workspace, so every member sees and spends the same ones.
-function projectsCol(workspaceId: string) {
-  return db.collection('workspaces').doc(workspaceId).collection('projects');
-}
+// The monthly allowance belongs to the workspace (usage/{workspaceId}), so every member sees and spends the same one.
+const usageCol = () => col<StoredUsage & { _id: string }>('usage');
+// Provider settings stay personal (userSettings/{uid}).
+const settingsCol = () => col<Record<string, unknown> & { _id: string }>('userSettings');
 
-function usageDoc(workspaceId: string) {
-  return db.collection('workspaces').doc(workspaceId).collection('meta').doc('usage');
-}
-
-// Provider settings stay personal.
-function settingsDoc(uid: string) {
-  return db.collection('users').doc(uid).collection('meta').doc('settings');
+// A listed project as the client gets it: marked as a summary, so it is opened through GET /api/projects/:id.
+export async function toClientSummary(stored: StoredProject): Promise<DubbingProject> {
+  return { ...(await toClientProject(stored)), summary: true };
 }
 
 export async function toClientProject(stored: StoredProject): Promise<DubbingProject> {
@@ -177,15 +176,14 @@ export async function createProject(
     wordsCount: data.wordsCount || 0,
     speakersCount: data.speakersCount || 1,
   };
-  const ref = projectsCol(workspaceId).doc(id);
-  const plan = planProjectWrite(ref, undefined, project);
-  await db.runTransaction(async (tx) => applyPlan(tx, ref, plan));
+  const plan = planProjectWrite(workspaceId, id, undefined, project);
+  await withTransaction((session) => insertPlan(workspaceId, id, plan, session));
   return project;
 }
 
 // Reassembled from its metadata and segment documents (see server/lib/projectStorage.ts).
 export async function getStoredProject(workspaceId: string, id: string): Promise<StoredProject | null> {
-  return loadProject(projectsCol(workspaceId).doc(id));
+  return loadProject(workspaceId, id);
 }
 
 /** What a progress bar needs from a project; the same fields, with the same meaning, as in the full project. */
@@ -196,9 +194,11 @@ export type ProjectProgress = Pick<DubbingProject, 'status' | 'progressPercent' 
  * while a dub runs, and the full project costs a read per language plus the transcript, signed URLs and the whole transcript in the answer.
  */
 export async function getProjectProgress(workspaceId: string, id: string): Promise<ProjectProgress | null> {
-  const [snap] = await db.getAll(projectsCol(workspaceId).doc(id), { fieldMask: ['status', 'progressPercent', 'currentProcessingMessage', 'updatedAt'] });
-  if (!snap.exists) return null;
-  const data = snap.data() as Partial<ProjectProgress>;
+  const data = (await projectsCol().findOne(
+    { _id: id, workspaceId },
+    { projection: { _id: 0, status: 1, progressPercent: 1, currentProcessingMessage: 1, updatedAt: 1 } }
+  )) as Partial<ProjectProgress> | null;
+  if (!data) return null;
   return {
     status: data.status ?? 'draft',
     progressPercent: data.progressPercent ?? 0,
@@ -208,10 +208,14 @@ export async function getProjectProgress(workspaceId: string, id: string): Promi
   };
 }
 
+// The workspace's projects without their lines, for lists; a project's lines come with getStoredProject.
+export async function listProjectSummaries(workspaceId: string): Promise<StoredProject[]> {
+  return loadProjectSummaries(workspaceId);
+}
+
 export async function listStoredProjects(workspaceId: string): Promise<StoredProject[]> {
-  const snap = await projectsCol(workspaceId).orderBy('createdAt', 'desc').get();
-  const loaded = await Promise.all(snap.docs.map((d) => loadProject(d.ref)));
-  return loaded.filter((p): p is StoredProject => p !== null);
+  const docs = await projectsCol().find({ workspaceId }).sort({ createdAt: -1 }).toArray();
+  return loadProjects(workspaceId, docs);
 }
 
 // Accepts the familiar all-in-one patch; segment fields are written to their own documents, atomically with the rest.
@@ -220,18 +224,17 @@ export async function updateStoredProject(
   id: string,
   patch: Partial<StoredProject>
 ): Promise<StoredProject> {
-  const ref = projectsCol(workspaceId).doc(id);
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const current = snap.exists ? (snap.data() as StoredProject) : undefined;
-    applyPlan(tx, ref, planProjectWrite(ref, current, { ...patch, updatedAt: new Date().toISOString() }));
+  await withTransaction(async (session) => {
+    const current = await loadProjectMeta(workspaceId, id, session);
+    if (!current) return;
+    await applyPlan(workspaceId, id, planProjectWrite(workspaceId, id, current, { ...patch, updatedAt: new Date().toISOString() }), session);
   });
-  return (await loadProject(ref))!;
+  return (await loadProject(workspaceId, id))!;
 }
 
 // Removes the project together with its transcript and per-language documents.
 export async function deleteStoredProject(workspaceId: string, id: string): Promise<void> {
-  await db.recursiveDelete(projectsCol(workspaceId).doc(id));
+  await withTransaction((session) => deleteProjectDocuments(workspaceId, id, session));
 }
 
 const DEFAULT_USAGE: UserUsageStats = {
@@ -307,15 +310,23 @@ function ledgerOf(usage: StoredUsage): Partial<StoredUsage> {
   return ledger;
 }
 
+// The stored ledger, without the database's own key; read inside the caller's transaction when there is one.
+async function readUsage(workspaceId: string, session?: ClientSession): Promise<StoredUsage | undefined> {
+  return ((await usageCol().findOne({ _id: workspaceId }, { session, projection: { _id: 0 } })) as StoredUsage | null) ?? undefined;
+}
+
+async function writeUsage(workspaceId: string, fields: Partial<StoredUsage>, session?: ClientSession): Promise<void> {
+  const update = mergeUpdate(fields as Record<string, unknown>);
+  if (update.$set || update.$unset) await usageCol().updateOne({ _id: workspaceId }, update, { upsert: true, session });
+}
+
 export async function getUsage(workspaceId: string): Promise<UserUsageStats> {
-  const ref = usageDoc(workspaceId);
-  const [snap, plan] = await Promise.all([ref.get(), planForWorkspace(workspaceId)]);
-  const stored = snap.exists ? (snap.data() as StoredUsage) : undefined;
+  const [stored, plan] = await Promise.all([readUsage(workspaceId), planForWorkspace(workspaceId)]);
   const usage = rollUsage(stored, plan);
   if (!stored || stored.usagePeriod !== usage.usagePeriod) {
-    await ref.set(ledgerOf(usage), { merge: true });
+    await writeUsage(workspaceId, ledgerOf(usage));
   }
-  // Storage is measured from the bucket rather than trusted from the old counter; the counter is only a fallback if listing fails.
+  // Storage is measured from GridFS rather than trusted from the old counter; the counter is only a fallback if measuring fails.
   const storageUsedMb = await workspaceStorageBytes(workspaceId).then(bytesToMb, () => usage.storageUsedMb);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const { voiceSecondsCarry, ...shown } = usage;
@@ -332,8 +343,8 @@ const roundMinutes = (m: number) => Math.round(m * 10) / 10;
  * the limit strict: two dubs started together cannot both slip under it.
  */
 export async function reserveDubMinutes(workspaceId: string, minutes: number): Promise<void> {
-  await db.runTransaction(async (tx) => {
-    (await prepareReservation(tx, workspaceId, minutes)).commit();
+  await withTransaction(async (session) => {
+    await (await prepareReservation(session, workspaceId, minutes)).commit();
   });
 }
 
@@ -367,46 +378,43 @@ function assertCovered(usage: StoredUsage, plan: Plan, minutes: number, wording:
 
 // Read half of a reservation inside a larger transaction: checks the allowance now and returns commit() for after the caller reads.
 export async function prepareReservation(
-  tx: FirebaseFirestore.Transaction,
+  session: ClientSession,
   workspaceId: string,
   minutes: number,
   wording: ChargeWording = DUB_WORDING
-): Promise<{ period: string; commit: () => void }> {
-  const ref = usageDoc(workspaceId);
+): Promise<{ period: string; commit: () => Promise<void> }> {
   const plan = await planForWorkspace(workspaceId);
-  const snap = await tx.get(ref);
-  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
+  const usage = rollUsage(await readUsage(workspaceId, session), plan);
   assertCovered(usage, plan, minutes, wording);
   return {
     period: usage.usagePeriod!,
-    commit: () => tx.set(ref, { ...ledgerOf(usage), minutesDubbed: roundMinutes(usage.minutesDubbed + minutes) }, { merge: true }),
+    commit: () => writeUsage(workspaceId, { ...ledgerOf(usage), minutesDubbed: roundMinutes(usage.minutesDubbed + minutes) }, session),
   };
 }
 
 // Gives back minutes for languages that failed; only within the same month, and never below zero.
 export async function refundDubMinutes(workspaceId: string, minutes: number, period: string): Promise<void> {
-  await db.runTransaction(async (tx) => {
-    (await prepareRefund(tx, workspaceId, minutes, period)).commit();
+  await withTransaction(async (session) => {
+    await (await prepareRefund(session, workspaceId, minutes, period)).commit();
   });
 }
 
 // Read half of a refund (see prepareReservation); `refunded` is what will actually be given back, 0 once the month has rolled over.
 export async function prepareRefund(
-  tx: FirebaseFirestore.Transaction,
+  session: ClientSession,
   workspaceId: string,
   minutes: number,
   period: string
-): Promise<{ refunded: number; commit: () => void }> {
-  if (minutes <= 0) return { refunded: 0, commit: () => undefined };
-  const ref = usageDoc(workspaceId);
+): Promise<{ refunded: number; commit: () => Promise<void> }> {
+  const nothing = async () => undefined;
+  if (minutes <= 0) return { refunded: 0, commit: nothing };
   const plan = await planForWorkspace(workspaceId);
-  const snap = await tx.get(ref);
-  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
-  if (usage.usagePeriod !== period) return { refunded: 0, commit: () => undefined };
+  const usage = rollUsage(await readUsage(workspaceId, session), plan);
+  if (usage.usagePeriod !== period) return { refunded: 0, commit: nothing };
   const refunded = Math.min(roundMinutes(minutes), usage.minutesDubbed);
   return {
     refunded,
-    commit: () => tx.set(ref, { ...ledgerOf(usage), minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - minutes)) }, { merge: true }),
+    commit: () => writeUsage(workspaceId, { ...ledgerOf(usage), minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - minutes)) }, session),
   };
 }
 
@@ -415,9 +423,9 @@ export async function prepareRefund(
  * under the allowance; settleVoiceMinutes then swaps the hold for what the clip really took. Returns the usage period to settle in.
  */
 export async function reserveVoiceMinutes(workspaceId: string, minutes: number): Promise<string> {
-  return db.runTransaction(async (tx) => {
-    const reservation = await prepareReservation(tx, workspaceId, minutes, VOICE_WORDING);
-    reservation.commit();
+  return withTransaction(async (session) => {
+    const reservation = await prepareReservation(session, workspaceId, minutes, VOICE_WORDING);
+    await reservation.commit();
     return reservation.period;
   });
 }
@@ -431,23 +439,21 @@ const SECONDS_PER_TENTH = 6;
  * 4 seconds over time, not a rounded-up 6 (or a rounded-away 0).
  */
 export async function settleVoiceMinutes(workspaceId: string, reservedMinutes: number, voicedSeconds: number, period: string): Promise<void> {
-  const ref = usageDoc(workspaceId);
   const plan = await planForWorkspace(workspaceId);
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
+  await withTransaction(async (session) => {
+    const usage = rollUsage(await readUsage(workspaceId, session), plan);
     // The period rolled over while the clip was being made: the new one starts from zero and holds nothing of it.
     if (usage.usagePeriod !== period) return;
     const carried = (usage.voiceSecondsCarry ?? 0) + Math.max(0, voicedSeconds);
     const tenths = Math.floor(carried / SECONDS_PER_TENTH + 1e-9);
-    tx.set(
-      ref,
+    await writeUsage(
+      workspaceId,
       {
         ...ledgerOf(usage),
         minutesDubbed: Math.max(0, roundMinutes(usage.minutesDubbed - reservedMinutes + tenths / 10)),
         voiceSecondsCarry: Math.round((carried - tenths * SECONDS_PER_TENTH) * 1000) / 1000,
       },
-      { merge: true }
+      session
     );
   });
 }
@@ -457,14 +463,10 @@ export async function settleVoiceMinutes(workspaceId: string, reservedMinutes: n
  * (one language, no paid extras). Refused like that dub would be; nothing is charged.
  */
 export async function assertMinutesToDub(workspaceId: string, videoSeconds: number): Promise<void> {
-  const [snap, plan] = await Promise.all([usageDoc(workspaceId).get(), planForWorkspace(workspaceId)]);
-  const usage = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
+  const [stored, plan] = await Promise.all([readUsage(workspaceId), planForWorkspace(workspaceId)]);
+  const usage = rollUsage(stored, plan);
   // Rounded up to the tenth, so a refusal never reads "needs 5 min but 5 are left" for a video a few seconds over.
   assertCovered(usage, plan, Math.max(0.1, Math.ceil(((videoSeconds || 0) / 60) * 10 - 1e-9) / 10), VIDEO_WORDING);
-}
-
-export function projectRef(workspaceId: string, projectId: string) {
-  return projectsCol(workspaceId).doc(projectId);
 }
 
 export function currentUsagePeriod(): string {
@@ -476,20 +478,18 @@ export async function recordCompletedDub(
   workspaceId: string,
   opts: { wordsAdded: number; targetLanguageCode: string; fileSizeMb: number }
 ): Promise<void> {
-  const ref = usageDoc(workspaceId);
   const plan = await planForWorkspace(workspaceId);
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const current = rollUsage(snap.exists ? (snap.data() as StoredUsage) : undefined, plan);
-    tx.set(
-      ref,
+  await withTransaction(async (session) => {
+    const current = rollUsage(await readUsage(workspaceId, session), plan);
+    await writeUsage(
+      workspaceId,
       {
         ...ledgerOf(current),
         totalProjects: current.totalProjects + 1,
         wordsTranslated: current.wordsTranslated + opts.wordsAdded,
         languagesUsed: current.languagesUsed + 1,
       },
-      { merge: true }
+      session
     );
   });
 }
@@ -507,11 +507,11 @@ function toUserSettings(data: (Partial<ProviderSettings> & { preferences?: Parti
 // Settings are read by every dub, analysis, preview and page load but change only through setSettings on this one process, so a short cache is exact.
 const SETTINGS_CACHE_MS = 60_000;
 const settingsCache = new Map<string, { settings: UserSettings; at: number }>();
-// The ScatterStudio profile only feeds a display name; minutes of staleness are harmless.
+// Profiles change only through setUserProfile on this one process, which clears the entry; the cache saves a read on every page load.
 const PROFILE_CACHE_MS = 5 * 60_000;
 const profileCache = new Map<string, { profile: UserProfile | null; at: number }>();
 
-// Test seam: forgets cached settings and profiles when the emulator is wiped.
+// Test seam: forgets cached settings and profiles when the database is wiped.
 export function clearUserCaches(): void {
   settingsCache.clear();
   profileCache.clear();
@@ -520,8 +520,8 @@ export function clearUserCaches(): void {
 export async function getSettings(uid: string): Promise<UserSettings> {
   const hit = settingsCache.get(uid);
   if (hit && Date.now() - hit.at < SETTINGS_CACHE_MS) return hit.settings;
-  const snap = await settingsDoc(uid).get();
-  const settings = toUserSettings(snap.exists ? snap.data() : undefined);
+  const stored = await settingsCol().findOne({ _id: uid }, { projection: { _id: 0 } });
+  const settings = toUserSettings((stored ?? undefined) as Parameters<typeof toUserSettings>[0]);
   settingsCache.set(uid, { settings, at: Date.now() });
   return settings;
 }
@@ -531,65 +531,38 @@ export async function setSettings(
   uid: string,
   settings: Partial<ProviderSettings> & { preferences?: Partial<UserPreferences> }
 ): Promise<UserSettings> {
-  const ref = settingsDoc(uid);
-  await ref.set(settings, { merge: true });
-  const snap = await ref.get();
-  const saved = toUserSettings(snap.data());
+  const update = mergeUpdate(settings as Record<string, unknown>);
+  if (update.$set || update.$unset) await settingsCol().updateOne({ _id: uid }, update, { upsert: true });
+  const stored = await settingsCol().findOne({ _id: uid }, { projection: { _id: 0 } });
+  const saved = toUserSettings((stored ?? undefined) as Parameters<typeof toUserSettings>[0]);
   settingsCache.set(uid, { settings: saved, at: Date.now() });
   return saved;
 }
 
 export interface UserProfile {
   name: string;
+  // Kept for the client's shape; Dubly accounts have no job title or company of their own.
   role: string;
   workspace: string;
-  // A small data: URL the person chose in Dubly's Settings.
+  // A small data: URL the person chose in Settings.
   avatar: string | null;
 }
 
-// What the person set in Dubly's own Settings; it lives under Dubly's `meta` tree, so ScatterStudio's `users/{uid}` document is never written.
-const dublyProfileDoc = (uid: string) => db.collection('users').doc(uid).collection('meta').doc('profile');
-
-/**
- * Reads the user's profile from `users/{uid}` directly — the parent doc, not one of Dubly's
- * own subcollections under it. This project's Firestore is shared with the rest of
- * ScatterStudio, and that doc (name/role/workspace/api_key/...) is provisioned by whatever
- * ScatterStudio's own onboarding is, not by Dubly. Firebase Auth's displayName is usually
- * empty (only Google sign-in ever fills it), so this is the actual source of truth for a
- * user's name here — and the one other ScatterStudio tools already show.
- *
- * A name or picture the person set in Dubly's Settings wins over it.
- *
- * Deliberately whitelists fields rather than returning the doc as-is: it also holds
- * `api_key`, which must never reach the client.
- */
+/** The name and picture a person chose at sign-up or in Settings; null when they chose neither (or the account is gone). */
 export async function getUserProfile(uid: string): Promise<UserProfile | null> {
   const hit = profileCache.get(uid);
   if (hit && Date.now() - hit.at < PROFILE_CACHE_MS) return hit.profile;
-  const [snap, own] = await Promise.all([db.collection('users').doc(uid).get(), dublyProfileDoc(uid).get()]);
-  const data = snap.exists ? snap.data() || {} : null;
-  const ownData = own.exists ? own.data() || {} : {};
-  const ownName = typeof ownData.displayName === 'string' ? ownData.displayName.trim() : '';
-  const avatar = typeof ownData.avatar === 'string' && ownData.avatar ? ownData.avatar : null;
-  const profile =
-    data || ownName || avatar
-      ? {
-          name: ownName || (typeof data?.name === 'string' ? data.name : ''),
-          role: typeof data?.role === 'string' ? data.role : '',
-          workspace: typeof data?.workspace === 'string' ? data.workspace : '',
-          avatar,
-        }
-      : null;
+  const user = await getUser(uid);
+  const name = user?.displayName?.trim() || '';
+  // Nothing chosen yet reads as no profile, and the app falls back to the email.
+  const profile = user && (name || user.avatar) ? { name, role: '', workspace: '', avatar: user.avatar || null } : null;
   profileCache.set(uid, { profile, at: Date.now() });
   return profile;
 }
 
-// Saves the name and/or picture (null clears it) the person chose in Dubly's Settings, and returns the profile as it now reads.
+// Saves the name and/or picture (null clears it) the person chose in Settings, and returns the profile as it now reads.
 export async function setUserProfile(uid: string, patch: { name?: string; avatar?: string | null }): Promise<UserProfile> {
-  const fields: Record<string, unknown> = { updatedAt: new Date().toISOString() };
-  if (patch.name !== undefined) fields.displayName = patch.name;
-  if (patch.avatar !== undefined) fields.avatar = patch.avatar ?? FieldValue.delete();
-  await dublyProfileDoc(uid).set(fields, { merge: true });
+  await updateUserProfile(uid, { displayName: patch.name, avatar: patch.avatar });
   profileCache.delete(uid);
   return (await getUserProfile(uid))!;
 }

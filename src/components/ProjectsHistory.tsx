@@ -21,7 +21,7 @@ import {
 import { DubbingProject } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { ConfirmDialog } from './ConfirmDialog';
-import { projectProgress, targetsSummary } from '../lib/projectProgress';
+import { projectProgress, targetsSummary, transcriptLineCount } from '../lib/projectProgress';
 import { ProjectStatusBadge } from './ProjectStatusBadge';
 
 interface ProjectsHistoryProps {
@@ -250,7 +250,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                           >
                             <ExternalLink className="w-3.5 h-3.5" />
                           </button>
-                          {onRedubProject && p.transcriptSegments?.length > 0 && (
+                          {onRedubProject && transcriptLineCount(p) > 0 && (
                             <button
                               type="button"
                               onClick={() => onRedubProject(p)}

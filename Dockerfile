@@ -7,13 +7,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY . .
-# Firebase *client* config is baked into the frontend bundle at build time; these values are public by design.
-ARG VITE_FIREBASE_API_KEY
-ARG VITE_FIREBASE_AUTH_DOMAIN
-ARG VITE_FIREBASE_PROJECT_ID
-ARG VITE_FIREBASE_STORAGE_BUCKET
-ARG VITE_FIREBASE_MESSAGING_SENDER_ID
-ARG VITE_FIREBASE_APP_ID
+# The frontend needs no build-time configuration: it talks only to this server, which holds the MongoDB connection.
 RUN npm run build
 
 FROM ${NODE_IMAGE} AS runtime

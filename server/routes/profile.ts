@@ -1,16 +1,15 @@
 import { Router } from '../lib/router';
 import { getUserProfile, setUserProfile } from '../lib/projectRepo';
 import { updateMemberProfile } from '../lib/workspaces';
-import { authAdmin } from '../lib/firebaseAdmin';
-import { clearAccountStateCache, requireWorkspace } from '../lib/auth';
+import { revokeAllSessions } from '../lib/accounts';
+import { clearSessionCookie, requireWorkspace } from '../lib/auth';
 import { schemas, validateBody } from '../lib/validation';
 import { log } from '../lib/log';
 
 export const profileRouter = Router();
 
 /**
- * The name and picture shown across Dubly. The ScatterStudio document they default from is read-only here;
- * what the person changes in Settings is saved on Dubly's side only (projectRepo.setUserProfile).
+ * The name and picture shown across Dubly, chosen at sign-up or in Settings and kept on the account (projectRepo.setUserProfile).
  */
 profileRouter.get('/', async (req, res) => {
   const profile = await getUserProfile(req.uid!);
@@ -38,10 +37,10 @@ profileRouter.patch('/', requireWorkspace, validateBody(schemas.profile), async 
   res.json(profile);
 });
 
-// Ends every session of this account, on every device, this one included; the cached account state is dropped so it applies at once here.
+// Ends every session of this account, on every device, this one included; each request checks its session, so it applies at once.
 profileRouter.post('/sign-out-everywhere', async (req, res) => {
-  await authAdmin.revokeRefreshTokens(req.uid!);
-  clearAccountStateCache(req.uid!);
-  log.info('sessions_revoked', { userId: req.uid });
+  const ended = await revokeAllSessions(req.uid!);
+  clearSessionCookie(req, res);
+  log.info('sessions_revoked', { userId: req.uid, sessions: ended });
   res.status(204).send();
 });

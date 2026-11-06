@@ -1,12 +1,11 @@
 import type { GlossaryEntry } from '../../src/types';
-import { db } from './firebaseAdmin';
+import { col } from './mongo';
 
-// One document per workspace: a few hundred short terms sit far below Firestore's 1 MiB limit.
-const glossaryDoc = (workspaceId: string) => db.collection('workspaces').doc(workspaceId).collection('meta').doc('glossary');
+// One document per workspace (glossaries/{workspaceId}): a few hundred short terms.
+const glossaries = () => col<{ _id: string; entries: GlossaryEntry[]; updatedAt: string; updatedBy: string }>('glossaries');
 
 export async function getGlossary(workspaceId: string): Promise<GlossaryEntry[]> {
-  const snap = await glossaryDoc(workspaceId).get();
-  const entries = snap.exists ? (snap.get('entries') as GlossaryEntry[] | undefined) : undefined;
+  const entries = (await glossaries().findOne({ _id: workspaceId }))?.entries;
   return Array.isArray(entries) ? entries : [];
 }
 
@@ -25,6 +24,6 @@ function normalizeEntry(entry: GlossaryEntry): GlossaryEntry {
 
 export async function saveGlossary(workspaceId: string, entries: GlossaryEntry[], updatedBy: string): Promise<GlossaryEntry[]> {
   const normalized = entries.map(normalizeEntry);
-  await glossaryDoc(workspaceId).set({ entries: normalized, updatedAt: new Date().toISOString(), updatedBy });
+  await glossaries().replaceOne({ _id: workspaceId }, { entries: normalized, updatedAt: new Date().toISOString(), updatedBy }, { upsert: true });
   return normalized;
 }

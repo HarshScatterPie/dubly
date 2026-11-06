@@ -4,26 +4,51 @@
  */
 
 import React, { useEffect, useState } from 'react';
-import { Languages, Loader2, Mail, Lock, UserPlus, MailCheck } from 'lucide-react';
+import { Languages, Loader2, Mail, Lock, UserPlus, MailCheck, User as UserIcon, KeyRound } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
 import { hasPendingInvite, pendingInviteToken } from './InviteAcceptDialog';
 import { workspaceService, type InviteSignupInfo } from '../services/workspaceService';
 import scatterPieLogo from '../assets/scatterpie-logo.png';
 
+const MIN_PASSWORD = 8;
+
+const inputClass =
+  'w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400';
+const primaryButton =
+  'w-full flex items-center justify-center gap-2 py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white font-semibold text-sm shadow-sm transition-all disabled:opacity-60';
+const linkButton = 'text-xs font-semibold text-coral-600 hover:text-coral-700 disabled:opacity-60';
+
+const Field: React.FC<{ icon: React.ElementType; children: React.ReactNode }> = ({ icon: Icon, children }) => (
+  <div className="relative">
+    <Icon className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+    {children}
+  </div>
+);
+
+// Checked here for a quick answer; the server checks the same rules again.
+function passwordIssue(password: string, confirm: string): string | null {
+  if (password.length < MIN_PASSWORD) return `Use at least ${MIN_PASSWORD} characters.`;
+  if (password !== confirm) return 'The two passwords do not match.';
+  return null;
+}
+
+type Mode = 'signin' | 'signup' | 'check-email';
+
 export const Login: React.FC = () => {
-  const { signInWithEmail, sendPasswordReset, error } = useAuth();
-  const [isSigningIn, setIsSigningIn] = useState(false);
+  const { signInWithEmail, signUp, sendPasswordReset, completePasswordReset, cancelPasswordReset, resetToken, notice, error } = useAuth();
+  const [mode, setMode] = useState<Mode>('signin');
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
   const [invited] = useState(hasPendingInvite);
   const [resetState, setResetState] = useState<'idle' | 'sending' | 'sent' | 'needs-email'>('idle');
 
   // A link for an email with no account yet opens a "set your password" form here instead of asking for a password nobody has.
   const [inviteToken] = useState(pendingInviteToken);
   const [signup, setSignup] = useState<InviteSignupInfo | null>(null);
-  const [newPassword, setNewPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
-  const [signupError, setSignupError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!inviteToken) return;
@@ -38,30 +63,66 @@ export const Login: React.FC = () => {
       .catch(() => {});
   }, [inviteToken]);
 
-  const handleSetPassword = async (e: React.FormEvent) => {
+  const switchMode = (next: Mode) => {
+    setMode(next);
+    setFormError(null);
+    setPassword('');
+    setConfirm('');
+    setResetState('idle');
+  };
+
+  const guarded = async (task: () => Promise<void>) => {
+    setBusy(true);
+    setFormError(null);
+    try {
+      await task();
+    } catch (err) {
+      setFormError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleInvitePassword = (e: React.FormEvent) => {
     e.preventDefault();
     if (!signup || !inviteToken) return;
-    if (newPassword.length < 8) {
-      setSignupError('Use at least 8 characters.');
-      return;
-    }
-    if (newPassword !== confirmPassword) {
-      setSignupError('The two passwords do not match.');
-      return;
-    }
-    setSignupError(null);
-    setIsSigningIn(true);
-    try {
-      await workspaceService.claimInviteAccount(inviteToken, newPassword);
-      await signInWithEmail(signup.email, newPassword);
-    } catch (err) {
-      const message = (err as Error).message;
-      setSignupError(message);
-      // Someone created the account in the meantime: send them to the ordinary sign-in.
-      if ((err as { status?: number }).status === 409) setSignup(null);
-    } finally {
-      setIsSigningIn(false);
-    }
+    const issue = passwordIssue(password, confirm);
+    if (issue) return setFormError(issue);
+    void guarded(async () => {
+      try {
+        await workspaceService.claimInviteAccount(inviteToken, password);
+        await signInWithEmail(signup.email, password);
+      } catch (err) {
+        // Someone created the account in the meantime: send them to the ordinary sign-in.
+        if ((err as { status?: number }).status === 409) setSignup(null);
+        throw err;
+      }
+    });
+  };
+
+  const handleReset = (e: React.FormEvent) => {
+    e.preventDefault();
+    const issue = passwordIssue(password, confirm);
+    if (issue) return setFormError(issue);
+    void guarded(() => completePasswordReset(password));
+  };
+
+  const handleSignUp = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim()) return setFormError('Enter your name.');
+    const issue = passwordIssue(password, confirm);
+    if (issue) return setFormError(issue);
+    void guarded(async () => {
+      await signUp(name, email, password);
+      switchMode('check-email');
+    });
+  };
+
+  const handleSignIn = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email || !password) return;
+    // The context shows the reason in `error`; nothing else to do here.
+    void guarded(() => signInWithEmail(email, password).catch(() => undefined));
   };
 
   const handleForgotPassword = async () => {
@@ -78,18 +139,15 @@ export const Login: React.FC = () => {
     }
   };
 
-  const handleEmailSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!email || !password) return;
-    setIsSigningIn(true);
-    try {
-      await signInWithEmail(email, password);
-    } catch {
-      // error surfaced via useAuth().error
-    } finally {
-      setIsSigningIn(false);
-    }
-  };
+  const heading = resetToken ? 'Choose a new password' : signup ? 'Join your team' : mode === 'signup' ? 'Create your account' : 'Dubly Studio';
+  const subheading = resetToken
+    ? 'Set the password you will use to sign in from now on.'
+    : mode === 'signup'
+      ? 'Start dubbing in minutes. We will email you a link to confirm your address.'
+      : mode === 'check-email'
+        ? 'One more step.'
+        : 'Sign in to continue.';
+  const shownError = formError || (mode === 'signin' && !resetToken && !signup ? error : null);
 
   return (
     <div className="relative min-h-screen bg-background text-foreground flex flex-col antialiased overflow-hidden">
@@ -108,14 +166,34 @@ export const Login: React.FC = () => {
               <Languages className="w-6 h-6 text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-foreground tracking-tight font-display">Dubly Studio</h1>
-              <p className="text-xs text-muted-foreground mt-1">
-                Sign in with your ScatterPie account to continue.
-              </p>
+              <h1 className="text-xl font-bold text-foreground tracking-tight font-display">{heading}</h1>
+              <p className="text-xs text-muted-foreground mt-1">{subheading}</p>
             </div>
           </div>
 
-          {signup && (
+          {notice && !resetToken && <p className="text-xs text-center text-[#9A3412] bg-[#FFF4F1] border border-[#FFC4B3] rounded-md p-3">{notice}</p>}
+
+          {/* Opened from a password-reset email. */}
+          {resetToken && (
+            <form onSubmit={handleReset} className="space-y-3">
+              <Field icon={Lock}>
+                <input type="password" required minLength={MIN_PASSWORD} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={`New password (${MIN_PASSWORD}+ characters)`} className={inputClass} />
+              </Field>
+              <Field icon={Lock}>
+                <input type="password" required minLength={MIN_PASSWORD} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Confirm new password" className={inputClass} />
+              </Field>
+              <button type="submit" disabled={busy} className={primaryButton}>
+                {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                <span>Save password &amp; sign in</span>
+              </button>
+              <button type="button" onClick={() => { cancelPasswordReset(); switchMode('signin'); }} className={`${linkButton} block mx-auto`}>
+                Back to sign in
+              </button>
+            </form>
+          )}
+
+          {/* A brand-new invitee chooses their first password. */}
+          {!resetToken && signup && (
             <>
               <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
                 <UserPlus className="w-4 h-4 shrink-0 mt-0.5" />
@@ -124,142 +202,114 @@ export const Login: React.FC = () => {
                   {signup.role === 'admin' ? 'an Admin' : 'an Editor'}. Choose a password to create your account and join.
                 </p>
               </div>
-              <form onSubmit={handleSetPassword} className="space-y-3">
-                <div className="relative">
-                  <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                  <input
-                    type="email"
-                    readOnly
-                    value={signup.email}
-                    className="w-full pl-10 pr-3 py-2.5 rounded-md bg-slate-50 border border-border text-sm text-muted-foreground"
-                  />
-                </div>
-                <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                  <input
-                    type="password"
-                    required
-                    minLength={8}
-                    autoComplete="new-password"
-                    value={newPassword}
-                    onChange={(e) => setNewPassword(e.target.value)}
-                    placeholder="Create a password (8+ characters)"
-                    className="w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
-                  />
-                </div>
-                <div className="relative">
-                  <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-                  <input
-                    type="password"
-                    required
-                    minLength={8}
-                    autoComplete="new-password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Confirm password"
-                    className="w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={isSigningIn}
-                  className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white font-semibold text-sm shadow-sm transition-all disabled:opacity-60"
-                >
-                  {isSigningIn && <Loader2 className="w-4 h-4 animate-spin" />}
+              <form onSubmit={handleInvitePassword} className="space-y-3">
+                <Field icon={Mail}>
+                  <input type="email" readOnly value={signup.email} className="w-full pl-10 pr-3 py-2.5 rounded-md bg-slate-50 border border-border text-sm text-muted-foreground" />
+                </Field>
+                <Field icon={Lock}>
+                  <input type="password" required minLength={MIN_PASSWORD} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={`Create a password (${MIN_PASSWORD}+ characters)`} className={inputClass} />
+                </Field>
+                <Field icon={Lock}>
+                  <input type="password" required minLength={MIN_PASSWORD} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Confirm password" className={inputClass} />
+                </Field>
+                <button type="submit" disabled={busy} className={primaryButton}>
+                  {busy && <Loader2 className="w-4 h-4 animate-spin" />}
                   <span>Set password &amp; continue</span>
                 </button>
               </form>
-              {signupError && (
-                <p className="text-xs text-danger text-center bg-red-50 border border-red-200 rounded-md p-3">{signupError}</p>
+            </>
+          )}
+
+          {!resetToken && !signup && mode === 'check-email' && (
+            <div className="space-y-4">
+              <p className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-3">
+                <MailCheck className="w-4 h-4 shrink-0" />
+                <span>
+                  We sent a confirmation link to <strong>{email.trim()}</strong>. Open it to finish creating your account; it works for 24 hours.
+                  Check the spam folder too. If this address already has an account, the email explains how to get back in.
+                </span>
+              </p>
+              <button type="button" onClick={() => switchMode('signin')} className={primaryButton}>
+                Back to sign in
+              </button>
+            </div>
+          )}
+
+          {!resetToken && !signup && mode === 'signup' && (
+            <form onSubmit={handleSignUp} className="space-y-3">
+              <Field icon={UserIcon}>
+                <input type="text" required maxLength={60} autoComplete="name" value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" className={inputClass} />
+              </Field>
+              <Field icon={Mail}>
+                <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" className={inputClass} />
+              </Field>
+              <Field icon={Lock}>
+                <input type="password" required minLength={MIN_PASSWORD} autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={`Password (${MIN_PASSWORD}+ characters)`} className={inputClass} />
+              </Field>
+              <Field icon={Lock}>
+                <input type="password" required minLength={MIN_PASSWORD} autoComplete="new-password" value={confirm} onChange={(e) => setConfirm(e.target.value)} placeholder="Confirm password" className={inputClass} />
+              </Field>
+              <button type="submit" disabled={busy} className={primaryButton}>
+                {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                <span>Create account</span>
+              </button>
+              <p className="text-center text-xs text-muted-foreground">
+                Already have an account?{' '}
+                <button type="button" onClick={() => switchMode('signin')} className={linkButton}>
+                  Sign in
+                </button>
+              </p>
+            </form>
+          )}
+
+          {!resetToken && !signup && mode === 'signin' && (
+            <>
+              {invited && (
+                <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
+                  <UserPlus className="w-4 h-4 shrink-0 mt-0.5" />
+                  <p>
+                    You have been invited to a Dubly workspace. Sign in with the <strong>email the invitation was sent to</strong>. Don&apos;t know its
+                    password? Use <strong>Forgot password?</strong> below.
+                  </p>
+                </div>
+              )}
+              <form onSubmit={handleSignIn} className="space-y-3">
+                <Field icon={Mail}>
+                  <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" className={inputClass} />
+                </Field>
+                <Field icon={Lock}>
+                  <input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className={inputClass} />
+                </Field>
+                <div className="flex justify-end">
+                  <button type="button" onClick={handleForgotPassword} disabled={resetState === 'sending'} className={linkButton}>
+                    {resetState === 'sending' ? 'Sending reset link…' : 'Forgot password?'}
+                  </button>
+                </div>
+                <button type="submit" disabled={busy} className={primaryButton}>
+                  {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Sign In</span>
+                </button>
+              </form>
+              <p className="text-center text-xs text-muted-foreground">
+                New to Dubly?{' '}
+                <button type="button" onClick={() => switchMode('signup')} className={linkButton}>
+                  Create an account
+                </button>
+              </p>
+              {resetState === 'needs-email' && <p className="text-xs text-center text-muted-foreground">Enter your email above first, then press Forgot password? again.</p>}
+              {resetState === 'sent' && (
+                <p className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-3">
+                  <MailCheck className="w-4 h-4 shrink-0" />
+                  <span>
+                    If an account exists for <strong>{email.trim()}</strong>, a link to set a new password is on its way. It works for 30 minutes. Check
+                    the inbox and the spam folder.
+                  </span>
+                </p>
               )}
             </>
           )}
 
-          {!signup && invited && (
-            <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
-              <UserPlus className="w-4 h-4 shrink-0 mt-0.5" />
-              <p>
-                You have been invited to a Dubly workspace. Sign in with the <strong>email the invitation was sent to</strong>, using that
-                account&apos;s existing password (the same as ScatterStudio). Don&apos;t know it? Use <strong>Forgot password?</strong> below.
-              </p>
-            </div>
-          )}
-
-          {!signup && (
-          <form onSubmit={handleEmailSubmit} className="space-y-3">
-            <div className="relative">
-              <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <input
-                type="email"
-                required
-                autoComplete="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="Email address"
-                className="w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
-              />
-            </div>
-            <div className="relative">
-              <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
-              <input
-                type="password"
-                required
-                minLength={6}
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="Password"
-                className="w-full pl-10 pr-3 py-2.5 rounded-md bg-white border border-border text-sm text-foreground placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
-              />
-            </div>
-
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={handleForgotPassword}
-                disabled={resetState === 'sending'}
-                className="text-xs font-semibold text-coral-600 hover:text-coral-700 disabled:opacity-60"
-              >
-                {resetState === 'sending' ? 'Sending reset link…' : 'Forgot password?'}
-              </button>
-            </div>
-
-            <button
-              type="submit"
-              disabled={isSigningIn}
-              className="w-full flex items-center justify-center gap-2 py-2.5 rounded-md bg-coral-500 hover:bg-coral-600 text-white font-semibold text-sm shadow-sm transition-all disabled:opacity-60"
-            >
-              {isSigningIn && <Loader2 className="w-4 h-4 animate-spin" />}
-              <span>Sign In</span>
-            </button>
-          </form>
-          )}
-
-          {/* Accounts are provisioned by ScatterPie; the only way to get one here is an emailed invitation, handled above. */}
-          {!signup && (
-            <p className="text-center text-xs text-muted-foreground">
-              Don&apos;t have an account? Contact <span className="font-semibold text-foreground">ScatterPie</span> to get access.
-            </p>
-          )}
-
-          {resetState === 'needs-email' && (
-            <p className="text-xs text-center text-muted-foreground">Enter your email above first, then press Forgot password? again.</p>
-          )}
-          {resetState === 'sent' && (
-            <p className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-3">
-              <MailCheck className="w-4 h-4 shrink-0" />
-              <span>
-                If a ScatterPie account exists for <strong>{email.trim()}</strong>, a link to set a new password is on its way. Check the inbox and the
-                spam folder, then sign in here with the new password.
-              </span>
-            </p>
-          )}
-
-          {error && (
-            <p className="text-xs text-danger text-center bg-red-50 border border-red-200 rounded-md p-3">
-              {error}
-            </p>
-          )}
+          {shownError && <p className="text-xs text-danger text-center bg-red-50 border border-red-200 rounded-md p-3">{shownError}</p>}
         </div>
       </main>
 

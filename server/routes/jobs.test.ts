@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { createUser, mergeUsage, minutesUsedIn, patchJob, readProject, resetEmulators, seedProject, startApi, writeProject, type TestApi, type TestUser } from '../test/helpers';
 import { setTranscriptionPipelineForTests, type TranscriptionOutcome } from './projects';
 import { setDubPipelineForTests, type PipelineResult } from './dub';
 import { getJob, reconcileStaleJobs, requestCancel, STALE_AFTER_MS, writeProjectForJob, type DubJob } from '../lib/jobs';
@@ -47,7 +47,7 @@ async function seed(): Promise<Fx> {
   const user = await createUser('jobs@team.test');
   const workspaceId = (await api.call('GET', '/api/workspace', { token: user.token })).body.id as string;
   const projectId = `proj-jobs-${Math.random().toString(36).slice(2)}`;
-  await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).set({
+  await seedProject(workspaceId, {
     id: projectId,
     ownerUid: user.uid,
     title: 'Jobs',
@@ -72,7 +72,6 @@ async function seed(): Promise<Fx> {
   return { user, workspaceId, projectId };
 }
 
-const projectDoc = (f: Fx) => db.collection('workspaces').doc(f.workspaceId).collection('projects').doc(f.projectId);
 const transcribe = (f: Fx, async = true) =>
   api.call('POST', `/api/projects/${f.projectId}/transcribe`, { token: f.user.token, headers: async ? { Prefer: 'respond-async' } : {} });
 const jobView = (f: Fx, jobId: string) => api.call('GET', `/api/projects/${f.projectId}/jobs/${jobId}`, { token: f.user.token });
@@ -139,7 +138,7 @@ describe('asynchronous transcription', () => {
     expect(job.errorCode).toBe('ANALYSIS_FAILED');
     expect(job.message).toBe('Analysis failed. Please try again.');
     expect(JSON.stringify(job)).not.toContain('PERMISSION_DENIED');
-    expect((await projectDoc(f).get()).get('status')).toBe('draft');
+    expect((await readProject(f.workspaceId, f.projectId))?.status).toBe('draft');
 
     setTranscriptionPipelineForTests(async () => {
       throw new HttpError(503, 'SERVER_BUSY', 'Dubly is busy processing other videos right now.');
@@ -165,7 +164,7 @@ describe('asynchronous transcription', () => {
     proceed.resolve();
     const job = await settled(f, jobId);
     expect(job).toMatchObject({ status: 'cancelled', errorCode: 'CANCELLED' });
-    const project = (await projectDoc(f).get()).data()!;
+    const project = (await readProject(f.workspaceId, f.projectId))!;
     expect(project.activeJobId).toBeUndefined();
     expect(project.currentProcessingMessage).toBe('');
     // The project is free again.
@@ -191,10 +190,10 @@ describe('asynchronous transcription', () => {
     const f = await seed();
     setTranscriptionPipelineForTests(() => new Promise(() => undefined));
     const { jobId } = (await transcribe(f)).body;
-    await db.collection('jobs').doc(jobId).update({ heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
+    await patchJob(jobId, { heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
     expect(await reconcileStaleJobs(new Set())).toEqual([jobId]);
     expect((await getJob(jobId))?.errorCode).toBe('INTERRUPTED');
-    const project = (await projectDoc(f).get()).data()!;
+    const project = (await readProject(f.workspaceId, f.projectId))!;
     expect(project.status).toBe('draft');
     expect(project.activeJobId).toBeUndefined();
   });
@@ -211,7 +210,7 @@ describe('asynchronous transcription', () => {
 });
 
 describe('cancelling dubs', () => {
-  const minutesUsed = async (f: Fx) => ((await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').get()).get('minutesDubbed') as number) ?? 0;
+  const minutesUsed = async (f: Fx) => await minutesUsedIn(f.workspaceId);
 
   it('refunds only the languages that had not finished', async () => {
     const f = await seed();
@@ -234,7 +233,7 @@ describe('cancelling dubs', () => {
 
   it('cancels a queued dub on the spot with a full refund, and it never starts', async () => {
     const f = await seed();
-    await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').set({ minutesDubbed: 0, usagePeriod: currentUsagePeriod() }, { merge: true });
+    await mergeUsage(f.workspaceId, { minutesDubbed: 0, usagePeriod: currentUsagePeriod() });
     // Two other projects in the workspace fill its two dub slots.
     const gate = deferred<PipelineResult>();
     let runs = 0;
@@ -258,15 +257,15 @@ describe('cancelling dubs', () => {
 // Another dubbable project in the same workspace.
 async function seed2(f: Fx): Promise<string> {
   const id = `proj-other-${Math.random().toString(36).slice(2)}`;
-  const base = (await projectDoc(f).get()).data()!;
-  await db.collection('workspaces').doc(f.workspaceId).collection('projects').doc(id).set({ ...base, id, targetLanguages: ['hi'] });
+  const base = (await readProject(f.workspaceId, f.projectId))!;
+  await seedProject(f.workspaceId, { ...base, id, targetLanguages: ['hi'] });
   return id;
 }
 
 describe('GET /api/projects/:id/progress', () => {
   it('answers with just the progress fields, never cached', async () => {
     const f = await seed();
-    await projectDoc(f).update({ status: 'processing', progressPercent: 42, currentProcessingMessage: '[1/2] Hindi: generating neural voice audio (4/10)...' });
+    await writeProject(f.workspaceId, f.projectId, { status: 'processing', progressPercent: 42, currentProcessingMessage: '[1/2] Hindi: generating neural voice audio (4/10)...' });
 
     const res = await fetch(`${api.baseUrl}/api/projects/${f.projectId}/progress`, { headers: { Authorization: `Bearer ${f.user.token}` } });
     expect(res.status).toBe(200);
@@ -282,7 +281,7 @@ describe('GET /api/projects/:id/progress', () => {
 
   it('tracks the full project through a finished dub', async () => {
     const f = await seed();
-    await projectDoc(f).update({ status: 'completed', progressPercent: 100, currentProcessingMessage: null });
+    await writeProject(f.workspaceId, f.projectId, { status: 'completed', progressPercent: 100, currentProcessingMessage: null });
     const progress = (await api.call('GET', `/api/projects/${f.projectId}/progress`, { token: f.user.token })).body;
     const full = (await api.call('GET', `/api/projects/${f.projectId}`, { token: f.user.token })).body;
     expect(progress.status).toBe(full.status);

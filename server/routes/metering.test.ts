@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { createUser, readProject, replaceUsage, resetEmulators, seedProject as storeProject, startApi, usageOf as storedUsage, type TestApi, type TestUser } from '../test/helpers';
 import { env } from '../lib/env';
 import { silenceWav } from '../lib/audioUtils';
 import { currentUsagePeriod } from '../lib/projectRepo';
@@ -43,7 +43,6 @@ async function until(ok: () => Promise<boolean> | boolean): Promise<void> {
 const voice = VOICES[0];
 const workspaceIdOf = async (user: TestUser) => (await api.call('GET', '/api/workspace', { token: user.token })).body.id as string;
 const usageOf = async (user: TestUser) => (await api.call('GET', '/api/usage', { token: user.token })).body;
-const ledgerRef = (workspaceId: string) => db.collection('workspaces').doc(workspaceId).collection('meta').doc('usage');
 const speak = (user: TestUser, text: string, extra: Record<string, unknown> = {}) =>
   api.call('POST', '/api/tts/generate', { token: user.token, body: { text, voiceId: voice.id, ...extra } });
 
@@ -68,7 +67,7 @@ describe('voice clips (Studio voiceovers and line previews)', () => {
     }
     // 4 s, 8 s, 12 s of voice: the ledger counts tenths of a minute (6 s), and nothing is rounded up or lost on the way.
     expect(minutes).toEqual([0, 0.1, 0.2]);
-    expect((await ledgerRef(await workspaceIdOf(user)).get()).get('voiceSecondsCarry')).toBe(0);
+    expect((await storedUsage(await workspaceIdOf(user)))?.voiceSecondsCarry).toBe(0);
     expect(await usageOf(user)).not.toHaveProperty('voiceSecondsCarry');
   });
 
@@ -88,7 +87,7 @@ describe('voice clips (Studio voiceovers and line previews)', () => {
   it('hold minutes before the voice is made: one the allowance cannot cover is refused without calling the voice', async () => {
     env.newWorkspacePlan = 'free';
     const user = await createUser('trial@meter.test');
-    await ledgerRef(await workspaceIdOf(user)).set({ minutesDubbed: 4.9, usagePeriod: 'lifetime' });
+    await replaceUsage(await workspaceIdOf(user), { minutesDubbed: 4.9, usagePeriod: 'lifetime' });
     const voiced = voiceLasting(3);
 
     // 100 characters are held as 0.2 min (12 characters a second, in whole tenths), more than the 0.1 left.
@@ -110,11 +109,11 @@ describe('voice clips (Studio voiceovers and line previews)', () => {
     setSpeechSynthesisForTests(() => gate.promise);
 
     const pending = speak(user, 'A line the provider will fail on.');
-    await until(async () => (await ledgerRef(workspaceId).get()).get('minutesDubbed') === 0.1);
+    await until(async () => (await storedUsage(workspaceId))?.minutesDubbed === 0.1);
     gate.reject(new Error('provider down'));
     expect((await pending).status).toBe(500);
     expect((await usageOf(user)).minutesDubbed).toBe(0);
-    expect((await ledgerRef(workspaceId).get()).get('usagePeriod')).toBe(currentUsagePeriod());
+    expect((await storedUsage(workspaceId))?.usagePeriod).toBe(currentUsagePeriod());
   });
 
   it('are made at most two at a time per workspace', async () => {
@@ -145,7 +144,7 @@ async function seedProject(user: TestUser, fields: Record<string, unknown> = {})
   const workspaceId = await workspaceIdOf(user);
   const projectId = `proj-meter-${Math.random().toString(36).slice(2)}`;
   const now = new Date().toISOString();
-  await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).set({
+  await storeProject(workspaceId, {
     id: projectId,
     ownerUid: user.uid,
     title: 'Meter',
@@ -190,7 +189,7 @@ describe('analysis', () => {
     expect(refused.status).toBe(403);
     expect(refused.body.error.code).toBe('QUOTA_EXCEEDED');
     expect(refused.body.error.message).toMatch(/Dubbing this video needs 6\.1 min but only 5 free min are left\. Use a shorter video/);
-    expect((await db.collection('workspaces').doc(long.workspaceId).collection('projects').doc(long.projectId).get()).get('activeJobId')).toBeUndefined();
+    expect((await readProject(long.workspaceId, long.projectId))?.activeJobId).toBeUndefined();
 
     const short = await seedProject(user, { videoDuration: 300 });
     expect((await api.call('POST', `/api/projects/${short.projectId}/transcribe`, { token: user.token })).status).toBe(200);
@@ -221,7 +220,7 @@ describe('translation', () => {
       languageOutputs: { hi: { languageCode: 'hi', status: 'draft', progressPercent: 0, localizedSegments: [hiLine] } },
       localizedSegments: [hiLine],
     });
-    await ledgerRef(workspaceId).set({ minutesDubbed: 50, usagePeriod: currentUsagePeriod() });
+    await replaceUsage(workspaceId, { minutesDubbed: 50, usagePeriod: currentUsagePeriod() });
 
     const reused = await translate(user, projectId, { targetLanguageCodes: ['hi'] });
     expect(reused.status).toBe(200);

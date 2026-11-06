@@ -16,7 +16,7 @@ One process runs everything: the API, the built frontend, jobs, and scheduled ma
 **How a change reaches production:** push to `main` → CI and the Release gate run side by side (the gate takes longest, ≈15–20 min, mostly waiting for GitHub's CodeQL scan of the same commit) → within 2 minutes of both passing, the VM deploys it. A commit that fails either is never deployed. The workflows the VM waits for can be changed with `DUBLY_REQUIRED_WORKFLOWS` in `runtime.env`.
 
 **What the Release gate checks** (`.github/workflows/release-gate.yml`; each job writes its numbers to the run's summary page):
-- **Dub performance and model-call budgets** (`npm run test:perf`, `server/perf/pipeline.perf.ts`): uploads a generated two-voice video, analyses, translates, dubs, re-dubs it unchanged, adds Hinglish, dubs that and retakes one line, all through the real API with real ffmpeg, voice activity and face detection against the Firebase emulators; only Google's models are faked (instant, counted, with the ~10 a minute Gemini 2.5 TTS quota). It fails if a step pays for model work it already had (a re-dub with nothing changed must make **no** model call; a one-line retake at most 3 voice and 4 text calls), or exceeds its time per video minute, main-thread stall, API latency during a dub, or memory budget. `PERF_BUDGET_SCALE` scales the time budgets.
+- **Dub performance and model-call budgets** (`npm run test:perf`, `server/perf/pipeline.perf.ts`): uploads a generated two-voice video, analyses, translates, dubs, re-dubs it unchanged, adds Hinglish, dubs that and retakes one line, all through the real API with real ffmpeg, voice activity and face detection against a throwaway MongoDB; only Google's models are faked (instant, counted, with the ~10 a minute Gemini 2.5 TTS quota). It fails if a step pays for model work it already had (a re-dub with nothing changed must make **no** model call; a one-line retake at most 3 voice and 4 text calls), or exceeds its time per video minute, main-thread stall, API latency during a dub, or memory budget. `PERF_BUDGET_SCALE` scales the time budgets.
 - **Production start, headers and bundle size**: the frontend's gzip size (`server/perf/bundle-budget.mjs`), then the server started exactly as `dubly.service` starts it (`server/perf/prod-smoke.mjs`): boot time, the built app and its security and cache headers, the API refusing unsigned requests, a 400-request burst, memory, and a clean stop on SIGTERM.
 - **Advisories, workflows and code scanning**: no critical advisory in any dependency and no high one in what ships, valid workflows (actionlint), and no open high or critical CodeQL alert on `main` (it waits for CodeQL to finish analysing the commit). `js/missing-rate-limiting` is allowed: CodeQL only recognises third-party rate-limit packages, while every route it reports is limited by `server/lib/rateLimit.ts` or `requireAuth`. Dismiss those alerts as false positives on GitHub to keep the Security tab readable.
 
@@ -46,10 +46,7 @@ The same app ships as a Docker image, for hosts that run containers.
 ## Build
 
 ```bash
-docker build -t dubly:<git-sha> \
-  --build-arg VITE_FIREBASE_API_KEY=… --build-arg VITE_FIREBASE_AUTH_DOMAIN=… \
-  --build-arg VITE_FIREBASE_PROJECT_ID=… --build-arg VITE_FIREBASE_STORAGE_BUCKET=… \
-  --build-arg VITE_FIREBASE_MESSAGING_SENDER_ID=… --build-arg VITE_FIREBASE_APP_ID=… .
+docker build -t dubly:<git-sha> .
 ```
 - **Reproducibility:** `npm ci` from `package-lock.json`, and the base image is `node:24-trixie-slim`, which includes Debian's ffmpeg. For byte-for-byte rebuilds, pin the base image by digest (`--build-arg NODE_IMAGE=node:24-trixie-slim@sha256:…`), and tag images by git SHA.
 - **Not in the image:** the optional Python engines (CTC word timing, lip-sync, background separation). They need a torch virtualenv, so without it those features report as unavailable and the app falls back as designed.
@@ -61,11 +58,12 @@ docker build -t dubly:<git-sha> \
 docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
   --stop-timeout 40 \
   -e NODE_ENV=production -e WEB_ORIGIN=https://dubly.example.com -e TRUST_PROXY=1 \
-  -e VERTEX_PROJECT_ID=… -e FIREBASE_STORAGE_BUCKET=… \
-  -e CREDENTIALS_MODE=adc -e FIREBASE_PROJECT_ID=scatter-studio-live-2026 \
+  -e VERTEX_PROJECT_ID=… -e CREDENTIALS_MODE=adc \
+  -e MONGODB_URI='mongodb://dubly_app:…@host.docker.internal:27017/dubly?authSource=admin&directConnection=true' -e MONGODB_DB=dubly \
   -v dubly-cache:/app/server/cache \
   dubly:<git-sha>
 ```
+- **Database:** the container reaches MongoDB on the host (or a MongoDB container on the same Docker network); it stays bound to localhost or that private network, never a public port. See MONGODB.md.
 - **Credentials:** prefer `CREDENTIALS_MODE=adc` with the VM or Cloud Run service account (permissions are listed in SECURITY.md). If key files are unavoidable, mount them read-only: `-v /secure/dubly-credentials:/app/server/credentials:ro`. Never bake them into the image.
 - **Secret settings** such as `GEMINI_API_KEY` and `SMTP_PASS` come from the platform's secret manager as environment variables, or from a mounted env file with `DUBLY_ENV_FILE`.
 - **Stop timeout:** `--stop-timeout` must be longer than `SHUTDOWN_GRACE_MS` (25 s). Docker's default of 10 s would kill the drain before it finishes.
@@ -88,10 +86,13 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `GEMINI_API_KEY` | — | **Needed for Gemini voices.** Sends Gemini 3.8 voices to the Gemini Developer API's Interactions endpoint (verified 2026-09-29: Flash-Lite and Flash, Hindi, Bhojpuri, Odia, Santali). Use a key on a billed project: a free-tier key runs out after about a dozen lines and its content may be used by Google. Unset, they go to Vertex AI (`VERTEX_PROJECT_ID`, service account) through `generateContent`, but on 2026-09-29 Vertex listed both 3.8 TTS models without serving them (Interactions: "Unsupported model interaction"; generateContent: 404 in global, us, us-central1, us-east5, europe-west4, asia-south1, asia-southeast1). Whenever Gemini cannot voice a line, Chirp 3 HD voices it in the same persona, so dubs still complete |
 | `GEMINI_TTS_PREMIUM_MODEL` | gemini-3.1-flash-tts-preview | Tried first on Gemini voices, only for users who turn on **Premium voices** (Settings → Paid extras). Served by Cloud TTS (verified 2026-09-24) |
 | `GEMINI_REVIEW_MODEL` | gemini-3.5-flash-lite | Listens to every dubbed take next to the original, for users who turn on **AI review** (Settings → Paid extras) |
-| `FIREBASE_STORAGE_BUCKET` | — | Media bucket |
-| `CREDENTIALS_MODE` / `FIREBASE_PROJECT_ID` | keyfile / — | `adc` = no key files |
+| `MONGODB_URI`, `MONGODB_DB` | localhost / dubly | **Required.** The database (a replica set) holding all records and files; the `dubly_app` login (MONGODB.md) |
+| `ALLOW_SIGNUP` | true | Self sign-up on the login screen; `false` = invitations and `server/scripts/create_user.ts` only |
+| `COOKIE_SECURE` | auto | `true` behind HTTPS to always mark the session cookie Secure; auto marks it on HTTPS requests (needs `TRUST_PROXY` behind a proxy) |
+| `MEDIA_URL_SECRET` | random, kept in the database | Key for signed media URLs |
+| `CREDENTIALS_MODE` | keyfile | `adc` = no key files (Google AI only) |
 | `CREDENTIALS_DIR`, `DUBLY_ENV_FILE` | server/credentials, server/.env | Secret locations |
-| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | —, 587, —, —, — | Emails invitations. Any SMTP account works, including the one set as Firebase Auth's custom SMTP. Port 465 uses TLS, and 587 uses STARTTLS. `MAIL_FROM` is the sender, e.g. `Dubly <no-reply@scatterpie.io>`. With `SMTP_HOST` or `MAIL_FROM` empty, invitations are shared by link only. Invite links use `WEB_ORIGIN`, so it must be the address people open Dubly at |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `MAIL_FROM` | —, 587, —, —, — | Emails invitations, sign-up confirmations and password resets. Any SMTP account works. Port 465 uses TLS, and 587 uses STARTTLS. `MAIL_FROM` is the sender, e.g. `Dubly <no-reply@scatterpie.io>`. With `SMTP_HOST` or `MAIL_FROM` empty, invitations are shared by link only, and outside production confirmation and reset links are printed to the server log. Invite links use `WEB_ORIGIN`, so it must be the address people open Dubly at |
 | `NODE_ENV`, `LOG_FORMAT` | —, json when production | Logging format |
 | `TRUST_PROXY` | unset | Proxy hops |
 | `SHUTDOWN_GRACE_MS` | 25000 | Drain window on SIGTERM |
@@ -131,13 +132,13 @@ The monthly minute allowance is 120 minutes per workspace, set in `server/lib/pr
 
 ## Rollback
 - **App:** run the previous image tag (step 3 with the old SHA). Nothing in the data needs undoing, with one exception:
-- **Project storage split** (introduced with this hardening): images from **before** the split can't read split projects. Either roll forward, or run `npx tsx server/scripts/unsplit_projects.ts --apply` with production credentials **before** starting an older image. It lists any project too large to rejoin.
+- **MongoDB move (2026-11-06):** images from before it use Firebase and cannot read MongoDB at all; there is no rolling back past it, only forward.
 - **Invitations:** older images still offer the old "add member" flow. Don't roll back past the invitation change unless you accept reopening finding C-1.
 
 ## First production rollout checklist
-- [ ] Firebase console: self sign-up disabled.
-- [ ] Deployed Firestore/Storage rules reviewed ([FIREBASE-RULES.md](FIREBASE-RULES.md)).
+- [ ] MongoDB as a replica set, localhost only, access control on, `dubly_app` login ([MONGODB.md](MONGODB.md)).
+- [ ] `ALLOW_SIGNUP` set as intended; SMTP configured so confirmation and reset emails go out.
+- [ ] HTTPS in front, then `COOKIE_SECURE=true`.
 - [ ] Runtime service account with the permissions in SECURITY.md; `CREDENTIALS_MODE=adc`.
 - [ ] Backups per [DISASTER-RECOVERY.md](DISASTER-RECOVERY.md).
 - [ ] Log-based metrics and alerts per [RUNBOOK.md](RUNBOOK.md).
-- [ ] Firebase web API key restricted to the app's origins.

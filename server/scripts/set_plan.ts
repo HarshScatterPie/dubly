@@ -1,22 +1,24 @@
 // Operator tool: shows or sets a workspace's plan, by workspace id or a member's email (`npx tsx server/scripts/set_plan.ts owner@acme.com enterprise`).
 import '../lib/env';
-import { authAdmin, db } from '../lib/firebaseAdmin';
+import { closeMongo, col, connectMongo } from '../lib/mongo';
+import { getUserByEmail } from '../lib/accounts';
 import { getPlan, isPlanId, setWorkspacePlan, workspacePlanId } from '../lib/plans';
 
 // An email resolves to the workspace that person is in right now (their team, or their own).
 async function resolveWorkspace(target: string): Promise<string> {
   if (!target.includes('@')) return target;
-  const user = await authAdmin.getUserByEmail(target.trim().toLowerCase());
-  const workspaceId = (await db.collection('workspaceMembership').doc(user.uid).get()).get('workspaceId');
-  if (typeof workspaceId !== 'string' || !workspaceId) throw new Error(`${target} is not in a workspace yet (they have not signed in to Dubly).`);
-  return workspaceId;
+  const user = await getUserByEmail(target);
+  if (!user) throw new Error(`No Dubly account for ${target}.`);
+  const pointer = await col<{ _id: string; workspaceId: string | null }>('memberships').findOne({ _id: user._id });
+  if (!pointer?.workspaceId) throw new Error(`${target} is not in a workspace yet (they have not signed in to Dubly).`);
+  return pointer.workspaceId;
 }
 
 export async function setPlanCommand(target: string, planArg?: string): Promise<string> {
   const workspaceId = await resolveWorkspace(target);
-  const workspace = await db.collection('workspaces').doc(workspaceId).get();
-  if (!workspace.exists) throw new Error(`No workspace ${workspaceId}`);
-  const label = `${workspace.get('name') || 'Unnamed'} (${workspaceId})`;
+  const workspace = await col<{ _id: string; name?: string }>('workspaces').findOne({ _id: workspaceId });
+  if (!workspace) throw new Error(`No workspace ${workspaceId}`);
+  const label = `${workspace.name || 'Unnamed'} (${workspaceId})`;
   const allowance = (plan: { minutesPerMonth: number; renewsMonthly: boolean }) => `${plan.minutesPerMonth} min${plan.renewsMonthly ? '/month' : ' in total'}`;
   if (!planArg) {
     const plan = await getPlan(await workspacePlanId(workspaceId));
@@ -34,14 +36,18 @@ if (process.argv[1]?.endsWith('set_plan.ts')) {
     console.log('Usage: npx tsx server/scripts/set_plan.ts <workspace id | member email> [free | starter | enterprise]');
     process.exit(1);
   }
-  setPlanCommand(target, plan).then(
-    (message) => {
-      console.log(message);
-      process.exit(0);
-    },
-    (err) => {
-      console.error((err as Error).message);
-      process.exit(1);
-    }
-  );
+  connectMongo()
+    .then(() => setPlanCommand(target, plan))
+    .then(
+      async (message) => {
+        console.log(message);
+        await closeMongo();
+        process.exit(0);
+      },
+      async (err) => {
+        console.error((err as Error).message);
+        await closeMongo().catch(() => undefined);
+        process.exit(1);
+      }
+    );
 }

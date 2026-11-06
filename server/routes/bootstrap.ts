@@ -1,6 +1,6 @@
 import { Router } from '../lib/router';
 import { getWorkspace } from '../lib/workspaces';
-import { getSettings, getUsage, getUserProfile, listStoredProjects, toClientProject } from '../lib/projectRepo';
+import { getSettings, getUsage, getUserProfile, listProjectSummaries, toClientSummary } from '../lib/projectRepo';
 
 export const bootstrapRouter = Router();
 
@@ -10,15 +10,16 @@ bootstrapRouter.get('/', async (req, res) => {
     getWorkspace(req.workspaceId!),
     getSettings(req.uid!),
     getUsage(req.workspaceId!),
-    listStoredProjects(req.workspaceId!),
-    // The profile lives in ScatterStudio's data and is optional; the app falls back to the login's own name.
+    // Without their lines: the dashboard needs names, states and counts, and a project's lines come when it is opened.
+    listProjectSummaries(req.workspaceId!),
+    // Optional: the app falls back to the login's own name.
     getUserProfile(req.uid!).catch(() => null),
   ]);
   res.json({
     workspace: { ...workspace, myRole: req.workspaceRole, myUid: req.uid },
     preferences: settings.preferences,
     usage,
-    projects: await Promise.all(stored.map(toClientProject)),
+    projects: await Promise.all(stored.map(toClientSummary)),
     profile,
   });
 });

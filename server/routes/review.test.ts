@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { createUser, minutesUsedIn, resetEmulators, seedProject, startApi, type TestApi, type TestUser } from '../test/helpers';
 import { setDubPipelineForTests, type PipelineResult } from './dub';
 import { getJob, type DubJob } from '../lib/jobs';
 import { currentLineKey } from '../lib/retake';
@@ -132,7 +132,7 @@ async function seedRenderedProject(opts: { legacy?: boolean } = {}): Promise<Fix
   if (!opts.legacy) {
     project.localizedSegments = project.localizedSegments.map((s) => ({ ...s, renderKey: currentLineKey(project, 'hi', s) }));
   }
-  await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).set(project);
+  await seedProject(workspaceId, project as unknown as Record<string, unknown> & { id: string });
   return { user, workspaceId, projectId };
 }
 
@@ -141,7 +141,7 @@ const saveLines = (f: Fixture, lines: unknown[]) =>
   api.call('PATCH', `/api/projects/${f.projectId}/languages/hi/segments`, { token: f.user.token, body: { localizedSegments: lines } });
 const retake = (f: Fixture) => api.call('POST', `/api/projects/${f.projectId}/languages/hi/retake`, { token: f.user.token });
 const minutesUsed = async (f: Fixture) =>
-  ((await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').get()).get('minutesDubbed') as number) ?? 0;
+  await minutesUsedIn(f.workspaceId);
 
 describe('saving edited lines', () => {
   it('keeps the server fingerprints and slot timings, reviews the text, and reports what awaits a render', async () => {

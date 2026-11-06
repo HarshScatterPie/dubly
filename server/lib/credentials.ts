@@ -17,7 +17,6 @@ export function loadServiceAccount(filename: string): Record<string, unknown> {
 }
 
 export const gcpServiceAccountPath = path.join(credentialsDir, 'gcp-service-account.json');
-export const firebaseServiceAccountPath = path.join(credentialsDir, 'firebase-service-account.json');
 
 export function hasCredentialFile(filename: string): boolean {
   return existsSync(path.join(credentialsDir, filename));

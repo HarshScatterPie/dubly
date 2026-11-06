@@ -1,6 +1,6 @@
 import { defineConfig } from 'vitest/config';
 
-// Server tests run against the Firebase emulators (see `npm test`); files run one at a time because they share one emulator.
+// Server tests run against a real MongoDB replica set in a `_test` database (see server/test/setup.ts); files run one at a time because they share it.
 export default defineConfig({
   test: {
     include: ['server/**/*.test.ts'],

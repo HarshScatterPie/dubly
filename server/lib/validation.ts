@@ -166,7 +166,14 @@ export const schemas = {
   inviteToken: z.object({ token: z.string().min(10).max(200) }),
   // An invitation's id is the SHA-256 of its token, as 64 hex characters.
   inviteId: z.object({ inviteId: z.string().regex(/^[a-f0-9]{64}$/, 'Invalid invitation id') }),
-  inviteSignup: z.object({ token: z.string().min(10).max(200), password: z.string().min(8).max(128) }),
+  inviteSignup: z.object({ token: z.string().min(10).max(200), password: z.string().min(8).max(200) }),
+  // Sign-in and account screens. Password strength is checked again by accounts.passwordProblem, with a message that says what to fix.
+  signup: z.object({ email: z.string().trim().min(3).max(254), password: z.string().min(1).max(200), name: z.string().trim().min(1).max(60) }),
+  login: z.object({ email: z.string().trim().min(1).max(254), password: z.string().min(1).max(200) }),
+  emailOnly: z.object({ email: z.string().trim().min(1).max(254) }),
+  authToken: z.object({ token: z.string().min(20).max(100) }),
+  resetPassword: z.object({ token: z.string().min(20).max(100), password: z.string().min(1).max(200) }),
+  changePassword: z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(1).max(200) }),
   // The Usage page's "Request Quota Increase" form; the requester's email and workspace come from the session, never the body.
   quotaRequest: z.object({
     name: z.string().trim().min(1).max(80),

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createUser, db, resetEmulators, startApi, type TestApi } from '../test/helpers';
+import { createUser, resetEmulators, startApi, type TestApi } from '../test/helpers';
+import { setUserProfile } from '../lib/projectRepo';
 import { DEFAULT_PREFERENCES } from '../../src/data/preferences';
 
 let api: TestApi;
@@ -17,7 +18,7 @@ beforeEach(async () => {
 describe('GET /api/bootstrap', () => {
   it('returns everything the app opens with in one response', async () => {
     const user = await createUser('boot@team.test');
-    await db.collection('users').doc(user.uid).set({ name: 'Boot User', role: 'editor', workspace: 'x' });
+    await setUserProfile(user.uid, { name: 'Boot User' });
     await api.call('PUT', '/api/settings', { token: user.token, body: { preferences: { burnCaptions: true } } });
     const created = await api.call('POST', '/api/projects', { token: user.token, body: { title: 'First cut' } });
     expect(created.status).toBe(201);
@@ -29,10 +30,10 @@ describe('GET /api/bootstrap', () => {
     expect(res.body.preferences).toEqual({ ...DEFAULT_PREFERENCES, burnCaptions: true });
     expect(res.body.usage).toMatchObject({ activePlan: 'Starter', minutesLimit: 50, minutesDubbed: 0 });
     expect(res.body.projects.map((p: { title: string }) => p.title)).toEqual(['First cut']);
-    expect(res.body.profile).toEqual({ name: 'Boot User', role: 'editor', workspace: 'x', avatar: null });
+    expect(res.body.profile).toEqual({ name: 'Boot User', role: '', workspace: '', avatar: null });
   });
 
-  it('opens without a ScatterStudio profile and refuses anyone signed out', async () => {
+  it('opens without a chosen name or picture and refuses anyone signed out', async () => {
     const user = await createUser('noprofile@team.test');
     const res = await api.call('GET', '/api/bootstrap', { token: user.token });
     expect(res.status).toBe(200);

@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import { Router } from '../lib/router';
 import path from 'node:path';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
-import { bucket, downloadFileFromStorage, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { deleteStoredFile, downloadFileFromStorage, fileExists, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/mediaStore';
 import {
   getSettings,
   getStoredProject,
@@ -1011,8 +1011,7 @@ async function renderLanguage(params: {
   // now stale — drop it and let the next captioned download rebuild it.
   for (let version = 1; version <= CAPTIONS_VERSION; version++) {
     const stalePath = captionedStoragePathFor(workspaceId, projectId, languageCode, version);
-    await bucket.file(stalePath).delete({ ignoreNotFound: true });
-    invalidateSignedUrlCache(stalePath);
+    await deleteStoredFile(stalePath);
   }
 
   return { paths: { dubbedAudioStoragePath, finalDubbedVideoStoragePath }, segments: finalSegments, report };
@@ -1348,7 +1347,7 @@ async function captionedExportState(
     return { status: 'failed', error: running.error };
   }
   if (running) return { status: 'rendering' };
-  const [alreadyRendered] = await bucket.file(captionedStoragePath).exists();
+  const alreadyRendered = await fileExists(captionedStoragePath);
   if (alreadyRendered) return { status: 'ready', url: await getSignedDownloadUrl(captionedStoragePath) };
   if (!start) return { status: 'failed', error: 'No captioned render is in progress. Start the download again.' };
 

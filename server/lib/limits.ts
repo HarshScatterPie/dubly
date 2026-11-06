@@ -59,8 +59,24 @@ export const rateRules = {
   // Unauthenticated: looking up a link and creating its account, per caller address.
   inviteSignupPerIp: rule('INVITE_SIGNUP_PER_HOUR', 40, HOUR),
   shareViewPerIp: rule('SHARE_VIEW_PER_MINUTE', 60, 60 * 1000),
+  // Signed media URLs (players issue many range requests while seeking), per caller address.
+  mediaPerIp: rule('MEDIA_PER_MINUTE', 1200, 60 * 1000),
+  // Sign-in attempts, per caller address and per email, so neither a single machine nor a botnet can guess one password for long.
+  loginPerIp: rule('LOGIN_PER_15_MINUTES', 30, 15 * 60 * 1000),
+  // Only wrong passwords count, and per email from one address, so a stranger guessing at someone's account can lock out only
+  // themselves, never its owner. The second ceiling stops many addresses together guessing one account.
+  loginFailuresPerEmailAndIp: rule('LOGIN_FAILURES_PER_EMAIL_IP_15_MINUTES', 10, 15 * 60 * 1000),
+  loginFailuresPerEmail: rule('LOGIN_FAILURES_PER_EMAIL_HOUR', 100, HOUR),
+  // Password changes by a signed-in person.
+  passwordChangePerUser: rule('PASSWORD_CHANGE_PER_15_MINUTES', 10, 15 * 60 * 1000),
+  // New accounts, password-reset and verification emails, per caller address and per email address.
+  signupPerIp: rule('SIGNUP_PER_HOUR', 10, HOUR),
+  authEmailPerIp: rule('AUTH_EMAIL_PER_HOUR', 20, HOUR),
+  authEmailPerAddress: rule('AUTH_EMAIL_PER_ADDRESS_HOUR', 5, HOUR),
   // The app's page itself (index.html for every client-side route), per caller address; far above what any person loads.
   pagePerIp: rule('PAGE_PER_MINUTE', 300, 60 * 1000),
+  // Every request of any kind, per caller address: a ceiling far above a busy person (progress polls, video seeks), against floods.
+  allPerIp: rule('ALL_PER_IP_MINUTE', 3000, 60 * 1000),
   // Quota-increase requests email the team, so a few a day per person is plenty.
   quotaRequestPerUser: rule('QUOTA_REQUEST_PER_DAY', 5, 24 * HOUR),
 };

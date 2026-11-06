@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { authAdmin, createUser, db, resetEmulators, signIn, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { col, createUser, readProject, resetEmulators, signIn, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { getUser, getUserByEmail } from '../lib/accounts';
 import { setWorkspacePlan } from '../lib/plans';
 import { isMailConfigured, setMailSenderForTests } from '../lib/mailer';
 
@@ -65,10 +66,8 @@ describe('workspace invitations', () => {
     expect((await workspaceOf(admin)).members.map((m) => m.uid).sort()).toEqual([admin.uid, invitee.uid].sort());
 
     // The invitee's project was neither copied nor moved: it is still (only) in their own workspace.
-    const oldProject = await db.collection('workspaces').doc(inviteeWs.id).collection('projects').doc(personalProject.id).get();
-    expect(oldProject.exists).toBe(true);
-    const copied = await db.collection('workspaces').doc(teamWs.id).collection('projects').doc(personalProject.id).get();
-    expect(copied.exists).toBe(false);
+    expect(await readProject(inviteeWs.id, personalProject.id)).not.toBeNull();
+    expect(await readProject(teamWs.id, personalProject.id)).toBeNull();
     const adminProjects = await api.call('GET', '/api/projects', { token: admin.token });
     expect(adminProjects.body.map((p: { id: string }) => p.id)).not.toContain(personalProject.id);
   });
@@ -85,7 +84,7 @@ describe('workspace invitations', () => {
     expect(Object.keys(forExisting.body).sort()).toEqual(Object.keys(forUnknown.body).sort());
     expect(Object.keys(forExisting.body.invite).sort()).toEqual(Object.keys(forUnknown.body.invite).sort());
 
-    await expect(authAdmin.getUserByEmail('nobody@team.test')).rejects.toMatchObject({ code: 'auth/user-not-found' });
+    expect(await getUserByEmail('nobody@team.test')).toBeNull();
   });
 
   it('retires the old direct-add endpoint without creating accounts or moving anyone', async () => {
@@ -102,7 +101,7 @@ describe('workspace invitations', () => {
     const again = await api.call('POST', '/api/workspace/members', { token: admin.token, body: { email: 'victim@team.test', role: 'editor' } });
     expect(again.status).toBe(410);
 
-    await expect(authAdmin.getUserByEmail('brand-new@team.test')).rejects.toMatchObject({ code: 'auth/user-not-found' });
+    expect(await getUserByEmail('brand-new@team.test')).toBeNull();
     expect((await workspaceOf(victim)).id).toBe(victimWs.id);
   });
 
@@ -133,7 +132,7 @@ describe('workspace invitations', () => {
     await workspaceOf(admin);
     const inviteeWs = await workspaceOf(invitee);
     const { body } = await invite(admin, invitee.email);
-    await db.collection('invites').doc(body.invite.id).update({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    await col<{ _id: string }>('invites').updateOne({ _id: body.invite.id }, { $set: { expiresAt: new Date(Date.now() - 1000).toISOString() } });
 
     const res = await accept(invitee, body.token);
     expect(res.status).toBe(410);
@@ -152,8 +151,7 @@ describe('workspace invitations', () => {
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
     expect((await accept(invitee, body.token)).body.workspaceId).toBe(teamWs.id);
-    const members = await db.collection('workspaces').doc(teamWs.id).collection('members').get();
-    expect(members.size).toBe(2);
+    expect(await col('members').countDocuments({ workspaceId: teamWs.id })).toBe(2);
 
     // A second account that somehow holds the link still cannot use it.
     const replayer = await createUser('replayer@team.test');
@@ -211,9 +209,8 @@ describe('workspace invitations', () => {
     expect((await api.call('GET', `/api/projects/${secret.id}`, { token: attacker.token })).status).toBe(404);
     expect((await api.call('PATCH', `/api/projects/${secret.id}`, { token: attacker.token, body: { title: 'pwned' } })).status).toBe(404);
     expect((await api.call('DELETE', `/api/projects/${secret.id}`, { token: attacker.token })).status).toBe(404);
-    const stillThere = await db.collection('workspaces').doc(victimWs.id).collection('projects').doc(secret.id).get();
-    expect(stillThere.get('title')).toBe('Confidential launch video');
-    expect((await db.collection('workspaces').doc(attackerWs.id).collection('members').get()).size).toBe(1);
+    expect((await readProject(victimWs.id, secret.id))?.title).toBe('Confidential launch video');
+    expect(await col('members').countDocuments({ workspaceId: attackerWs.id })).toBe(1);
   });
 
   it('only lets admins invite', async () => {
@@ -266,7 +263,7 @@ describe('workspace invitations', () => {
     expect((await api.call('GET', '/api/projects', { token: fresh })).status).toBe(403);
     // ...and the link they used to join is spent. Checked with the fresh session: the old one may already be refused as revoked (401).
     expect((await api.call('POST', '/api/invites/accept', { token: fresh, body: { token: link.body.token } })).status).toBe(404);
-    expect((await db.collection('workspaceMembership').doc(member.uid).get()).get('workspaceId')).toBeNull();
+    expect((await col<{ _id: string; workspaceId: string | null }>('memberships').findOne({ _id: member.uid }))?.workspaceId).toBeNull();
   });
 
   it('signs a removed member out everywhere at once, and deletes a login Dubly made for the invitation', async () => {
@@ -280,7 +277,7 @@ describe('workspace invitations', () => {
     await api.call('POST', '/api/invite-signup/claim', { body: { token: created.token, password: 'a-good-password' } });
     const newcomer = await signIn('brand-new@team.test', 'a-good-password');
     await api.call('POST', '/api/invites/accept', { token: newcomer, body: { token: created.token } });
-    const newcomerUid = (await authAdmin.getUserByEmail('brand-new@team.test')).uid;
+    const newcomerUid = (await getUserByEmail('brand-new@team.test'))!._id;
     expect((await workspaceOf({ token: newcomer } as TestUser)).id).toBe(teamId);
 
     // Revocation is recorded to the second, so a session older than that is what it is checked against.
@@ -288,11 +285,11 @@ describe('workspace invitations', () => {
     expect((await api.call('DELETE', `/api/workspace/members/${existing.uid}`, { token: admin.token })).status).toBe(204);
     expect((await api.call('DELETE', `/api/workspace/members/${newcomerUid}`, { token: admin.token })).status).toBe(204);
 
-    // A login that pre-existed (shared with ScatterStudio) survives, but its sessions are gone.
+    // A login the person made themselves survives, but its sessions are gone.
     expect((await api.call('GET', '/api/settings', { token: existing.token })).status).toBe(401);
-    expect(await authAdmin.getUser(existing.uid)).toBeTruthy();
+    expect(await getUser(existing.uid)).toBeTruthy();
     // The one made from the invitation is gone altogether.
-    await expect(authAdmin.getUser(newcomerUid)).rejects.toMatchObject({ code: 'auth/user-not-found' });
+    expect(await getUser(newcomerUid)).toBeNull();
     expect((await api.call('GET', '/api/settings', { token: newcomer })).status).toBe(401);
     await expect(signIn('brand-new@team.test', 'a-good-password')).rejects.toBeTruthy();
   });
@@ -339,7 +336,7 @@ describe('plans and teammates', () => {
     const res = await api.call('POST', '/api/workspace/invites', { token: admin.token, body: { email: 'friend@team.test', role: 'editor' } });
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('PLAN_NO_TEAM');
-    expect((await db.collection('invites').get()).size).toBe(0);
+    expect(await col('invites').countDocuments()).toBe(0);
   });
 
   it('stops a link made on Enterprise from working once the workspace is back on Starter', async () => {
@@ -450,10 +447,10 @@ describe('invite sign-up for people with no account', () => {
     const revoked = (await invite(admin, 'revoked@team.test')).body;
     await api.call('DELETE', `/api/workspace/invites/${revoked.invite.id}`, { token: admin.token });
     expect((await claim(revoked.token, 'a-good-password')).status).toBe(404);
-    await expect(authAdmin.getUserByEmail('revoked@team.test')).rejects.toMatchObject({ code: 'auth/user-not-found' });
+    expect(await getUserByEmail('revoked@team.test')).toBeNull();
 
     const expired = (await invite(admin, 'expired@team.test')).body;
-    await db.collection('invites').doc(expired.invite.id).update({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    await col<{ _id: string }>('invites').updateOne({ _id: expired.invite.id }, { $set: { expiresAt: new Date(Date.now() - 1000).toISOString() } });
     expect((await claim(expired.token, 'a-good-password')).status).toBe(410);
 
     const once = (await invite(admin, 'once@team.test')).body;
@@ -481,7 +478,7 @@ describe('people who have been invited but have not joined', () => {
     }
     expect((await api.call('POST', '/api/projects', { token, body: { title: 'sneaky' } })).status).toBe(403);
     // Declining the dialog changes nothing: still no workspace of their own appears.
-    expect((await db.collection('workspaces').get()).size).toBe(1);
+    expect(await col('workspaces').countDocuments()).toBe(1);
 
     // Their invitation is waiting in their notifications, and joining from there needs no link.
     const waiting = await mine(token);
@@ -500,13 +497,13 @@ describe('people who have been invited but have not joined', () => {
     const { body } = await invite(admin, 'lapsed@team.test');
     await claim(body.token, 'a-good-password');
     const token = await signIn('lapsed@team.test', 'a-good-password');
-    await db.collection('invites').doc(body.invite.id).update({ expiresAt: new Date(Date.now() - 1000).toISOString() });
+    await col<{ _id: string }>('invites').updateOne({ _id: body.invite.id }, { $set: { expiresAt: new Date(Date.now() - 1000).toISOString() } });
 
     const res = await api.call('GET', '/api/projects', { token });
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('AWAITING_INVITE');
     expect((await mine(token)).body.invites).toHaveLength(0);
-    expect((await db.collection('workspaces').get()).size).toBe(1);
+    expect(await col('workspaces').countDocuments()).toBe(1);
   });
 
   it('holds an existing login that has never used Dubly until it answers its invitation', async () => {
@@ -560,7 +557,7 @@ describe('people who have been invited but have not joined', () => {
     const victimWs = await workspaceOf(victimAdmin);
     const bait = (await invite(attacker, 'newhire@victim.test')).body;
     expect((await claim(bait.token, 'attacker-chosen-password')).status).toBe(201);
-    const login = await authAdmin.getUserByEmail('newhire@victim.test');
+    const login = (await getUserByEmail('newhire@victim.test'))!;
     expect(login.emailVerified).toBe(false);
     const token = await signIn('newhire@victim.test', 'attacker-chosen-password');
 
@@ -569,7 +566,7 @@ describe('people who have been invited but have not joined', () => {
     const refused = await acceptById(token, real.invite.id);
     expect(refused.status).toBe(403);
     expect(refused.body.error.code).toBe('EMAIL_NOT_VERIFIED');
-    expect((await db.collection('workspaces').doc(victimWs.id).collection('members').doc(login.uid).get()).exists).toBe(false);
+    expect(await col('members').countDocuments({ workspaceId: victimWs.id, uid: login._id })).toBe(0);
   });
 });
 
@@ -598,13 +595,15 @@ describe('name and picture', () => {
     expect(after.body.members.find((m: { uid: string }) => m.uid === editor.uid).avatar).toBeUndefined();
   });
 
-  it('never touches the ScatterStudio profile, and refuses empty, oversized and fake-image input', async () => {
+  it('saves the name on the account only, never returns the password hash, and refuses empty, oversized and fake-image input', async () => {
     const user = await createUser('profile@team.test');
-    await db.collection('users').doc(user.uid).set({ name: 'Studio Name', role: 'editor', workspace: 'x', api_key: 'secret' });
     await workspaceOf(user);
 
-    expect((await api.call('PATCH', '/api/profile', { token: user.token, body: { name: 'Dubly Name' } })).status).toBe(200);
-    expect((await db.collection('users').doc(user.uid).get()).data()).toEqual({ name: 'Studio Name', role: 'editor', workspace: 'x', api_key: 'secret' });
+    const saved = await api.call('PATCH', '/api/profile', { token: user.token, body: { name: 'Dubly Name' } });
+    expect(saved.status).toBe(200);
+    expect(saved.body).toEqual({ name: 'Dubly Name', role: '', workspace: '', avatar: null });
+    expect(JSON.stringify((await api.call('GET', '/api/bootstrap', { token: user.token })).body)).not.toMatch(/scrypt|passwordHash/);
+    expect((await getUser(user.uid))?.displayName).toBe('Dubly Name');
 
     expect((await api.call('PATCH', '/api/profile', { token: user.token, body: {} })).status).toBe(400);
     expect((await api.call('PATCH', '/api/profile', { token: user.token, body: { name: '   ' } })).status).toBe(400);

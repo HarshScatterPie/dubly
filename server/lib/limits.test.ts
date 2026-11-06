@@ -5,7 +5,7 @@ import { clearRateLimits, hit, rateLimit } from './rateLimit';
 import { Semaphore, SemaphoreTimeoutError } from './semaphore';
 import { enqueueDub, freezeQueue, positionInQueue, queueStats, resetQueueForTests } from './dubQueue';
 import { limits, rateRules } from './limits';
-import { createUser, db, resetEmulators, startApi, type TestApi } from '../test/helpers';
+import { createUser, patchJob, readProject, resetEmulators, seedProject, startApi, type TestApi } from '../test/helpers';
 import { getJob, reconcileStaleJobs, startDubJob, STALE_AFTER_MS, type DubJob } from './jobs';
 import { QUEUED_MESSAGE, setDubPipelineForTests, type PipelineResult } from '../routes/dub';
 
@@ -165,7 +165,7 @@ describe('queued dubs end to end', () => {
     for (let i = 0; i < count; i++) {
       const projectId = `proj-q-${i}`;
       ids.push(projectId);
-      await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).set({
+      await seedProject(workspaceId, {
         id: projectId,
         ownerUid: user.uid,
         title: `Q${i}`,
@@ -204,9 +204,9 @@ describe('queued dubs end to end', () => {
     };
     await waitUntil(async () => (await job(0))?.status === 'running' && (await job(1))?.status === 'running');
     expect((await job(2))?.status).toBe('queued');
-    const third = await db.collection('workspaces').doc(workspaceId).collection('projects').doc(ids[2]).get();
-    expect(third.get('status')).toBe('processing');
-    expect(third.get('currentProcessingMessage')).toBe(QUEUED_MESSAGE);
+    const third = await readProject(workspaceId, ids[2]);
+    expect(third?.status).toBe('processing');
+    expect(third?.currentProcessingMessage).toBe(QUEUED_MESSAGE);
 
     gates.get(ids[0])!({ completed: ['hi'], wordsCount: 1, fileSizeMb: 1, projectPatch: { status: 'completed' } });
     await waitUntil(async () => (await job(2))?.status === 'running');
@@ -218,7 +218,7 @@ describe('queued dubs end to end', () => {
   it('puts a job that was still waiting when its process died back in the queue instead of failing it', async () => {
     const { user, workspaceId, ids } = await seed(1);
     const { job } = await startDubJob({ workspaceId, projectId: ids[0], userId: user.uid, languages: ['hi'], minutes: 1 });
-    await db.collection('jobs').doc(job.id).update({ heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
+    await patchJob(job.id, { heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
 
     const requeued: DubJob[] = [];
     expect(await reconcileStaleJobs(new Set(), Date.now(), (j) => requeued.push(j))).toEqual([]);

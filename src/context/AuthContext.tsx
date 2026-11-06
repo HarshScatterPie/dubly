@@ -3,18 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { createContext, useContext, useEffect, useState } from 'react';
-import {
-  onAuthStateChanged,
-  signInWithPopup,
-  signInWithEmailAndPassword,
-  sendPasswordResetEmail,
-  signOut as firebaseSignOut,
-  type User,
-} from 'firebase/auth';
-import { auth, googleProvider } from '../lib/firebase';
+import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
 import { clearBootCaches } from '../lib/bootCache';
-import { SESSION_ENDED_EVENT } from '../lib/apiClient';
+import { ApiError, SESSION_ENDED_EVENT, authFetch } from '../lib/apiClient';
 
 export interface UserProfile {
   name: string;
@@ -24,58 +15,115 @@ export interface UserProfile {
   avatar?: string | null;
 }
 
-// What Firebase says when a session can never be renewed: signed out everywhere, disabled, or the login deleted.
-const DEAD_SESSION = /user-token-expired|user-disabled|user-not-found|invalid-user-token/;
+/**
+ * The signed-in account. The session itself is an httpOnly cookie the browser sends with every request; no script, this one
+ * included, can read it. `displayName` and `photoURL` keep the shape the screens already use; the real name and picture are in `profile`.
+ */
+export interface AuthUser {
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+  displayName: string | null;
+  photoURL: string | null;
+}
 
 interface AuthContextValue {
-  user: User | null;
-  /**
-   * The `users/{uid}` record from ScatterStudio's shared Firestore project — name, role,
-   * workspace. Firebase Auth's own displayName is usually empty (only Google sign-in fills
-   * it in), so this, not that, is the real source of truth for a user's name here; it is
-   * also what every other ScatterStudio tool already shows. `null` once loaded if the
-   * signed-in account has no such record (e.g. a test account created directly in Firebase
-   * Auth rather than through ScatterStudio's own onboarding); `undefined` while loading.
-   */
+  user: AuthUser | null;
+  /** The name and picture chosen at sign-up or in Settings; `null` once loaded if there is none, `undefined` while loading. */
   profile: UserProfile | null | undefined;
   loading: boolean;
   error: string | null;
-  signInWithGoogle: () => Promise<void>;
+  /** Set when the page was opened from a password-reset email; the sign-in screen then asks for the new password. */
+  resetToken: string | null;
+  /** A message to show on the sign-in screen after an email link was used (or could not be). */
+  notice: string | null;
   signInWithEmail: (email: string, password: string) => Promise<void>;
-  // Emails a set-a-new-password link through Firebase itself; says nothing about whether the account exists.
+  /** Creates an account; it is used once the emailed link confirms the address. */
+  signUp: (name: string, email: string, password: string) => Promise<void>;
+  // Emails a set-a-new-password link; says nothing about whether the account exists.
   sendPasswordReset: (email: string) => Promise<void>;
+  completePasswordReset: (password: string) => Promise<void>;
+  cancelPasswordReset: () => void;
+  resendVerification: () => Promise<boolean>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
   // The profile arrives with the app's startup data (GET /api/bootstrap) rather than in a request of its own.
   primeProfile: (profile: UserProfile | null) => void;
   signOut: () => Promise<void>;
 }
 
-// Firebase's error codes in words a person signing in can act on.
+interface ServerUser {
+  uid: string;
+  email: string;
+  emailVerified: boolean;
+  displayName?: string | null;
+}
+
+const toAuthUser = (u: ServerUser): AuthUser => ({ uid: u.uid, email: u.email, emailVerified: u.emailVerified, displayName: u.displayName ?? null, photoURL: null });
+
 export function friendlyAuthError(err: unknown): string {
-  const code = String((err as { code?: string })?.code ?? '');
-  if (/invalid-credential|wrong-password|user-not-found|invalid-login-credentials/.test(code)) {
-    return 'That email and password do not match. Use your ScatterPie account password (the same one as ScatterStudio), or reset it with "Forgot password?".';
+  if (err instanceof ApiError) {
+    if (err.status === 429) return 'Too many attempts. Wait a few minutes, or reset your password with "Forgot password?".';
+    if (err.status === 0) return 'Could not reach Dubly. Check your connection and try again.';
+    return err.message;
   }
-  if (code.includes('too-many-requests')) return 'Too many attempts. Wait a few minutes, or reset your password with "Forgot password?".';
-  if (code.includes('user-disabled')) return 'This account has been disabled. Contact ScatterPie.';
-  if (code.includes('invalid-email')) return 'Enter a valid email address.';
-  if (code.includes('network-request-failed')) return 'Could not reach the sign-in service. Check your connection and try again.';
-  return (err as Error)?.message || 'Sign-in failed';
+  return (err as Error)?.message || 'Something went wrong. Please try again.';
+}
+
+// Takes a one-time token from the address bar (an emailed link), so it is not left in the history or sent on as a Referer.
+function takeParam(name: 'verify' | 'reset'): string | null {
+  const url = new URL(window.location.href);
+  const value = url.searchParams.get(name);
+  if (!value) return null;
+  url.searchParams.delete(name);
+  window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`);
+  return value;
+}
+
+async function post<T>(path: string, body?: unknown): Promise<T> {
+  return authFetch<T>(path, { method: 'POST', body });
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<User | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [profile, setProfile] = useState<UserProfile | null | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resetToken, setResetToken] = useState<string | null>(null);
 
+  // On load: finish an emailed link if the page was opened from one, otherwise ask the server whether this browser has a session.
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return unsubscribe;
+    let cancelled = false;
+    (async () => {
+      const verify = takeParam('verify');
+      const reset = takeParam('reset');
+      if (reset) setResetToken(reset);
+      try {
+        if (verify) {
+          try {
+            const { user: verified } = await post<{ user: ServerUser }>('/api/auth/verify-email', { token: verify });
+            if (!cancelled) {
+              setUser(toAuthUser(verified));
+              setNotice(null);
+            }
+            return;
+          } catch (err) {
+            if (!cancelled) setNotice(friendlyAuthError(err));
+          }
+        }
+        const { user: current } = await authFetch<{ user: ServerUser }>('/api/auth/me');
+        if (!cancelled) setUser(toAuthUser(current));
+      } catch {
+        if (!cancelled) setUser(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Signing out forgets the profile; on sign-in the app primes it (child effects run first, so this must not reset a primed one).
@@ -83,21 +131,20 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (!user) setProfile(undefined);
   }, [user]);
 
-  // The server turned a request away as unauthenticated. If the session can be renewed that was a hiccup and nothing changes; if it cannot
-  // (an admin removed this account, or it signed out everywhere) the person is signed out on the spot instead of staring at failing screens.
+  // The server turned a request away as unauthenticated: the session ended (signed out everywhere, password changed, removed by an admin).
+  // The person is signed out on the spot instead of staring at failing screens.
   useEffect(() => {
     let checking = false;
     const onSessionEnded = async () => {
-      const current = auth.currentUser;
-      if (!current || checking) return;
+      if (checking) return;
       checking = true;
       try {
-        await current.getIdToken(true);
+        await authFetch('/api/auth/me');
       } catch (err) {
-        if (DEAD_SESSION.test(String((err as { code?: string })?.code ?? ''))) {
+        if (err instanceof ApiError && err.status === 401) {
           clearBootCaches();
-          setError('Your access to Dubly has ended. Sign in again, or ask your workspace admin if you were removed.');
-          await firebaseSignOut(auth);
+          setError('Your session has ended. Sign in again, or ask your workspace admin if you were removed.');
+          setUser(null);
         }
       } finally {
         checking = false;
@@ -107,46 +154,77 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => window.removeEventListener(SESSION_ENDED_EVENT, onSessionEnded);
   }, []);
 
-  const signInWithGoogle = async () => {
+  const run = useCallback(async <T,>(task: () => Promise<T>): Promise<T> => {
     setError(null);
     try {
-      await signInWithPopup(auth, googleProvider);
-    } catch (err) {
-      setError((err as Error).message || 'Sign-in failed');
-      throw err;
-    }
-  };
-
-  const signInWithEmail = async (email: string, password: string) => {
-    setError(null);
-    try {
-      await signInWithEmailAndPassword(auth, email, password);
+      return await task();
     } catch (err) {
       setError(friendlyAuthError(err));
       throw err;
     }
+  }, []);
+
+  const signInWithEmail = (email: string, password: string) =>
+    run(async () => {
+      const { user: signedIn } = await post<{ user: ServerUser }>('/api/auth/login', { email: email.trim(), password });
+      setNotice(null);
+      setUser(toAuthUser(signedIn));
+    });
+
+  const signUp = (name: string, email: string, password: string) =>
+    run(async () => {
+      await post('/api/auth/signup', { name: name.trim(), email: email.trim(), password });
+    });
+
+  const sendPasswordReset = (email: string) =>
+    run(async () => {
+      await post('/api/auth/forgot-password', { email: email.trim() });
+    });
+
+  const completePasswordReset = (password: string) =>
+    run(async () => {
+      if (!resetToken) throw new Error('This reset link is no longer open. Ask for a new one with "Forgot password?".');
+      const { user: signedIn } = await post<{ user: ServerUser }>('/api/auth/reset-password', { token: resetToken, password });
+      setResetToken(null);
+      setUser(toAuthUser(signedIn));
+    });
+
+  const resendVerification = async () => {
+    const result = await post<{ emailed?: boolean } | undefined>('/api/auth/resend-verification');
+    return result?.emailed !== false;
   };
 
-  const sendPasswordReset = async (email: string) => {
-    setError(null);
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-    } catch (err) {
-      // An unknown email is not reported, so nobody can use this to find out who has an account.
-      if (/user-not-found/.test(String((err as { code?: string })?.code ?? ''))) return;
-      setError(friendlyAuthError(err));
-      throw err;
-    }
+  // Every other device is signed out; this one gets a fresh session.
+  const changePassword = async (currentPassword: string, newPassword: string) => {
+    const { user: signedIn } = await post<{ user: ServerUser }>('/api/auth/change-password', { currentPassword, newPassword });
+    setUser(toAuthUser(signedIn));
   };
 
   const signOut = async () => {
     clearBootCaches();
-    await firebaseSignOut(auth);
+    await post('/api/auth/logout').catch(() => undefined);
+    setUser(null);
   };
 
   return (
     <AuthContext.Provider
-      value={{ user, profile, loading, error, signInWithGoogle, signInWithEmail, sendPasswordReset, primeProfile: setProfile, signOut }}
+      value={{
+        user,
+        profile,
+        loading,
+        error,
+        resetToken,
+        notice,
+        signInWithEmail,
+        signUp,
+        sendPasswordReset,
+        completePasswordReset,
+        cancelPasswordReset: () => setResetToken(null),
+        resendVerification,
+        changePassword,
+        primeProfile: setProfile,
+        signOut,
+      }}
     >
       {children}
     </AuthContext.Provider>

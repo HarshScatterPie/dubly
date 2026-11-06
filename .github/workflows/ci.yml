@@ -1,6 +1,6 @@
 name: CI
 
-# Every push/PR: typecheck, emulator tests (never the real project), build, dependency audit, secret scan and image build; nothing deploys.
+# Every push/PR: typecheck, tests against a throwaway MongoDB (never real data), build, dependency audit, secret scan and image build; nothing deploys.
 on:
   push:
     branches: [main]
@@ -25,17 +25,9 @@ jobs:
           node-version: 24
           cache: npm
 
-      # The Firestore/Auth/Storage emulators run on Java.
-      - uses: actions/setup-java@v5
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Cache Firebase emulator downloads
-        uses: actions/cache@v5
-        with:
-          path: ~/.cache/firebase/emulators
-          key: firebase-emulators-${{ hashFiles('package-lock.json') }}
+      # A throwaway single-node replica set; tests use their own dubly_test database in it.
+      - name: Start MongoDB
+        run: bash .github/scripts/start-mongo.sh
 
       - name: Install
         run: npm ci
@@ -43,7 +35,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
-      - name: Tests (Firebase emulators)
+      - name: Tests (MongoDB)
+        env:
+          MONGODB_TEST_URI: mongodb://127.0.0.1:27017/dubly_test?directConnection=true
         run: |
           set -o pipefail
           npm test 2>&1 | tee test-output.txt
@@ -53,7 +47,7 @@ jobs:
         if: failure()
         run: |
           tail -n 60 test-output.txt | sed -E 's/\x1b\[[0-9;]*m//g' > tail.txt || true
-          for f in firestore-debug.log firebase-debug.log; do [ -f "$f" ] && tail -n 15 "$f" >> tail.txt; done
+          docker logs dubly-mongo 2>&1 | tail -n 15 >> tail.txt || true
           body=$(sed -e 's/%/%25/g' tail.txt | sed -e ':a;N;$!ba;s/\n/%0A/g')
           echo "::error title=Test output (last lines)::${body}"
 

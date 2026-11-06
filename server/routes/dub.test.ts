@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { mkdir, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { countJobs, createUser, mergePlan, mergeUsage, minutesUsedIn, patchJob, planDoc, readProject, resetEmulators, seedProject as storeProject, startApi, writeProject, type TestApi, type TestUser } from '../test/helpers';
 import { runDubJob, setDubPipelineForTests, uncoveredWork, type PipelineResult } from './dub';
 import { currentLineKey } from '../lib/retake';
 import {
@@ -77,7 +77,7 @@ async function seedProject(): Promise<Fixture> {
     isEdited: false,
   });
   const now = new Date().toISOString();
-  await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).set({
+  await storeProject(workspaceId, {
     id: projectId,
     ownerUid: user.uid,
     title: 'Fixture',
@@ -114,9 +114,8 @@ async function seedProject(): Promise<Fixture> {
   return { user, workspaceId, projectId };
 }
 
-const projectDoc = (f: Fixture) => db.collection('workspaces').doc(f.workspaceId).collection('projects').doc(f.projectId);
 const minutesUsed = async (f: Fixture) =>
-  ((await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').get()).get('minutesDubbed') as number) ?? 0;
+  await minutesUsedIn(f.workspaceId);
 const startDub = (f: Fixture, headers: Record<string, string> = {}, body: unknown = {}) =>
   api.call('POST', `/api/projects/${f.projectId}/dub`, { token: f.user.token, body, headers });
 const settledJob = (jobId: string) => waitFor(() => getJob(jobId), (j) => Boolean(j?.settled));
@@ -150,7 +149,7 @@ describe('dub jobs: one run per project', () => {
     expect(job?.status).toBe('completed');
     expect(runs).toBe(1);
     expect(await minutesUsed(f)).toBe(4);
-    const project = (await projectDoc(f).get()).data()!;
+    const project = (await readProject(f.workspaceId, f.projectId))!;
     expect(project.status).toBe('completed');
     expect(project.activeJobId).toBeUndefined();
   });
@@ -194,7 +193,7 @@ describe('dub jobs: one run per project', () => {
     expect(failedJob?.errorCode).toBe('DUB_FAILED');
     expect(failedJob?.minutesRefunded).toBe(4);
     expect(await minutesUsed(f)).toBe(0);
-    const afterFailure = (await projectDoc(f).get()).data()!;
+    const afterFailure = (await readProject(f.workspaceId, f.projectId))!;
     expect(afterFailure.status).toBe('failed');
     expect(afterFailure.activeJobId).toBeUndefined();
 
@@ -221,12 +220,12 @@ describe('dub jobs: one run per project', () => {
 
   it('refuses a dub the monthly allowance cannot cover, without creating a job', async () => {
     const f = await seedProject();
-    await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').set({ minutesDubbed: 118, usagePeriod: currentUsagePeriod() }, { merge: true });
+    await mergeUsage(f.workspaceId, { minutesDubbed: 118, usagePeriod: currentUsagePeriod() });
     const res = await startDub(f);
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe('QUOTA_EXCEEDED');
-    expect((await db.collection('jobs').get()).size).toBe(0);
-    expect((await projectDoc(f).get()).get('status')).toBe('draft');
+    expect((await countJobs())).toBe(0);
+    expect((await readProject(f.workspaceId, f.projectId))?.status).toBe('draft');
   });
 
   it('refuses new dubs while the server is draining for a restart', async () => {
@@ -255,12 +254,12 @@ describe('dub charges cover what is rendered', () => {
     const f = await seedProject();
     // Two minutes of video hold at most 7,200 characters of one language; this is one more.
     const long = line(1, 'क'.repeat(120 * 60 + 1));
-    await projectDoc(f).update({ localizedSegments: [long], 'languageOutputs.hi.localizedSegments': [long] });
+    await writeProject(f.workspaceId, f.projectId, { localizedSegments: [long] });
     const res = await startDub(f);
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('TEXT_TOO_LONG');
     expect(await minutesUsed(f)).toBe(0);
-    expect((await db.collection('jobs').get()).size).toBe(0);
+    expect((await countJobs())).toBe(0);
   });
 
   it('records on the job the video length it was charged for', async () => {
@@ -312,7 +311,7 @@ describe('dub jobs: crash recovery', () => {
   // A job whose process died: created and charged, never heartbeating again.
   async function orphanedJob(f: Fixture): Promise<DubJob> {
     const { job } = await startDubJob({ workspaceId: f.workspaceId, projectId: f.projectId, userId: f.user.uid, languages: ['hi', 'ta'], minutes: 4 });
-    await db.collection('jobs').doc(job.id).update({ heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
+    await patchJob(job.id, { heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
     return job;
   }
 
@@ -330,7 +329,7 @@ describe('dub jobs: crash recovery', () => {
     expect(settled?.minutesRefunded).toBe(4);
     expect(await minutesUsed(f)).toBe(0);
     await expect(stat(jobDirFor(job.id))).rejects.toThrow();
-    const project = (await projectDoc(f).get()).data()!;
+    const project = (await readProject(f.workspaceId, f.projectId))!;
     expect(project.status).toBe('failed');
     expect(project.activeJobId).toBeUndefined();
 
@@ -384,12 +383,12 @@ describe('dub jobs: crash recovery', () => {
     const jobId = res.body.jobId as string;
 
     // The run is declared dead (e.g. its heartbeat stalled) and settled while it is actually still going.
-    await db.collection('jobs').doc(jobId).update({ heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
+    await patchJob(jobId, { heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
     expect(await reconcileStaleJobs()).toEqual([jobId]);
     zombieGate.resolve();
 
     await new Promise((r) => setTimeout(r, 500));
-    const project = (await projectDoc(f).get()).data()!;
+    const project = (await readProject(f.workspaceId, f.projectId))!;
     expect(project.currentProcessingMessage).not.toBe('zombie write');
     expect(project.status).toBe('failed');
     const job = await getJob(jobId);
@@ -448,7 +447,7 @@ describe('plans and paid extras', () => {
     await setWorkspacePlan(f.workspaceId, 'enterprise');
     expect(await usage()).toMatchObject({ activePlan: 'Enterprise', minutesLimit: 120, paidExtrasAllowed: true, teamInvites: true });
 
-    await db.collection('workspaces').doc(f.workspaceId).collection('meta').doc('usage').set({ minutesDubbed: 115, usagePeriod: currentUsagePeriod() }, { merge: true });
+    await mergeUsage(f.workspaceId, { minutesDubbed: 115, usagePeriod: currentUsagePeriod() });
     await turnOnExtras(f);
     const refused = await startDub(f);
     expect(refused.status).toBe(403);
@@ -459,9 +458,9 @@ describe('plans and paid extras', () => {
   it('keeps plans in the database, where an operator’s change wins over the built-in values', async () => {
     const f = await seedProject();
     await api.call('GET', '/api/usage', { token: f.user.token });
-    expect((await db.collection('dublyPlans').doc('starter').get()).get('minutesPerMonth')).toBe(50);
+    expect((await planDoc('starter'))?.minutesPerMonth).toBe(50);
 
-    await db.collection('dublyPlans').doc('starter').set({ minutesPerMonth: 30, name: 'Starter Lite' }, { merge: true });
+    await mergePlan('starter', { minutesPerMonth: 30, name: 'Starter Lite' });
     clearPlanCaches();
     const usage = (await api.call('GET', '/api/usage', { token: f.user.token })).body;
     expect(usage).toMatchObject({ activePlan: 'Starter Lite', minutesLimit: 30 });

@@ -4,7 +4,7 @@
 
 ```
 Browser (React SPA)
-  │  Firebase Auth → ID token (Bearer) on every /api call; polls project/job state during long work
+  │  session cookie (httpOnly) on every /api call; polls project/job state during long work
   ▼
 Dubly server: one Node process (server/index.ts → server/app.ts)
   ├─ Request pipeline: request id + access log → security headers → CORS → JSON (2 MB)
@@ -12,8 +12,8 @@ Dubly server: one Node process (server/index.ts → server/app.ts)
   │                    → route (rate limits, zod validation) → error normalizer
   ├─ Jobs: dubs and transcriptions run in-process as persisted jobs (server/lib/jobs.ts)
   │     admission: dub queue (2 per workspace, 4 per server) + heavy-work slots (3) for transcription/captions
-  ├─ Firestore (Admin SDK)   workspaces, projects (+ content/transcript, languages/{code}), jobs, invites, shares …
-  ├─ Cloud Storage (Admin)   workspaces/{ws}/projects/{id}/…  (media, handed out only as short-lived signed URLs)
+  ├─ MongoDB (replica set)  users, sessions, workspaces, projects (+ projectSegments), jobs, invites, shares …
+  ├─ GridFS (same database) workspaces/{ws}/projects/{id}/…  (media, served by /api/media from short-lived signed URLs, with Range)
   ├─ Vertex AI Gemini        speech-to-text, translation, line condensing
   ├─ Google Cloud TTS        synthesis (TTS cache on local disk)
   ├─ ffmpeg / ffprobe        probing, audio extraction, stitching, muxing, captions
@@ -24,14 +24,14 @@ The whole deployment is **one process**. It keeps some state only in memory: mem
 
 ## Tenancy
 
-A **workspace** owns projects and the monthly minute allowance. Its **plan** (`workspaces/{ws}.plan`, defined in `dublyPlans`) sets the allowance and what the workspace may use. **Free**, where every new workspace starts (`NEW_WORKSPACE_PLAN`), gives 5 min in total that never refresh (its usage period is `lifetime`), no paid extras and no teammates; more comes through a quota request from the Usage page (`POST /api/usage/quota-request`, stored in `dublyQuotaRequests` and emailed to the team), after which an operator moves the workspace with `server/scripts/set_plan.ts`. **Starter** (also any workspace with no plan recorded, i.e. every one made before Free) gives 50 min a month, no paid extras and no teammates. **Enterprise** gives 120 min, paid extras and invitations. Each paid extra a user switches on makes every dubbed minute use more of the allowance (Enterprise: AI review +0.25, premium voices +0.5, pace re-takes +0.25). The rate is fixed when the dub is charged and stored on the job; refunds use the same rate (`server/lib/plans.ts`, `src/lib/planMath.ts`). Each user belongs to exactly one workspace at a time, as `admin` or `editor`, recorded in `workspaceMembership/{uid}`.
-- On a user's first request, they get a personal workspace.
+A **workspace** owns projects and the monthly minute allowance. Its **plan** (`workspaces.plan`, defined in the `plans` collection) sets the allowance and what the workspace may use. **Free**, where every new workspace starts (`NEW_WORKSPACE_PLAN`), gives 5 min in total that never refresh (its usage period is `lifetime`), no paid extras and no teammates; more comes through a quota request from the Usage page (`POST /api/usage/quota-request`, stored in `quotaRequests` and emailed to the team), after which an operator moves the workspace with `server/scripts/set_plan.ts`. **Starter** (also any workspace with no plan recorded, i.e. every one made before Free) gives 50 min a month, no paid extras and no teammates. **Enterprise** gives 120 min, paid extras and invitations. Each paid extra a user switches on makes every dubbed minute use more of the allowance (Enterprise: AI review +0.25, premium voices +0.5, pace re-takes +0.25). The rate is fixed when the dub is charged and stored on the job; refunds use the same rate (`server/lib/plans.ts`, `src/lib/planMath.ts`). Each user belongs to exactly one workspace at a time, as `admin` or `editor`, recorded in `memberships` (by uid).
+- On a user's first request after confirming their email, they get a personal workspace.
 - Teams form by **invitation**: an admin creates a link, and the invitee accepts it while signed in with the invited email (`server/lib/workspaces.ts`).
-- Every project read and write is addressed as `workspaces/{workspaceId}/projects/{id}`. The workspace ID always comes from the server-side membership lookup, never from the client.
+- Every project read and write filters on the project id **and** `workspaceId`. The workspace ID always comes from the server-side membership lookup, never from the client.
 
 ## Long-running work: jobs
 
-`server/lib/jobs.ts` models every dub and transcription as a **job** document (`jobs/{jobId}`):
+`server/lib/jobs.ts` models every dub and transcription as a **job** document (`jobs`, by job id):
 
 | Concern | How |
 |---|---|
@@ -84,7 +84,7 @@ After rendering, every line records a `renderKey` (a fingerprint of its text, de
 Wait for a heavy slot → download → extract 16 kHz audio → Gemini STT in chunks → remove hallucinated filler → VAD alignment → optional CTC word timing (time-boxed) → speakers → settle, with the transcript applied atomically.
 
 ## Project storage layout
-Measured: a single-document project would exceed Firestore's 1 MiB limit at 60 minutes × 3 languages. So a project is stored as one metadata document plus a `content/transcript` document and one `languages/{code}` document per language. `server/lib/projectStorage.ts` reassembles and splits them transparently, and moves old single-document projects over on their first write. Details are in [DATABASE.md](DATABASE.md).
+A project is one metadata document in `projects` plus a transcript document and one document per language in `projectSegments`, so progress polls and lists read only the small metadata. `server/lib/projectStorage.ts` reassembles and splits them transparently. Details are in [DATABASE.md](DATABASE.md) and [MONGODB.md](MONGODB.md).
 
 ## Module map
 
@@ -94,8 +94,10 @@ Measured: a single-document project would exceed Firestore's 1 MiB limit at 60 m
 | `server/app.ts` | Express app: middleware order, error format, security headers, route mounting |
 | `server/routes/*.ts` | HTTP routes (projects, dub, jobs, share, workspace, tts, usage, settings, profile, health) |
 | `server/lib/jobs.ts`, `dubQueue.ts`, `heavyWork.ts`, `semaphore.ts`, `lifecycle.ts` | Jobs, admission, shutdown |
-| `server/lib/projectRepo.ts`, `projectStorage.ts`, `documentSize.ts` | Project persistence and usage/quota |
-| `server/lib/workspaces.ts`, `auth.ts` | Tenancy, invitations, authentication |
+| `server/lib/mongo.ts`, `mediaStore.ts`, `routes/media.ts` | The MongoDB connection, transactions, indexes; GridFS files and signed, range-served media URLs |
+| `server/lib/projectRepo.ts`, `projectStorage.ts` | Project persistence and usage/quota |
+| `server/lib/accounts.ts`, `auth.ts`, `authEmail.ts`, `routes/auth.ts` | Accounts, passwords, sessions, email links, sign-in routes |
+| `server/lib/workspaces.ts` | Tenancy, invitations |
 | `server/lib/validation.ts`, `rateLimit.ts`, `limits.ts`, `httpError.ts` | Input validation, limits, errors |
 | `server/lib/ffmpeg.ts`, `mediaTools.ts`, `mediaValidation.ts`, `safeDownload.ts` | Media handling and safety |
 | `server/lib/onnxPool.ts`, `onnxWorker.mjs`, `onnxWorker.ts`, `onnxSession.ts`, `faceScan.ts`, `vad.ts` | ONNX inference (face scan, voice-activity detection) in worker threads |
@@ -111,12 +113,12 @@ The deployment is a single small VM, so capacity is bought back in code rather t
 - **Inference runs in worker threads** (`onnxPool.ts`): the face scan and the voice-activity pass. At most `ONNX_WORKERS` (default 2) start on demand and exit after five idle minutes. If a worker cannot start or dies, the task runs in-process as before and the reason is logged (`onnx_worker_crashed`); after three failures in a row workers are switched off. `onnxWorker.mjs` exists because a worker does not inherit the server's `--import tsx` loader.
 - **One inference thread per session** (`onnxSession.ts`): ONNX Runtime's default of a spinning thread per core competes with ffmpeg on 2 vCPUs.
 - **Progress polls read one document** (`GET /api/projects/:id/progress`) instead of reassembling the whole project (a read per language plus the transcript, signed URLs, a large JSON body) every second.
-- **Progress writes are throttled**: the voice loop reports every 2.5 s, not after each line, so it no longer waits on a Firestore transaction per line.
+- **Progress writes are throttled**: the voice loop reports every 2.5 s, not after each line, so it no longer waits on a database transaction per line.
 - **Checksums**: uploads and downloads use MD5 (native) instead of the storage client's JavaScript CRC32C, and files under 32 MB upload in one request.
 - **HTTP**: responses are gzip-compressed, and the hashed files under `/assets` are cached for a year (`index.html` is always revalidated).
 
 ## Scaling beyond one instance (not done; what it would take)
 This would add running cost (a load balancer, workers, a shared store) and is not needed while one machine keeps up. A direct-to-storage upload was also considered and left out: `ffprobe` and `ffmpeg` may only read local files (a crafted upload must not make them fetch URLs), so the server would download the object again to validate it and save nothing.
 - Move rate-limit counters and the membership/account caches to a shared store, or accept per-instance limits.
-- Replace the in-memory dub queue and heavy slots with Firestore leases or Cloud Tasks. Jobs already persist their state and heartbeat, so ownership would carry over.
+- Replace the in-memory dub queue and heavy slots with leases in MongoDB. Jobs already persist their state and heartbeat, so ownership would carry over.
 - Give each instance an ID in the job heartbeat and reconcile only other instances' stale jobs (the heartbeat-based rule already allows this).

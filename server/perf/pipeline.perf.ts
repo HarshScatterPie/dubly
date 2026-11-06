@@ -1,5 +1,5 @@
 // Release gate (npm run test:perf): one whole journey through the API with real ffmpeg, voice-activity and face detection,
-// job machinery and the Firebase emulators; only Google's models are replaced, by instant fakes that count every call and
+// job machinery and a throwaway MongoDB; only Google's models are replaced, by instant fakes that count every call and
 // play the ~10 requests/minute Gemini 2.5 TTS quota. It fails when a step re-buys model work it already paid for, or when
 // processing time, main-thread stalls, API latency during a dub or memory exceed their budgets.
 //

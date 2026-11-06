@@ -1,9 +1,14 @@
 # Security
 
 ## Authentication
-- **Firebase Authentication.** ScatterPie creates every account; self sign-up must stay disabled in the Firebase console (Authentication → Settings → User actions). Email verification isn't required, because accounts are created by ScatterPie and joining a team needs a private invite link as well as the matching email.
+- **Dubly's own accounts, in MongoDB** (`server/lib/accounts.ts`). Passwords are hashed with scrypt (N=2^15, r=8, 16-byte salt). Sign-in creates a server-side session: a 32-byte random token in an httpOnly, SameSite=Strict cookie (Secure over HTTPS), stored only as its SHA-256. Every request looks its session up, so signing out, a password change or reset, disabling or removing someone ends their sessions at once. Sessions end after 30 days, or 7 days unused.
+- **Sign-up** (`ALLOW_SIGNUP`, on by default) needs the emailed link before the account gets a workspace and its free minutes. Sign-up and "forgot password" answer the same whether or not the email has an account, and a wrong email fails exactly like a wrong password (same message, same time).
+- **Cross-site requests:** besides SameSite=Strict, any change sent with the cookie must come from Dubly's own pages (Sec-Fetch-Site / Origin), else `403 CROSS_SITE`.
 - **Token checks:** every request verifies the ID token (signature, expiry, project). It also checks that the account isn't disabled, deleted or revoked since the token was issued. That check is cached per user for 30 s, so revoking or disabling someone takes effect within 30 s (`server/lib/auth.ts`).
-- **Brute force and password reset** are handled by Firebase Auth. Dubly has no password endpoints of its own.
+- **Brute force:** sign-in is limited per address (30 per 15 min). Only wrong passwords count against an account: 10 per 15 min for one email from one address, 100 an hour for one email from everywhere. So someone guessing locks out only themselves, never the account's owner. Reset and verification emails are limited per address and per email. Reset links work once, for 30 minutes; verification links for 24 hours. Both are stored only as hashes.
+- **Every request** first passes a per-address ceiling (`express-rate-limit`, 3000 a minute, `RATE_ALL_PER_IP_MINUTE`); per-route and per-user limits sit on top. Behind the Cloudflare front door the address is the visitor's own, sent by the Worker with a shared secret (`EDGE_SHARED_SECRET`); without the secret the header is ignored.
+- **Session lookups are cached for 30 s** in memory. Signing out, "sign out everywhere", a password change or reset, disabling, deleting or removing someone all clear the entry at once, so they apply on the very next request. Only edits made straight in the database (Compass) wait up to 30 s.
+- **Content Security Policy is enforced** (scripts only from the site itself; no frames, plugins or other script origins).
 
 ## Authorization and tenancy
 - The workspace comes only from the server-side membership lookup. Every project, job, share and usage query is addressed through `workspaces/{workspaceId}/…`, or checked against `workspaceId` for top-level records such as jobs and shares. Another workspace's IDs answer `404`, the same as missing ones.
@@ -27,7 +32,7 @@
 - **No server-side fetching of user URLs:** sample import takes a sample ID from a server list. The download is also checked: HTTPS only, allow-listed host, public IPs after DNS, no redirects, a timeout and a byte cap (`server/lib/safeDownload.ts`).
 
 ## Signed URLs and sharing
-- Media is private in the bucket. Clients get signed URLs valid for **3 hours**, each reused for at most 55 minutes.
+- Media is private in the database (GridFS). Clients get signed URLs to `/api/media` (HMAC-SHA256 over the path and expiry, key in `system.mediaUrlKey` or `MEDIA_URL_SECRET`) valid for **3 hours**, each reused for at most 55 minutes. A changed path, signature or expiry gets `403`.
 - Share links are public for 24 hours, stored hashed, and can be turned off. The share page's own media URLs last at most 2 hours, and the page has a strict CSP and `Referrer-Policy: no-referrer`.
 
 ## API hardening
@@ -43,15 +48,14 @@
 | Secret | Where it lives | Rotation |
 |---|---|---|
 | GCP service account (Vertex, TTS) | Production: **none** with `CREDENTIALS_MODE=adc` (the VM or Cloud Run service account). Development: `gcp-service-account.json` in `CREDENTIALS_DIR` | Create a new key in IAM → replace the file → restart → delete the old key. With ADC there's nothing to rotate |
-| Firebase Admin service account | Same, via `firebase-service-account.json` or ADC (`FIREBASE_PROJECT_ID` required) | Same |
+| MongoDB passwords (`dubly_app`, `dubly_admin`, `dubly_test`) | `MONGODB_URI` in server/.env; all three in the credentials file `setup-users.mjs` wrote | Change with `db.changeUserPassword` as `dubly_admin`, update `MONGODB_URI`, restart |
 | `GEMINI_API_KEY` (optional, Gemini 3.8 voices) | `server/.env` or `DUBLY_ENV_FILE` | Create a new key in Google AI Studio → replace it → restart → delete the old key |
-| Firebase web API key | Frontend bundle (public by design) | Not secret. In the GCP console, restrict it to the Dubly and ScatterStudio origins |
 
 - **Never committed:** `.env*` (except `.env.example`), `server/credentials/` and key files are gitignored. CI runs a secret scan (TruffleHog) over the full history.
 - **Never logged:** tokens, JWTs, API keys, private keys, share tokens and URL signatures are redacted from every log line (`server/lib/log.ts`).
 - **OneDrive:** the development copy of this repo sits in a OneDrive-synced folder, so `server/.env` and `server/credentials/` are uploaded to OneDrive. Either move the working copy out of OneDrive, or keep secrets elsewhere with `CREDENTIALS_DIR` and `DUBLY_ENV_FILE`, and delete them from the synced folder.
-- **ADC permissions in production:** the runtime service account needs Vertex AI User, Cloud Text-to-Speech access, Firestore/Datastore User, Storage Object Admin on the media bucket, and **Service Account Token Creator on itself**, because signed URLs are signed through IAM when there's no key file.
-- **If a secret leaks:** rotate it at once as above, then check Cloud Audit Logs for its use. Revoke Firebase sessions of affected users with `revokeRefreshTokens`, which takes effect within 30 s.
+- **ADC permissions in production:** the runtime service account needs only Vertex AI User and Cloud Text-to-Speech access. The database is reached with its own login, never with Google credentials.
+- **If a secret leaks:** rotate it at once as above, then check Cloud Audit Logs for its use. End the sessions of affected users with "Sign out everywhere", or delete their `sessions` documents; it takes effect on their next request.
 
 ## Data retention (implemented)
 | Data | Kept |
@@ -66,7 +70,6 @@
 ## Privacy: what leaves Dubly
 | Recipient | What | When |
 |---|---|---|
-| Google Cloud (Firebase Auth, Firestore, Cloud Storage) | Account, project data, uploaded and generated media | Always |
 | Google Vertex AI (Gemini) | The video's audio (speech-to-text), transcript and translation text (translation, condensing) | Analysis, translation, dubbing |
 | Google Cloud Text-to-Speech | Translated text | Dubbing, text-to-voice (Gemini 2.5 Flash, Chirp 3 HD and premium voices) |
 | Google Gemini API (Developer API with `GEMINI_API_KEY`, else Vertex AI) | Translated text and its delivery direction | Dubbing, text-to-voice (Gemini 3.8 voices) |
@@ -76,6 +79,6 @@
 
 ## Dependency posture
 - `npm audit --omit=dev` reports **0 high/critical** issues (`vite` 6.4.4 cleared the `launch-editor` advisories of 2026-10-21). CI fails on high; the Release gate also fails on any critical issue in the build and test tooling. New advisories are published every week, so a push can fail on one that appeared since the last; update the package rather than lowering the bar.
-- **8 moderate issues remain** in the `firebase-admin@13` dependency chain (`google-gax`, `uuid`, `teeny-request`, `retry-request`). Clearing them needs `firebase-admin@14`, a major upgrade to plan and test separately.
-- Development tooling (2026-10-19): `vitest` 4.1.12 and `firebase-tools` 15 cleared the critical `tinypool`, `@vitest/mocker` and `tar` advisories, and `concurrently` 9.2.5 the `shell-quote` one. Three high issues remain in `firebase-tools`' file watcher (`chokidar` → `braces`); they never ship, as the emulators only run in tests.
+- `firebase`, `firebase-admin` and `firebase-tools` were removed on 2026-11-06 with the move to MongoDB, and their advisories with them.
+- Development tooling (2026-10-19): `vitest` 4.1.12 and `firebase-tools` 15 cleared the critical `tinypool`, `@vitest/mocker` and `tar` advisories, and `concurrently` 9.2.5 the `shell-quote` one. 
 - **CodeQL** (GitHub's default setup) alerts are checked by the Release gate before a deploy. `js/missing-rate-limiting` is reported on every route because CodeQL only recognises third-party rate-limit packages; every reported route is limited by `requireAuth` (per user) or `server/lib/rateLimit.ts` (per address), so those alerts are allowed by the gate and should be dismissed as false positives on GitHub.

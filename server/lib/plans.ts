@@ -1,10 +1,10 @@
 import type { PaidExtra, Plan, PlanId, VoiceEngine } from '../../src/types';
 import { PAID_EXTRAS } from '../../src/lib/planMath';
 import { CLOUD_ENGINES, GEMINI_API_ENGINES, isVoiceEngine } from '../../src/lib/voiceEngines';
-import { db } from './firebaseAdmin';
+import { col } from './mongo';
 import { env } from './env';
 
-// Written to Firestore the first time each plan is read, then owned there: edit dublyPlans/{id} to change a limit, a rate, invites or voice engines.
+// Written to the `plans` collection the first time each plan is read, then owned there: edit plans/{id} to change a limit, a rate, invites or voice engines.
 export const DEFAULT_PLANS: Record<PlanId, Plan> = {
   // Where every new workspace starts: a few minutes to try Dubly, once. More comes through a quota request (Usage page).
   free: {
@@ -49,9 +49,8 @@ export function newWorkspacePlanId(): PlanId {
 }
 
 const PLAN_IDS = Object.keys(DEFAULT_PLANS) as PlanId[];
-// Prefixed because this Firestore project is shared with ScatterStudio, which may have its own `plans`.
-const plansCol = () => db.collection('dublyPlans');
-const workspaceDoc = (id: string) => db.collection('workspaces').doc(id);
+const plansCol = () => col<Plan & { _id: string }>('plans');
+const workspacesCol = () => col<{ _id: string; plan?: string; planUpdatedAt?: string }>('workspaces');
 
 // Plans change by hand and rarely; a minute of staleness saves a read on every usage check.
 const CACHE_MS = 60_000;
@@ -108,11 +107,13 @@ export function withOfferedEngines(plan: Plan): Plan {
 export async function getPlan(id: PlanId): Promise<Plan> {
   const hit = planCache.get(id);
   if (hit && Date.now() - hit.at < CACHE_MS) return withOfferedEngines(hit.plan);
-  const ref = plansCol().doc(id);
-  const snap = await ref.get();
-  // create() never overwrites, so a copy an operator (or another request) wrote first always stands.
-  if (!snap.exists) await ref.create(DEFAULT_PLANS[id]).catch(() => undefined);
-  const plan = toPlan(id, snap.exists ? snap.data() : undefined);
+  // $setOnInsert never overwrites, so a copy an operator (or another request) wrote first always stands.
+  const stored = await plansCol().findOneAndUpdate(
+    { _id: id },
+    { $setOnInsert: { ...DEFAULT_PLANS[id] } },
+    { upsert: true, returnDocument: 'after', projection: { _id: 0 } }
+  );
+  const plan = toPlan(id, (stored ?? undefined) as Record<string, unknown> | undefined);
   planCache.set(id, { plan, at: Date.now() });
   return withOfferedEngines(plan);
 }
@@ -120,7 +121,7 @@ export async function getPlan(id: PlanId): Promise<Plan> {
 export async function workspacePlanId(workspaceId: string): Promise<PlanId> {
   const hit = workspacePlanCache.get(workspaceId);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.id;
-  const stored = (await workspaceDoc(workspaceId).get()).get('plan');
+  const stored = (await workspacesCol().findOne({ _id: workspaceId }, { projection: { plan: 1 } }))?.plan;
   const id = isPlanId(stored) ? stored : DEFAULT_PLAN_ID;
   workspacePlanCache.set(workspaceId, { id, at: Date.now() });
   return id;
@@ -132,9 +133,8 @@ export async function planForWorkspace(workspaceId: string): Promise<Plan> {
 
 // Moves a workspace onto a plan; run by operators through server/scripts/set_plan.ts, never exposed to customers.
 export async function setWorkspacePlan(workspaceId: string, id: PlanId): Promise<void> {
-  const ref = workspaceDoc(workspaceId);
-  if (!(await ref.get()).exists) throw new Error(`No workspace ${workspaceId}`);
-  await ref.set({ plan: id, planUpdatedAt: new Date().toISOString() }, { merge: true });
+  const result = await workspacesCol().updateOne({ _id: workspaceId }, { $set: { plan: id, planUpdatedAt: new Date().toISOString() } });
+  if (!result.matchedCount) throw new Error(`No workspace ${workspaceId}`);
   workspacePlanCache.delete(workspaceId);
 }
 

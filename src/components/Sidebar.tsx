@@ -69,11 +69,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const { user, profile, signOut } = useAuth();
   const [collapsed, setCollapsed] = useState(false);
 
-  // ScatterStudio's own shared profile first — Firebase Auth's displayName is usually
-  // empty (only Google sign-in ever fills it), so falling back to it first showed
-  // "Studio User" for most accounts even when their real name was one API call away.
+  // The name chosen at sign-up or in Settings, else the email.
   const displayName = profile?.name || user?.displayName || user?.email || 'Studio User';
-  // The picture chosen in Dubly's Settings wins over the sign-in provider's photo.
+  // The picture chosen in Dubly's Settings.
   const avatarSrc = profile?.avatar || user?.photoURL || null;
 
   const handleNav = (tab: NavigationTab) => {

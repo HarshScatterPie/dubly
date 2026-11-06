@@ -12,7 +12,7 @@ export const env = {
   host: process.env.HOST || '',
   // Plan a newly created workspace starts on (free, starter or enterprise); existing workspaces keep theirs.
   newWorkspacePlan: process.env.NEW_WORKSPACE_PLAN || 'free',
-  // Where quota-increase requests from the Usage page are emailed; empty means the SMTP account itself. They are stored in Firestore either way.
+  // Where quota-increase requests from the Usage page are emailed; empty means the SMTP account itself. They are stored in MongoDB either way.
   quotaRequestTo: process.env.QUOTA_REQUEST_TO || '',
   vertexProjectId: process.env.VERTEX_PROJECT_ID || '',
   // Gemini 3.x is only served from the `global` endpoint; regional ones like us-central1 404.
@@ -33,11 +33,17 @@ export const env = {
   geminiTtsPremiumModel: process.env.GEMINI_TTS_PREMIUM_MODEL || 'gemini-3.1-flash-tts-preview',
   // Listens to rendered lines next to the originals for the AI review (dubDirector.ts).
   geminiReviewModel: process.env.GEMINI_REVIEW_MODEL || 'gemini-3.5-flash-lite',
-  firebaseStorageBucket: process.env.FIREBASE_STORAGE_BUCKET || '',
-  // Needed only with CREDENTIALS_MODE=adc, where it cannot be read from a key file.
-  firebaseProjectId: process.env.FIREBASE_PROJECT_ID || '',
+  // The one database that holds every record and every stored file (GridFS). It must be a replica set (one node is fine), see docs/MONGODB.md.
+  mongodbUri: process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017/?directConnection=true',
+  mongodbDb: process.env.MONGODB_DB || 'dubly',
+  // Where people open Dubly; links in emails (invitations, password resets, email checks) point here.
   webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
-  // Outgoing mail (invitations). Empty SMTP_HOST or MAIL_FROM turns email off and invitations are shared by link only.
+  // Session cookies carry the Secure flag on HTTPS requests; set COOKIE_SECURE=true to require it everywhere (behind TLS), false never.
+  cookieSecure: (process.env.COOKIE_SECURE === 'true' ? 'always' : process.env.COOKIE_SECURE === 'false' ? 'never' : 'auto') as 'always' | 'never' | 'auto',
+  // Self sign-up from the login screen. Off: accounts come only from invitations and server/scripts/create_user.ts.
+  allowSignup: process.env.ALLOW_SIGNUP !== 'false',
+  // Outgoing mail (invitations, password resets, email checks). Empty SMTP_HOST or MAIL_FROM turns email off: invitations are shared by
+  // link, and outside production the reset and verification links are printed to the server log instead.
   smtpHost: process.env.SMTP_HOST || '',
   smtpPort: Number(process.env.SMTP_PORT) || 587,
   smtpUser: process.env.SMTP_USER || '',

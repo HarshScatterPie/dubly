@@ -2,7 +2,7 @@
 
 ## Where to look
 - **Logs:** in production, each line is JSON with `severity`, `message`, `event`, and the correlation IDs `requestId`, `userId`, `workspaceId`, `jobId`, `projectId` where they apply. Filter by `jsonPayload.jobId="job-…"` to follow one dub end to end, including provider retries.
-- **Job records:** `jobs/{jobId}` in Firestore shows status, stage, heartbeat, `errorCode`, `errorMessage` (the internal detail, never shown to users), minutes reserved and refunded, and `providerUsage` (TTS characters, STT seconds, estimated ₹).
+- **Job records:** `jobs` in MongoDB (Compass, `_id` = job id) shows status, stage, heartbeat, `errorCode`, `errorMessage` (the internal detail, never shown to users), minutes reserved and refunded, and `providerUsage` (TTS characters, STT seconds, estimated ₹).
 - **Users quote a reference:** an error shown with "(ref abcd1234)" is the first 8 characters of a `request_id`. Search logs for `requestId` starting with it.
 
 ## Log events
@@ -68,7 +68,7 @@
 
 **A leaked share link.** Turn it off from the project's share dialog, or `DELETE /api/projects/:id/shares/:shareId`. Its page stops at once and any copied video URL within 2 hours.
 
-**A compromised account.** Disable the user in Firebase Auth. Their sessions stop working within 30 seconds. Remove them from the workspace if needed.
+**A compromised account.** Set `disabled: true` on their `users` document (Compass) and delete their `sessions` documents (`{ uid: ... }`); their next request is refused. Remove them from the workspace if needed.
 
 **Disk filling up.**
 - `server/tmp` is swept hourly (entries older than 6 hours) and after each job. The TTS cache is capped at 1.5 GB.
@@ -83,4 +83,4 @@
   `npx tsx -e "import('./server/lib/jobs.ts').then(m => m.settleInterruptedJob('job-…')).then(console.log)"`
 - **Roll back the project storage split:** `npx tsx server/scripts/unsplit_projects.ts` (dry run), then `--apply`.
 - **Move a workspace to another plan:** `npx tsx server/scripts/set_plan.ts <workspace id | member email> enterprise` (or `starter`). With no plan argument, it shows the current plan. The server picks up the change within a minute. Moving to Starter keeps existing teammates, but no new ones can join, including through links sent earlier.
-- **Change what a plan includes:** edit `dublyPlans/starter` or `dublyPlans/enterprise` in the Firestore console (`minutesPerMonth`, `paidExtras`, `extraRates`, `teamInvites`, `name`). Every workspace on that plan follows within a minute.
+- **Change what a plan includes:** edit the `starter` or `enterprise` document in the `plans` collection (Compass) (`minutesPerMonth`, `paidExtras`, `extraRates`, `teamInvites`, `name`). Every workspace on that plan follows within a minute.

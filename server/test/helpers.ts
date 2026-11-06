@@ -1,33 +1,36 @@
 import type { AddressInfo } from 'node:net';
 import type { Server } from 'node:http';
 import { createApp } from '../app';
-import { authAdmin, db } from '../lib/firebaseAdmin';
+import { col, mergeUpdate, mongoDb, withTransaction } from '../lib/mongo';
+import { deleteProjectDocuments, insertPlan, loadProject, planProjectWrite } from '../lib/projectStorage';
+import { updateStoredProject, type StoredProject } from '../lib/projectRepo';
+import { checkCredentials, clearSessionCaches, createSession, createUser as createAccount } from '../lib/accounts';
+import { resetMediaKeyForTests } from '../lib/mediaStore';
 import { clearMembershipCache } from '../lib/workspaces';
-import { clearAccountStateCache } from '../lib/auth';
 import { resetLifecycleForTests } from '../lib/lifecycle';
 import { clearRateLimits } from '../lib/rateLimit';
 import { resetQueueForTests } from '../lib/dubQueue';
 import { clearPlanCaches } from '../lib/plans';
 import { clearUserCaches } from '../lib/projectRepo';
 
-const projectId = () => process.env.GCLOUD_PROJECT || 'demo-dubly';
-
-// Wipes Firestore and Auth in the emulator between tests, plus the in-process caches that would otherwise remember wiped data.
-export async function resetEmulators(): Promise<void> {
-  const fs = process.env.FIRESTORE_EMULATOR_HOST;
-  const auth = process.env.FIREBASE_AUTH_EMULATOR_HOST;
-  await Promise.all([
-    fetch(`http://${fs}/emulator/v1/projects/${projectId()}/databases/(default)/documents`, { method: 'DELETE' }),
-    fetch(`http://${auth}/emulator/v1/projects/${projectId()}/accounts`, { method: 'DELETE' }),
-  ]);
+// Empties every collection of the test database between tests (indexes stay), plus the in-process caches that would remember wiped data.
+export async function resetDatabase(): Promise<void> {
+  const collections = await mongoDb().listCollections({}, { nameOnly: true }).toArray();
+  for (const { name } of collections) {
+    if (!name.startsWith('system.')) await mongoDb().collection(name).deleteMany({});
+  }
   clearMembershipCache();
-  clearAccountStateCache();
   resetLifecycleForTests();
   clearRateLimits();
   resetQueueForTests();
   clearPlanCaches();
   clearUserCaches();
+  resetMediaKeyForTests();
+  clearSessionCaches();
 }
+
+// The name the tests have always used for "start from a clean slate".
+export const resetEmulators = resetDatabase;
 
 export interface TestUser {
   uid: string;
@@ -35,26 +38,22 @@ export interface TestUser {
   token: string;
 }
 
-// A real emulator account and a real ID token for it, verified by the same requireAuth production uses.
+// A real account and a real session for it, checked by the same requireAuth production uses (sent as a Bearer token).
 export async function createUser(email: string, password = 'correct-horse-battery', emailVerified = true): Promise<TestUser> {
-  const user = await authAdmin.createUser({ email, password, emailVerified });
-  return { uid: user.uid, email, token: await signIn(email, password) };
+  const user = await createAccount({ email, password, emailVerified });
+  return { uid: user.uid, email: user.email, token: (await createSession(user.uid)).token };
 }
 
 export async function signIn(email: string, password = 'correct-horse-battery'): Promise<string> {
-  const res = await fetch(
-    `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}/identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=test`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password, returnSecureToken: true }) }
-  );
-  const body = (await res.json()) as { idToken?: string };
-  if (!body.idToken) throw new Error(`Emulator sign-in failed for ${email}`);
-  return body.idToken;
+  const user = await checkCredentials(email, password);
+  if (!user) throw new Error(`Sign-in failed for ${email}`);
+  return (await createSession(user._id)).token;
 }
 
 export interface TestApi {
   baseUrl: string;
   close: () => Promise<void>;
-  call: (method: string, path: string, opts?: { token?: string; body?: unknown; headers?: Record<string, string> }) => Promise<{ status: number; body: any }>;
+  call: (method: string, path: string, opts?: { token?: string; body?: unknown; headers?: Record<string, string> }) => Promise<{ status: number; body: any; headers: Headers }>;
 }
 
 export async function startApi(): Promise<TestApi> {
@@ -78,9 +77,34 @@ export async function startApi(): Promise<TestApi> {
       } catch {
         // Non-JSON responses (share pages) are returned as text.
       }
-      return { status: res.status, body };
+      return { status: res.status, body, headers: res.headers };
     },
   };
 }
 
-export { db, authAdmin };
+// --- Direct database access for test setup and assertions, through the same layout the app uses ---------------------------------
+
+// Writes a whole project (metadata and lines) the way the app stores it, replacing any earlier one with that id.
+export async function seedProject(workspaceId: string, project: Record<string, unknown> & { id: string }): Promise<void> {
+  await withTransaction(async (session) => {
+    await deleteProjectDocuments(workspaceId, project.id, session);
+    await insertPlan(workspaceId, project.id, planProjectWrite(workspaceId, project.id, undefined, project as Partial<StoredProject>), session);
+  });
+}
+
+// The project reassembled (metadata and lines), or null.
+export const readProject = (workspaceId: string, projectId: string) => loadProject(workspaceId, projectId);
+// A partial update through the app's own write path (nested fields merge, lines go to their own documents).
+export const writeProject = (workspaceId: string, projectId: string, patch: Record<string, unknown>) => updateStoredProject(workspaceId, projectId, patch as Partial<StoredProject>);
+
+type Doc = Record<string, any>;
+export const usageOf = async (workspaceId: string): Promise<Doc | null> => col<Doc & { _id: string }>('usage').findOne({ _id: workspaceId });
+export const minutesUsedIn = async (workspaceId: string): Promise<number> => ((await usageOf(workspaceId))?.minutesDubbed as number) ?? 0;
+export const mergeUsage = (workspaceId: string, fields: Doc) => col<Doc & { _id: string }>('usage').updateOne({ _id: workspaceId }, mergeUpdate(fields), { upsert: true });
+export const replaceUsage = (workspaceId: string, doc: Doc) => col<Doc & { _id: string }>('usage').replaceOne({ _id: workspaceId }, doc, { upsert: true });
+export const patchJob = (jobId: string, fields: Doc) => col<Doc & { _id: string }>('jobs').updateOne({ _id: jobId }, mergeUpdate(fields));
+export const countJobs = () => col('jobs').countDocuments();
+export const planDoc = (planId: string) => col<Doc & { _id: string }>('plans').findOne({ _id: planId });
+export const mergePlan = (planId: string, fields: Doc) => col<Doc & { _id: string }>('plans').updateOne({ _id: planId }, mergeUpdate(fields), { upsert: true });
+
+export { col, mongoDb };

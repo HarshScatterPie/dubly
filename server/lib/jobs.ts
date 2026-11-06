@@ -1,11 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { rm } from 'node:fs/promises';
-import { FieldValue } from 'firebase-admin/firestore';
-import { db } from './firebaseAdmin';
-import { prepareRefund, prepareReservation, projectRef, type StoredProject } from './projectRepo';
+import type { ClientSession } from 'mongodb';
+import { col, DELETE_FIELD, withTransaction } from './mongo';
+import { prepareRefund, prepareReservation, type StoredProject } from './projectRepo';
 import { tmpDir } from './paths';
-import { applyPlan, planProjectWrite } from './projectStorage';
+import { applyPlan, loadProjectMeta, planProjectWrite, projectsCol, type ProjectDoc } from './projectStorage';
 import type { PaidExtrasChoice } from '../../src/lib/planMath';
 
 // A job is the persisted record of one dub or transcription: project ownership, heartbeat, cancellation and exactly-once minute settlement.
@@ -50,12 +50,12 @@ export interface DubJob {
 }
 
 export const HEARTBEAT_INTERVAL_MS = 15_000;
-// Six missed heartbeats: comfortably past any GC pause or slow Firestore write, well short of a user giving up.
+// Six missed heartbeats: comfortably past any GC pause or slow database write, well short of a user giving up.
 export const STALE_AFTER_MS = 90_000;
 const IDEMPOTENCY_TTL_MS = 24 * 60 * 60 * 1000;
 
-const jobsCol = () => db.collection('jobs');
-const idempotencyCol = () => db.collection('jobIdempotency');
+const jobsCol = () => col<DubJob & { _id: string; providerUsage?: Record<string, number> }>('jobs');
+const idempotencyCol = () => col<{ _id: string; jobId: string; createdAt: string }>('jobIdempotency');
 
 export const jobDirFor = (jobId: string) => path.join(tmpDir, 'jobs', jobId);
 
@@ -96,8 +96,7 @@ class StaleActiveJob extends Error {
 }
 
 export async function getJob(jobId: string): Promise<DubJob | null> {
-  const snap = await jobsCol().doc(jobId).get();
-  return snap.exists ? (snap.data() as DubJob) : null;
+  return (await jobsCol().findOne({ _id: jobId }, { projection: { _id: 0 } })) as DubJob | null;
 }
 
 export function isStale(job: Pick<DubJob, 'heartbeatAt'>, now = Date.now()): boolean {
@@ -131,35 +130,34 @@ export async function startDubJob(input: StartDubJobInput): Promise<{ job: DubJo
   }
 }
 
+// The project's current holder, if it still holds it: a conflict while it runs, a StaleActiveJob once its process is gone.
+async function assertProjectFree(project: ProjectDoc, session: ClientSession): Promise<void> {
+  if (!project.activeJobId) return;
+  const activeJob = (await jobsCol().findOne({ _id: project.activeJobId }, { session, projection: { _id: 0 } })) as DubJob | null;
+  if (activeJob && !activeJob.settled) {
+    if (isStale(activeJob)) throw new StaleActiveJob(activeJob.id);
+    throw new JobConflictError(activeJob.id, activeJob.type);
+  }
+}
+
 async function startDubJobOnce(input: StartDubJobInput): Promise<{ job: DubJob; replayed: boolean }> {
   const key = input.idempotencyKey?.trim() || null;
-  const idemRef = key
-    ? idempotencyCol().doc(createHash('sha256').update(`${input.workspaceId}|${input.projectId}|${key}`).digest('hex'))
-    : null;
-  const pRef = projectRef(input.workspaceId, input.projectId);
+  const idemId = key ? createHash('sha256').update(`${input.workspaceId}|${input.projectId}|${key}`).digest('hex') : null;
 
-  return db.runTransaction(async (tx) => {
-    if (idemRef) {
-      const idem = await tx.get(idemRef);
-      if (idem.exists && Date.now() - new Date(idem.get('createdAt') as string).getTime() < IDEMPOTENCY_TTL_MS) {
-        const earlier = await tx.get(jobsCol().doc(idem.get('jobId') as string));
-        if (earlier.exists) return { job: earlier.data() as DubJob, replayed: true };
+  return withTransaction(async (session) => {
+    if (idemId) {
+      const idem = await idempotencyCol().findOne({ _id: idemId }, { session });
+      if (idem && Date.now() - new Date(idem.createdAt).getTime() < IDEMPOTENCY_TTL_MS) {
+        const earlier = await getJobIn(idem.jobId, session);
+        if (earlier) return { job: earlier, replayed: true };
       }
     }
 
-    const projectSnap = await tx.get(pRef);
-    if (!projectSnap.exists) throw new Error('Project not found');
-    const project = projectSnap.data() as StoredProject;
-    if (project.activeJobId) {
-      const active = await tx.get(jobsCol().doc(project.activeJobId));
-      const activeJob = active.exists ? (active.data() as DubJob) : null;
-      if (activeJob && !activeJob.settled) {
-        if (isStale(activeJob)) throw new StaleActiveJob(activeJob.id);
-        throw new JobConflictError(activeJob.id, activeJob.type);
-      }
-    }
+    const project = await loadProjectMeta(input.workspaceId, input.projectId, session);
+    if (!project) throw new Error('Project not found');
+    await assertProjectFree(project, session);
 
-    const reservation = await prepareReservation(tx, input.workspaceId, input.minutes);
+    const reservation = await prepareReservation(session, input.workspaceId, input.minutes);
     const now = new Date().toISOString();
     const job: DubJob = {
       id: `job-${randomUUID()}`,
@@ -189,23 +187,29 @@ async function startDubJobOnce(input: StartDubJobInput): Promise<{ job: DubJob; 
       ...(input.extras ? { extras: input.extras } : {}),
       ...(input.sourceSeconds ? { sourceSeconds: input.sourceSeconds } : {}),
     };
-    reservation.commit();
-    tx.set(jobsCol().doc(job.id), job);
-    tx.set(
-      pRef,
+    await reservation.commit();
+    await jobsCol().insertOne({ _id: job.id, ...job }, { session });
+    await projectsCol().updateOne(
+      { _id: input.projectId, workspaceId: input.workspaceId },
       {
-        activeJobId: job.id,
-        dubAttempts: job.attemptCount,
-        status: 'processing',
-        progressPercent: 5,
-        currentProcessingMessage: 'Preparing dubbing pipeline...',
-        updatedAt: now,
+        $set: {
+          activeJobId: job.id,
+          dubAttempts: job.attemptCount,
+          status: 'processing',
+          progressPercent: 5,
+          currentProcessingMessage: 'Preparing dubbing pipeline...',
+          updatedAt: now,
+        },
       },
-      { merge: true }
+      { session }
     );
-    if (idemRef) tx.set(idemRef, { jobId: job.id, createdAt: now });
+    if (idemId) await idempotencyCol().replaceOne({ _id: idemId }, { jobId: job.id, createdAt: now }, { upsert: true, session });
     return { job, replayed: false };
   });
+}
+
+async function getJobIn(jobId: string, session: ClientSession): Promise<DubJob | null> {
+  return (await jobsCol().findOne({ _id: jobId }, { session, projection: { _id: 0 } })) as DubJob | null;
 }
 
 // Starts a transcription: takes the project and records the job in one transaction, settling a stale holder first; nothing is charged.
@@ -224,19 +228,10 @@ export async function startTranscribeJob(input: { workspaceId: string; projectId
 }
 
 async function startTranscribeJobOnce(input: { workspaceId: string; projectId: string; userId: string }): Promise<DubJob> {
-  const pRef = projectRef(input.workspaceId, input.projectId);
-  return db.runTransaction(async (tx) => {
-    const projectSnap = await tx.get(pRef);
-    if (!projectSnap.exists) throw new Error('Project not found');
-    const project = projectSnap.data() as StoredProject;
-    if (project.activeJobId) {
-      const active = await tx.get(jobsCol().doc(project.activeJobId));
-      const activeJob = active.exists ? (active.data() as DubJob) : null;
-      if (activeJob && !activeJob.settled) {
-        if (isStale(activeJob)) throw new StaleActiveJob(activeJob.id);
-        throw new JobConflictError(activeJob.id, activeJob.type);
-      }
-    }
+  return withTransaction(async (session) => {
+    const project = await loadProjectMeta(input.workspaceId, input.projectId, session);
+    if (!project) throw new Error('Project not found');
+    await assertProjectFree(project, session);
     const now = new Date().toISOString();
     const job: DubJob = {
       id: `job-${randomUUID()}`,
@@ -266,21 +261,20 @@ async function startTranscribeJobOnce(input: { workspaceId: string; projectId: s
       cancelRequested: null,
       result: null,
     };
-    tx.set(jobsCol().doc(job.id), job);
-    tx.set(pRef, { activeJobId: job.id, progressPercent: 2, currentProcessingMessage: 'Starting analysis', updatedAt: now }, { merge: true });
+    await jobsCol().insertOne({ _id: job.id, ...job }, { session });
+    await projectsCol().updateOne(
+      { _id: input.projectId, workspaceId: input.workspaceId },
+      { $set: { activeJobId: job.id, progressPercent: 2, currentProcessingMessage: 'Starting analysis', updatedAt: now } },
+      { session }
+    );
     return job;
   });
 }
 
-// Asks a run to stop; it notices at its next progress write. False if the job is already finished.
+// Asks a run to stop; it notices at its next progress write. False if the job is already finished. An earlier reason is kept.
 export async function requestCancel(jobId: string, reason: 'user' | 'timeout' = 'user'): Promise<boolean> {
-  const ref = jobsCol().doc(jobId);
-  return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    if (!snap.exists || snap.get('settled')) return false;
-    if (!snap.get('cancelRequested')) tx.update(ref, { cancelRequested: reason });
-    return true;
-  });
+  const updated = await jobsCol().findOneAndUpdate({ _id: jobId, settled: false }, [{ $set: { cancelRequested: { $ifNull: ['$cancelRequested', reason] } } }]);
+  return updated !== null;
 }
 
 // The view of a job a client may see: no internal error text.
@@ -307,16 +301,19 @@ export function toClientJob(job: DubJob) {
 
 // Marks an admitted job running; false if it was settled, cancelled or lost the project while waiting, so it must not run.
 export async function markJobStarted(job: Pick<DubJob, 'id' | 'workspaceId' | 'projectId'>): Promise<boolean> {
-  const pRef = projectRef(job.workspaceId, job.projectId);
-  const jobRef = jobsCol().doc(job.id);
-  return db.runTransaction(async (tx) => {
-    const [jobSnap, projectSnap] = await Promise.all([tx.get(jobRef), tx.get(pRef)]);
-    if (!jobSnap.exists || jobSnap.get('settled') || !projectSnap.exists || projectSnap.get('activeJobId') !== job.id) return false;
+  return withTransaction(async (session) => {
+    const stored = await getJobIn(job.id, session);
+    const project = await loadProjectMeta(job.workspaceId, job.projectId, session);
+    if (!stored || stored.settled || !project || project.activeJobId !== job.id) return false;
     // Cancelled while it waited: it never starts (the cancel request settles it).
-    if (jobSnap.get('cancelRequested')) return false;
+    if (stored.cancelRequested) return false;
     const now = new Date().toISOString();
-    tx.update(jobRef, { status: 'running', stage: 'starting', startedAt: now, heartbeatAt: now });
-    tx.set(pRef, { currentProcessingMessage: 'Preparing dubbing pipeline...', updatedAt: now }, { merge: true });
+    await jobsCol().updateOne({ _id: job.id }, { $set: { status: 'running', stage: 'starting', startedAt: now, heartbeatAt: now } }, { session });
+    await projectsCol().updateOne(
+      { _id: job.projectId, workspaceId: job.workspaceId },
+      { $set: { currentProcessingMessage: 'Preparing dubbing pipeline...', updatedAt: now } },
+      { session }
+    );
     return true;
   });
 }
@@ -327,24 +324,23 @@ export async function writeProjectForJob(
   patch: Partial<StoredProject>,
   jobPatch: Partial<Pick<DubJob, 'stage' | 'progress' | 'completedLanguages' | 'failedLanguages'>> = {}
 ): Promise<void> {
-  const pRef = projectRef(job.workspaceId, job.projectId);
-  const jobRef = jobsCol().doc(job.id);
-  await db.runTransaction(async (tx) => {
-    const [snap, jobSnap] = await Promise.all([tx.get(pRef), tx.get(jobRef)]);
-    if (!snap.exists || snap.get('activeJobId') !== job.id) throw new JobSupersededError(job.id);
+  await withTransaction(async (session) => {
+    const project = await loadProjectMeta(job.workspaceId, job.projectId, session);
+    const stored = await jobsCol().findOne({ _id: job.id }, { session, projection: { cancelRequested: 1 } });
+    if (!project || project.activeJobId !== job.id) throw new JobSupersededError(job.id);
     // Every run reports progress between steps, which makes this the natural place to notice a cancel request.
-    const cancel = jobSnap.get('cancelRequested') as 'user' | 'timeout' | null | undefined;
+    const cancel = stored?.cancelRequested;
     if (cancel) throw new JobCancelledError(job.id, cancel);
     const now = new Date().toISOString();
-    applyPlan(tx, pRef, planProjectWrite(pRef, snap.data() as StoredProject, { ...patch, updatedAt: now }));
-    tx.update(jobRef, { ...jobPatch, heartbeatAt: now });
+    await applyPlan(job.workspaceId, job.projectId, planProjectWrite(job.workspaceId, job.projectId, project, { ...patch, updatedAt: now }), session);
+    await jobsCol().updateOne({ _id: job.id }, { $set: { ...jobPatch, heartbeatAt: now } }, { session });
   });
 }
 
 // Checked right before overwriting shared output paths in storage, so a run that lost ownership stops before it uploads.
 export async function assertStillActive(job: Pick<DubJob, 'id' | 'workspaceId' | 'projectId'>): Promise<void> {
-  const snap = await projectRef(job.workspaceId, job.projectId).get();
-  if (!snap.exists || snap.get('activeJobId') !== job.id) throw new JobSupersededError(job.id);
+  const project = await projectsCol().findOne({ _id: job.projectId, workspaceId: job.workspaceId }, { projection: { activeJobId: 1 } });
+  if (!project || project.activeJobId !== job.id) throw new JobSupersededError(job.id);
 }
 
 export interface JobOutcome {
@@ -362,36 +358,38 @@ export interface JobOutcome {
 
 // Records a job's outcome, refunds unused minutes and releases the project in one transaction, exactly once.
 export async function settleJob(jobId: string, outcome: JobOutcome): Promise<boolean> {
-  const jobRef = jobsCol().doc(jobId);
-  return db.runTransaction(async (tx) => {
-    const jobSnap = await tx.get(jobRef);
-    if (!jobSnap.exists) return false;
-    const job = jobSnap.data() as DubJob;
-    if (job.settled) return false;
-    const pRef = projectRef(job.workspaceId, job.projectId);
-    const projectSnap = await tx.get(pRef);
-    const refund = await prepareRefund(tx, job.workspaceId, Math.min(Math.max(0, outcome.refundMinutes), job.minutesReserved), job.usagePeriod);
+  return withTransaction(async (session) => {
+    const job = await getJobIn(jobId, session);
+    if (!job || job.settled) return false;
+    const project = await loadProjectMeta(job.workspaceId, job.projectId, session);
+    const refund = await prepareRefund(session, job.workspaceId, Math.min(Math.max(0, outcome.refundMinutes), job.minutesReserved), job.usagePeriod);
 
     const now = new Date().toISOString();
-    refund.commit();
-    tx.update(jobRef, {
-      status: outcome.status,
-      settled: true,
-      finishedAt: now,
-      heartbeatAt: now,
-      stage: 'finished',
-      progress: outcome.status === 'completed' || outcome.status === 'partially_completed' ? 100 : job.progress,
-      minutesRefunded: refund.refunded,
-      errorCode: outcome.errorCode ?? null,
-      errorMessage: outcome.errorMessage ?? null,
-      userMessage: outcome.userMessage ?? null,
-      result: outcome.result ?? null,
-      completedLanguages: outcome.completedLanguages ?? job.completedLanguages,
-      failedLanguages: outcome.failedLanguages ?? job.failedLanguages,
-    });
-    if (projectSnap.exists && projectSnap.get('activeJobId') === jobId) {
-      const plan = planProjectWrite(pRef, projectSnap.data() as StoredProject, { ...(outcome.projectPatch || {}), updatedAt: now });
-      applyPlan(tx, pRef, { ...plan, project: { ...plan.project, activeJobId: FieldValue.delete() } });
+    await refund.commit();
+    await jobsCol().updateOne(
+      { _id: jobId },
+      {
+        $set: {
+          status: outcome.status,
+          settled: true,
+          finishedAt: now,
+          heartbeatAt: now,
+          stage: 'finished',
+          progress: outcome.status === 'completed' || outcome.status === 'partially_completed' ? 100 : job.progress,
+          minutesRefunded: refund.refunded,
+          errorCode: outcome.errorCode ?? null,
+          errorMessage: outcome.errorMessage ?? null,
+          userMessage: outcome.userMessage ?? null,
+          result: outcome.result ?? null,
+          completedLanguages: outcome.completedLanguages ?? job.completedLanguages,
+          failedLanguages: outcome.failedLanguages ?? job.failedLanguages,
+        },
+      },
+      { session }
+    );
+    if (project && project.activeJobId === jobId) {
+      const plan = planProjectWrite(job.workspaceId, job.projectId, project, { ...(outcome.projectPatch || {}), updatedAt: now });
+      await applyPlan(job.workspaceId, job.projectId, { ...plan, project: { ...plan.project, activeJobId: DELETE_FIELD } }, session);
     }
     return true;
   });
@@ -425,11 +423,8 @@ export async function reconcileStaleJobs(
   now = Date.now(),
   requeue?: (job: DubJob) => void
 ): Promise<string[]> {
-  const snap = await jobsCol().where('settled', '==', false).get();
-  const stale = snap.docs
-    .map((d) => d.data() as DubJob)
-    .filter((job) => !exclude.has(job.id) && isStale(job, now))
-    .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  const unsettled = (await jobsCol().find({ settled: false }, { projection: { _id: 0 } }).toArray()) as DubJob[];
+  const stale = unsettled.filter((job) => !exclude.has(job.id) && isStale(job, now)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const recovered: string[] = [];
   for (const job of stale) {
     if (requeue && job.status === 'queued') {
@@ -442,24 +437,20 @@ export async function reconcileStaleJobs(
   return recovered;
 }
 
-// Takes over a stale queued job for this process (fresh heartbeat), unless someone else already did.
+// Takes over a stale queued job for this process (fresh heartbeat), unless someone else already did: one conditional write.
 async function claimQueuedJob(jobId: string, now: number): Promise<DubJob | null> {
-  const ref = jobsCol().doc(jobId);
-  return db.runTransaction(async (tx) => {
-    const snap = await tx.get(ref);
-    const job = snap.exists ? (snap.data() as DubJob) : null;
-    if (!job || job.settled || job.status !== 'queued' || !isStale(job, now)) return null;
-    const heartbeatAt = new Date().toISOString();
-    tx.update(ref, { heartbeatAt });
-    return { ...job, heartbeatAt };
-  });
+  const staleBefore = new Date(now - STALE_AFTER_MS).toISOString();
+  return (await jobsCol().findOneAndUpdate(
+    { _id: jobId, settled: false, status: 'queued', heartbeatAt: { $lt: staleBefore } },
+    { $set: { heartbeatAt: new Date().toISOString() } },
+    { returnDocument: 'after', projection: { _id: 0 } }
+  )) as DubJob | null;
 }
 
 // Provider usage of a run, kept on the job for cost reporting; best-effort, never fails the job.
 export async function recordJobUsage(jobId: string, usage: Record<string, number>): Promise<void> {
   await jobsCol()
-    .doc(jobId)
-    .update({ providerUsage: usage })
+    .updateOne({ _id: jobId }, { $set: { providerUsage: usage } })
     .catch((err) => console.error(`[jobs] could not record usage for ${jobId}`, err));
 }
 
@@ -467,8 +458,7 @@ export async function recordJobUsage(jobId: string, usage: Record<string, number
 export function startHeartbeat(jobId: string, intervalMs = HEARTBEAT_INTERVAL_MS): () => void {
   const timer = setInterval(() => {
     jobsCol()
-      .doc(jobId)
-      .update({ heartbeatAt: new Date().toISOString() })
+      .updateOne({ _id: jobId }, { $set: { heartbeatAt: new Date().toISOString() } })
       .catch((err) => console.error(`[jobs] heartbeat failed for ${jobId}`, err));
   }, intervalMs);
   timer.unref();

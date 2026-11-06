@@ -22,8 +22,8 @@ import { sniffContainer, validateMedia } from './mediaValidation';
 import { buildKaraokeAss } from './captions';
 import { detectSpeechRegions } from './forcedAlign';
 import { limits } from './limits';
-import { createUser, db, resetEmulators, startApi, type TestApi } from '../test/helpers';
-import { bucket } from './firebaseAdmin';
+import { createUser, readProject, resetEmulators, startApi, type TestApi } from '../test/helpers';
+import { findStoredFile } from './mediaStore';
 
 let dir: string;
 const f = (name: string) => path.join(dir, name);
@@ -238,10 +238,11 @@ describe('POST /api/projects/:id/upload', () => {
     expect(res.status).toBe(200);
     expect(body.videoDuration).toBeGreaterThan(1);
     const wsId = (await api.call('GET', '/api/workspace', { token: user.token })).body.id;
-    const stored = await db.collection('workspaces').doc(wsId).collection('projects').doc(projectId).get();
-    expect(stored.get('videoStoragePath')).toBe(`workspaces/${wsId}/projects/${projectId}/source.webm`);
-    const [meta] = await bucket.file(stored.get('videoStoragePath')).getMetadata();
-    expect(meta.contentType).toBe('video/webm');
+    const stored = await readProject(wsId, projectId);
+    expect(stored?.videoStoragePath).toBe(`workspaces/${wsId}/projects/${projectId}/source.webm`);
+    const file = await findStoredFile(stored!.videoStoragePath!);
+    expect(file?.metadata?.contentType).toBe('video/webm');
+    expect(file?.metadata?.sha256).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('refuses a playlist disguised as an MP4 with a clear 400', async () => {

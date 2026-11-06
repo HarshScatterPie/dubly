@@ -3,7 +3,8 @@ import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { Response } from 'express';
-import { bucket, db, signReadUrl } from '../lib/firebaseAdmin';
+import { col } from '../lib/mongo';
+import { fileExists, signReadUrl } from '../lib/mediaStore';
 import { getStoredProject, projectLanguages, segmentsForLanguage } from '../lib/projectRepo';
 import { toVtt, type CaptionLine } from '../../src/lib/captionCues';
 import { getLanguageName } from '../lib/languageMeta';
@@ -17,7 +18,7 @@ import { renderMessagePage, renderSharePage, shareCsp } from '../lib/sharePage';
 const SHARE_TTL_MS = 24 * 60 * 60 * 1000;
 // Media URLs on the share page live at most this long, so turning a link off also stops its copied video URL soon after.
 const SHARE_MEDIA_URL_MAX_MS = 2 * 60 * 60 * 1000;
-const sharesCol = () => db.collection('shares');
+const sharesCol = () => col<StoredShare & { _id: string }>('shares');
 // Like invitations, a share is stored under the token's hash: the link is the only copy of the token.
 export const shareIdFor = (token: string) => createHash('sha256').update(token).digest('hex');
 
@@ -38,8 +39,7 @@ interface StoredShare {
 
 // Removes every share of a project, e.g. when the project itself is deleted.
 export async function deleteSharesForProject(projectId: string): Promise<void> {
-  const snap = await sharesCol().where('projectId', '==', projectId).get();
-  await Promise.all(snap.docs.map((d) => d.ref.delete()));
+  await sharesCol().deleteMany({ projectId });
 }
 
 // Mounted behind requireAuth + requireWorkspace: any member of the project's workspace can mint a link.
@@ -82,31 +82,29 @@ shareCreateRouter.post('/:id/share', validateBody(schemas.share), async (req, re
     expiresAt: new Date(now + SHARE_TTL_MS).toISOString(),
   };
   const shareId = shareIdFor(token);
-  await sharesCol().doc(shareId).set(share);
+  await sharesCol().insertOne({ _id: shareId, ...share });
   res.status(201).json({ token, shareId, path: `/api/share/${token}`, expiresAt: share.expiresAt, captions });
 });
 
 // Live links of a project, so members can see what is out there and turn links off.
 shareCreateRouter.get('/:id/shares', async (req, res) => {
-  const snap = await sharesCol().where('projectId', '==', req.params.id).get();
+  const docs = await sharesCol().find({ projectId: req.params.id, workspaceId: req.workspaceId }).toArray();
   const now = Date.now();
-  const shares = snap.docs
-    .map((d) => ({ id: d.id, ...(d.data() as StoredShare) }))
+  const shares = docs
+    .map(({ _id, ...share }) => ({ id: _id, ...share }))
     .filter((s) => s.workspaceId === req.workspaceId && !s.revokedAt && new Date(s.expiresAt).getTime() > now)
     .map((s) => ({ id: s.id, languageCode: s.languageCode, captions: s.captions !== false, createdAt: s.createdAt, expiresAt: s.expiresAt }));
   res.json({ shares });
 });
 
 shareCreateRouter.delete('/:id/shares/:shareId', async (req, res) => {
-  const ref = sharesCol().doc(req.params.shareId);
-  const snap = await ref.get();
-  const share = snap.exists ? (snap.data() as StoredShare) : null;
+  const share = await sharesCol().findOne({ _id: req.params.shareId });
   // Another workspace's link looks exactly like a missing one.
   if (!share || share.workspaceId !== req.workspaceId || share.projectId !== req.params.id) {
     res.status(404).json({ error: 'Share link not found' });
     return;
   }
-  if (!share.revokedAt) await ref.update({ revokedAt: new Date().toISOString(), revokedBy: req.uid });
+  if (!share.revokedAt) await sharesCol().updateOne({ _id: req.params.shareId }, { $set: { revokedAt: new Date().toISOString(), revokedBy: req.uid } });
   res.status(204).send();
 });
 
@@ -115,11 +113,12 @@ export const publicShareRouter = Router();
 
 // Only ever by the token's hash: a share's id is not secret (members list it, and it appears in request logs), so it must not open the link.
 // Links stored under their raw token, from before hashing (2026-09-24), all expired within a day.
-function findShare(token: string) {
-  return sharesCol().doc(shareIdFor(token)).get();
+async function findShare(token: string): Promise<{ id: string; share: StoredShare | null }> {
+  const id = shareIdFor(token);
+  return { id, share: await sharesCol().findOne({ _id: id }, { projection: { _id: 0 } }) };
 }
 
-// The page carries the dub's captions inline, read from Firestore; a burst of viewers of one link shares a single read for a few minutes.
+// The page carries the dub's captions inline, read from the database; a burst of viewers of one link shares a single read for a few minutes.
 const CAPTION_LINES_TTL_MS = 5 * 60 * 1000;
 const captionLinesCache = new Map<string, { lines: CaptionLine[]; at: number }>();
 
@@ -143,13 +142,12 @@ publicShareRouter.get('/_assets/scatterpie-logo.png', rateLimit('share-asset', [
 
 // The dub's captions as a WebVTT file; the page itself carries them inline. They die with the link, and with the captions switch.
 publicShareRouter.get('/:token/captions.vtt', rateLimit('share-view', [['ip', rateRules.shareViewPerIp]]), async (req, res) => {
-  const snap = await findShare(req.params.token);
-  const share = snap.exists ? (snap.data() as StoredShare) : null;
+  const { id: shareId, share } = await findShare(req.params.token);
   if (!share || share.revokedAt || share.captions === false || new Date(share.expiresAt).getTime() <= Date.now() || !share.workspaceId) {
     res.status(404).type('text/plain').send('Not found');
     return;
   }
-  const lines = await captionLinesFor(snap.id, share);
+  const lines = await captionLinesFor(shareId, share);
   res.status(200).type('text/vtt').setHeader('Cache-Control', 'no-store').send(toVtt(lines, share.title));
 });
 
@@ -161,12 +159,11 @@ publicShareRouter.get('/:token', rateLimit('share-view', [['ip', rateRules.share
   // Nothing may run on the error pages; the player page swaps in a policy with its own nonce below.
   res.setHeader('Content-Security-Policy', shareCsp());
   res.setHeader('Referrer-Policy', 'no-referrer');
-  const snap = await findShare(req.params.token);
-  if (!snap.exists) {
+  const { id: shareId, share } = await findShare(req.params.token);
+  if (!share) {
     messagePage(res, 404, 'Link not found', 'This share link does not exist. Ask the sender for a new one.');
     return;
   }
-  const share = snap.data() as StoredShare;
   if (share.revokedAt) {
     messagePage(res, 410, 'This link was turned off', 'The person who shared this video has turned the link off.');
     return;
@@ -177,9 +174,7 @@ publicShareRouter.get('/:token', rateLimit('share-view', [['ip', rateRules.share
     return;
   }
 
-  const file = bucket.file(share.storagePath);
-  const [exists] = await file.exists();
-  if (!exists) {
+  if (!(await fileExists(share.storagePath))) {
     messagePage(res, 404, 'Video no longer available', 'The owner has removed or re-rendered this video.');
     return;
   }
@@ -190,7 +185,7 @@ publicShareRouter.get('/:token', rateLimit('share-view', [['ip', rateRules.share
   const [streamUrl, downloadUrl, captions] = await Promise.all([
     signReadUrl(share.storagePath, expires),
     signReadUrl(share.storagePath, expires, fileName),
-    share.captions === false ? Promise.resolve(null) : captionLinesFor(snap.id, share),
+    share.captions === false ? Promise.resolve(null) : captionLinesFor(shareId, share),
   ]);
 
   const nonce = randomBytes(16).toString('base64');

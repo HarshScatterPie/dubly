@@ -278,6 +278,17 @@ export interface DubbingProject {
   activeJobId?: string | null;
   /** Language code -> edits waiting to be rendered, for languages whose last render recorded line fingerprints. Computed by the server. */
   retakeInfo?: Record<string, RetakeInfo>;
+  /** How many lines the transcript and each language have, kept by the server, so a list (which leaves the lines out) can tell how far a project got. */
+  segmentCounts?: SegmentCounts;
+  /** True for a project from a list: it carries no lines. Open it through projectService.get for the whole project. */
+  summary?: boolean;
+}
+
+export interface SegmentCounts {
+  transcript?: number;
+  languages?: Record<string, number>;
+  /** Set once every part has been counted (new projects, and older ones the first time they are listed). */
+  complete?: boolean;
 }
 
 export interface TextToVoiceItem {

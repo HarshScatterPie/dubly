@@ -1,3 +1,4 @@
+import { timingSafeEqual } from 'node:crypto';
 import type { NextFunction, Request, Response } from 'express';
 import type { RateRule } from './limits';
 
@@ -20,6 +21,18 @@ export function hit(key: string, rule: RateRule, now = Date.now()): number {
   return 0;
 }
 
+// Seconds until `key` may act again under `rule`, without counting this look; 0 when it may.
+export function retryAfter(key: string, rule: RateRule, now = Date.now()): number {
+  const bucket = buckets.get(key);
+  if (!bucket || bucket.resetAt <= now || bucket.count < rule.max) return 0;
+  return Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+}
+
+// Clears a counter, e.g. failed sign-ins once the right password is given.
+export function forget(key: string): void {
+  buckets.delete(key);
+}
+
 // Expired windows are dropped so the map only holds callers active in the last window.
 const sweeper = setInterval(() => {
   const now = Date.now();
@@ -29,10 +42,26 @@ sweeper.unref();
 
 type Scope = 'user' | 'workspace' | 'ip';
 
+/**
+ * The caller's address. Behind a front door that forwards every request from its own addresses (the Cloudflare Worker in
+ * deploy/local-prod/worker), all callers would share one address and one set of per-address limits, so the front door sends the
+ * visitor's address in X-Dubly-Client-IP together with a shared secret (EDGE_SHARED_SECRET); without that secret the header is ignored.
+ */
+export function clientIp(req: Request): string | null {
+  const secret = process.env.EDGE_SHARED_SECRET;
+  if (secret) {
+    const given = Buffer.from(req.get('x-dubly-edge-secret') ?? '');
+    const expected = Buffer.from(secret);
+    const forwarded = req.get('x-dubly-client-ip')?.trim();
+    if (forwarded && given.length === expected.length && timingSafeEqual(given, expected) && /^[0-9a-fA-F:.]{2,45}$/.test(forwarded)) return forwarded;
+  }
+  return req.ip ?? req.socket.remoteAddress ?? null;
+}
+
 function scopeKey(req: Request, scope: Scope): string | null {
   if (scope === 'user') return req.uid ?? null;
   if (scope === 'workspace') return req.workspaceId ?? null;
-  return req.ip ?? req.socket.remoteAddress ?? null;
+  return clientIp(req);
 }
 
 // Middleware enforcing rules in order; the first exceeded answers 429 with Retry-After, and a refused request uses none of the other rules.

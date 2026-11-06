@@ -13,7 +13,7 @@ export function wrapAsync(handler: RequestHandler): RequestHandler {
   };
 }
 
-const METHODS = ['get', 'post', 'put', 'patch', 'delete', 'all', 'use'] as const;
+const METHODS = ['get', 'head', 'post', 'put', 'patch', 'delete', 'all', 'use'] as const;
 
 // Drop-in replacement for express.Router() whose route handlers are all wrapped by wrapAsync.
 export function Router(): express.Router {

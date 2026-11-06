@@ -4,6 +4,8 @@ import { installStructuredConsole } from './lib/log';
 // Before anything logs: every console line becomes a structured, redacted record (JSON in production).
 installStructuredConsole();
 import { createApp } from './app';
+import { closeMongo, connectMongo } from './lib/mongo';
+import { ensureMediaIndexes } from './lib/mediaStore';
 import { jobDirFor, jobsRunningHere, reconcileStaleJobs, settleInterruptedJob, STALE_AFTER_MS } from './lib/jobs';
 import { backgroundWorkCount, startDraining, waitForBackgroundWork } from './lib/lifecycle';
 import { sweepTmp } from './lib/tmpSweeper';
@@ -15,6 +17,16 @@ import { enqueueDubJob } from './routes/dub';
 const SHUTDOWN_GRACE_MS = Number(process.env.SHUTDOWN_GRACE_MS) || 25_000;
 const RECONCILE_EVERY_MS = 60_000;
 const SWEEP_EVERY_MS = 60 * 60 * 1000;
+
+// Nothing is served until MongoDB answers as a replica set and its indexes exist; a misconfigured database stops the start with the fix in the log.
+try {
+  await connectMongo();
+  await ensureMediaIndexes();
+  console.log('[mongo] connected');
+} catch (err) {
+  console.error('[mongo] cannot start without the database', err);
+  process.exit(1);
+}
 
 const app = createApp();
 const onListening = () => console.log(`Dubly API listening on http://${env.host || 'localhost'}:${env.port}`);
@@ -79,6 +91,7 @@ async function shutdown(signal: string, exitCode: number): Promise<void> {
     await Promise.allSettled(leftover.map((jobId) => settleInterruptedJob(jobId)));
     console.warn(`[server] settled ${leftover.length} unfinished job(s) as interrupted`);
   }
+  await closeMongo().catch(() => undefined);
   process.exit(exitCode);
 }
 

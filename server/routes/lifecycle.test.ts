@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
-import { bucket } from '../lib/firebaseAdmin';
+import { col, createUser, resetEmulators, seedProject, startApi, writeProject, type TestApi, type TestUser } from '../test/helpers';
+import { fileExists, uploadBufferToStorage } from '../lib/mediaStore';
 import { shareIdFor } from './share';
 import { sweepExpiredRecords } from '../lib/recordSweeper';
 import { limits } from '../lib/limits';
@@ -19,9 +19,10 @@ beforeEach(async () => {
 });
 
 async function put(path: string, bytes = 1024) {
-  await bucket.file(path).save(Buffer.alloc(bytes, 1), { resumable: false, contentType: 'video/mp4' });
+  await uploadBufferToStorage(path, Buffer.alloc(bytes, 1), 'video/mp4');
 }
-const exists = async (path: string) => (await bucket.file(path).exists())[0];
+const exists = (path: string) => fileExists(path);
+const shares = () => col<Record<string, unknown> & { _id: string }>('shares');
 
 // A finished Hindi dub with its source, render, a captioned render and a thumbnail in the project's own folder.
 async function finishedProject(user: TestUser) {
@@ -29,7 +30,7 @@ async function finishedProject(user: TestUser) {
   const projectId = `proj-${Math.random().toString(36).slice(2)}`;
   const base = `workspaces/${workspaceId}/projects/${projectId}`;
   await Promise.all([put(`${base}/source.mp4`, 4096), put(`${base}/dubbed_hi.mp4`, 2048), put(`${base}/dubbed_captioned_hi.mp4`, 2048), put(`${base}/thumbnail.jpg`, 512)]);
-  await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).set({
+  await seedProject(workspaceId, {
     id: projectId,
     ownerUid: user.uid,
     title: 'Done',
@@ -54,8 +55,8 @@ describe('share links', () => {
     const created = await api.call('POST', `/api/projects/${projectId}/share`, { token: user.token, body: { languageCode: 'hi' } });
     expect(created.status).toBe(201);
     expect(created.body.shareId).toBe(shareIdFor(created.body.token));
-    expect((await db.collection('shares').doc(created.body.token).get()).exists).toBe(false);
-    expect((await db.collection('shares').doc(created.body.shareId).get()).exists).toBe(true);
+    expect(await shares().countDocuments({ _id: created.body.token })).toBe(0);
+    expect(await shares().countDocuments({ _id: created.body.shareId })).toBe(1);
 
     const page = await fetch(`${api.baseUrl}${created.body.path}`);
     expect(page.status).toBe(200);
@@ -87,7 +88,8 @@ describe('share links', () => {
     expect((await fetch(`${api.baseUrl}/api/share/${created.body.shareId}`)).status).toBe(404);
     expect((await fetch(`${api.baseUrl}/api/share/${created.body.shareId}/captions.vtt`)).status).toBe(404);
 
-    await db.collection('shares').doc('legacyRawToken123456').set({
+    await shares().insertOne({
+      _id: 'legacyRawToken123456',
       uid: user.uid,
       projectId,
       languageCode: 'hi',
@@ -107,18 +109,18 @@ describe('deleting a project', () => {
     // A path inherited from a copy of another workspace's project: still used there, so it must survive.
     const foreign = 'workspaces/ws-someone-else/projects/proj-original/source.mp4';
     await put(foreign);
-    await db.collection('workspaces').doc(workspaceId).collection('projects').doc(projectId).update({ dubbedAudioStoragePath: foreign });
+    await writeProject(workspaceId, projectId, { dubbedAudioStoragePath: foreign });
     const share = await api.call('POST', `/api/projects/${projectId}/share`, { token: user.token, body: { languageCode: 'hi' } });
 
     expect((await api.call('DELETE', `/api/projects/${projectId}`, { token: user.token })).status).toBe(204);
     for (const file of ['source.mp4', 'dubbed_hi.mp4', 'dubbed_captioned_hi.mp4', 'thumbnail.jpg']) expect(await exists(`${base}/${file}`)).toBe(false);
     expect(await exists(foreign)).toBe(true);
-    expect((await db.collection('shares').doc(share.body.shareId).get()).exists).toBe(false);
+    expect(await shares().countDocuments({ _id: share.body.shareId })).toBe(0);
   });
 });
 
 describe('usage accounting', () => {
-  it('reports storage measured from the bucket, and it goes down after a delete', async () => {
+  it('reports storage measured from GridFS, and it goes down after a delete', async () => {
     const user = await createUser('storage@team.test');
     const { projectId, workspaceId } = await finishedProject(user);
     const before = (await api.call('GET', '/api/usage', { token: user.token })).body;
@@ -176,20 +178,22 @@ describe('record retention', () => {
   it('deletes expired shares, invitations, idempotency keys and old jobs, and nothing current', async () => {
     const day = 24 * 3600_000;
     const iso = (msAgo: number) => new Date(Date.now() - msAgo).toISOString();
+    const put = (name: 'shares' | 'invites' | 'jobIdempotency' | 'jobs', _id: string, doc: Record<string, unknown>) =>
+      col<Record<string, unknown> & { _id: string }>(name).insertOne({ _id, ...doc });
     await Promise.all([
-      db.collection('shares').doc('old').set({ expiresAt: iso(8 * day) }),
-      db.collection('shares').doc('recent').set({ expiresAt: iso(1 * day) }),
-      db.collection('invites').doc('old').set({ expiresAt: iso(31 * day) }),
-      db.collection('invites').doc('recent').set({ expiresAt: iso(-day) }),
-      db.collection('jobIdempotency').doc('old').set({ createdAt: iso(3 * day) }),
-      db.collection('jobIdempotency').doc('recent').set({ createdAt: iso(0) }),
-      db.collection('jobs').doc('old').set({ finishedAt: iso(181 * day) }),
-      db.collection('jobs').doc('running').set({ finishedAt: null }),
+      put('shares', 'old', { expiresAt: iso(8 * day) }),
+      put('shares', 'recent', { expiresAt: iso(1 * day) }),
+      put('invites', 'old', { expiresAt: iso(31 * day) }),
+      put('invites', 'recent', { expiresAt: iso(-day) }),
+      put('jobIdempotency', 'old', { createdAt: iso(3 * day) }),
+      put('jobIdempotency', 'recent', { createdAt: iso(0) }),
+      put('jobs', 'old', { finishedAt: iso(181 * day) }),
+      put('jobs', 'running', { finishedAt: null }),
     ]);
     const deleted = await sweepExpiredRecords();
     expect(deleted).toEqual({ shares: 1, invites: 1, jobIdempotency: 1, jobs: 1 });
-    for (const [col, doc] of [['shares', 'recent'], ['invites', 'recent'], ['jobIdempotency', 'recent'], ['jobs', 'running']]) {
-      expect((await db.collection(col).doc(doc).get()).exists).toBe(true);
+    for (const [name, id] of [['shares', 'recent'], ['invites', 'recent'], ['jobIdempotency', 'recent'], ['jobs', 'running']] as const) {
+      expect(await col<{ _id: string }>(name).countDocuments({ _id: id })).toBe(1);
     }
   });
 });

@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
-import { authAdmin } from './firebaseAdmin';
+import { env } from './env';
+import { resolveSession } from './accounts';
 import { hit } from './rateLimit';
 import { addLogContext } from './log';
 import { rateRules } from './limits';
@@ -11,59 +12,106 @@ declare global {
     interface Request {
       uid?: string;
       email?: string;
-      // Whether Firebase has verified that the caller owns `email`; anything that acts on the address alone requires it.
+      // Whether the person has proved they read this inbox (an email link); anything that acts on the address alone requires it.
       emailVerified?: boolean;
+      sessionId?: string;
+      sessionToken?: string;
       workspaceId?: string;
       workspaceRole?: WorkspaceRole;
     }
   }
 }
 
-// How long a user's disabled/revoked state is trusted before Auth is asked again; bounds how long a revoked session lingers.
-export const ACCOUNT_STATE_CACHE_MS = 30_000;
-const accountState = new Map<string, { disabled: boolean; validSinceMs: number; at: number }>();
+export const SESSION_COOKIE = 'dubly_session';
 
-export function clearAccountStateCache(uid?: string): void {
-  if (uid) accountState.delete(uid);
-  else accountState.clear();
-}
-
-// verifyIdToken(token, true)'s checks (disabled, revoked since issue), cached per user briefly because the UI polls every second.
-async function isSessionRevoked(uid: string, authTimeSeconds: number): Promise<boolean> {
-  let state = accountState.get(uid);
-  if (!state || Date.now() - state.at > ACCOUNT_STATE_CACHE_MS) {
-    const user = await authAdmin.getUser(uid);
-    state = {
-      disabled: user.disabled,
-      validSinceMs: user.tokensValidAfterTime ? new Date(user.tokensValidAfterTime).getTime() : 0,
-      at: Date.now(),
-    };
-    accountState.set(uid, state);
-  }
-  return state.disabled || authTimeSeconds * 1000 < state.validSinceMs;
-}
-
-export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+// The session token from the httpOnly cookie the browser sends, or from `Authorization: Bearer` (scripts and tests).
+export function sessionTokenOf(req: Request): { token: string; via: 'cookie' | 'bearer' } | null {
   const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length) : null;
-
-  if (!token) {
-    res.status(401).json({ error: 'Missing Authorization bearer token' });
-    return;
+  if (header.startsWith('Bearer ')) return { token: header.slice('Bearer '.length).trim(), via: 'bearer' };
+  const cookies = req.headers.cookie;
+  if (!cookies) return null;
+  for (const part of cookies.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq > 0 && part.slice(0, eq).trim() === SESSION_COOKIE) {
+      const value = decodeURIComponent(part.slice(eq + 1).trim());
+      return value ? { token: value, via: 'cookie' } : null;
+    }
   }
+  return null;
+}
 
+export function cookieIsSecure(req: Request): boolean {
+  return env.cookieSecure === 'always' || (env.cookieSecure === 'auto' && req.secure);
+}
+
+// httpOnly (no script can read it), SameSite=Strict (no other site's page can send it), Secure over HTTPS.
+export function setSessionCookie(req: Request, res: Response, token: string, expiresAt: Date): void {
+  res.cookie(SESSION_COOKIE, token, { httpOnly: true, sameSite: 'strict', secure: cookieIsSecure(req), path: '/', expires: expiresAt });
+}
+
+export function clearSessionCookie(req: Request, res: Response): void {
+  res.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: cookieIsSecure(req), path: '/' });
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Cross-site request forgery guard for cookie sessions, on top of SameSite=Strict: a request that changes something must come from
+ * Dubly's own pages. Browsers say where a request came from (Sec-Fetch-Site, Origin); requests from other sites are refused.
+ * Bearer-token calls are not affected, since a browser never attaches those by itself.
+ */
+export function isCrossSite(req: Request): boolean {
+  if (SAFE_METHODS.has(req.method)) return false;
+  const fetchSite = req.get('sec-fetch-site');
+  if (fetchSite) return fetchSite !== 'same-origin' && fetchSite !== 'none';
+  const origin = req.get('origin');
+  if (!origin) return false;
   try {
-    const decoded = await authAdmin.verifyIdToken(token);
-    // A deleted account makes getUser throw, which lands in the same 401 below.
-    if (await isSessionRevoked(decoded.uid, decoded.auth_time)) throw new Error('revoked');
-    req.uid = decoded.uid;
-    req.email = decoded.email;
-    req.emailVerified = decoded.email_verified === true;
-    addLogContext({ userId: decoded.uid });
+    const url = new URL(origin);
+    return url.origin !== new URL(env.webOrigin).origin && url.host !== req.get('host');
   } catch {
-    res.status(401).json({ error: 'Invalid or expired session. Please sign in again.' });
+    return true;
+  }
+}
+
+export function requireSameOrigin(req: Request, res: Response, next: NextFunction): void {
+  if (isCrossSite(req)) {
+    res.status(403).json({ error: 'This request did not come from Dubly.', code: 'CROSS_SITE' });
     return;
   }
+  next();
+}
+
+// Signs the caller in from their session; every request checks the session in the database, so a revoked one stops working at once.
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
+  const presented = sessionTokenOf(req);
+  if (!presented) {
+    res.status(401).json({ error: 'You are not signed in.', code: 'UNAUTHENTICATED' });
+    return;
+  }
+  if (presented.via === 'cookie' && isCrossSite(req)) {
+    res.status(403).json({ error: 'This request did not come from Dubly.', code: 'CROSS_SITE' });
+    return;
+  }
+  let session: Awaited<ReturnType<typeof resolveSession>>;
+  try {
+    session = await resolveSession(presented.token);
+  } catch (err) {
+    next(err);
+    return;
+  }
+  if (!session) {
+    if (presented.via === 'cookie') clearSessionCookie(req, res);
+    res.status(401).json({ error: 'Your session has ended. Please sign in again.', code: 'UNAUTHENTICATED' });
+    return;
+  }
+  req.uid = session.user._id;
+  req.email = session.user.email;
+  req.emailVerified = session.user.emailVerified;
+  req.sessionId = session.sessionId;
+  req.sessionToken = presented.token;
+  addLogContext({ userId: req.uid });
+
   // A ceiling on any one account's request rate, far above what the UI's own polling needs.
   const retryAfter = hit(`api:user:${req.uid}`, rateRules.apiPerUser);
   if (retryAfter) {
@@ -77,7 +125,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 // Resolves which workspace the caller works in and their role there; runs after requireAuth.
 export async function requireWorkspace(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const membership = await resolveMembership(req.uid!);
+    const membership = await resolveMembership(req.uid!, { emailVerified: req.emailVerified === true });
     req.workspaceId = membership.workspaceId;
     addLogContext({ workspaceId: membership.workspaceId });
     req.workspaceRole = membership.role;

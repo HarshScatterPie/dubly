@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { EmailAuthProvider, reauthenticateWithCredential, updatePassword } from 'firebase/auth';
 import {
   Bell,
   BookA,
@@ -133,7 +132,7 @@ const Row: React.FC<{ title: string; hint?: React.ReactNode; children: React.Rea
 
 // Everything a user can change about how Dubly works for them: account security, the defaults every new dub starts from, and this device's alerts.
 export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPreferencesSaved, onProfileSaved, workspace, usage, usageLoaded, onNavigate, onShowToast }) => {
-  const { user, profile, signOut } = useAuth();
+  const { user, profile, signOut, changePassword } = useAuth();
   const [draft, setDraft] = useState<UserPreferences>(preferences ?? DEFAULT_PREFERENCES);
   const extrasAllowed = usageLoaded && usage.paidExtrasAllowed;
   // Until the plan is known nothing is shown locked; the server applies the plan either way.
@@ -179,14 +178,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
   const saved = preferences ?? DEFAULT_PREFERENCES;
   const isDirty = JSON.stringify(saved) !== JSON.stringify(draft);
   const update = (patch: Partial<UserPreferences>) => setDraft((prev) => ({ ...prev, ...patch }));
-  const hasPassword = Boolean(user?.providerData.some((p) => p.providerId === 'password'));
-  const signInMethod = hasPassword ? 'Email and password' : user?.providerData.some((p) => p.providerId === 'google.com') ? 'Google' : 'Single sign-on';
+  // Every Dubly account signs in with its email and a password.
+  const hasPassword = Boolean(user);
+  const signInMethod = 'Email and password';
   const displayName = profile?.name || user?.displayName || user?.email?.split('@')[0] || 'You';
   const minutesPercent = usage.minutesLimit > 0 ? Math.min(100, (usage.minutesDubbed / usage.minutesLimit) * 100) : 0;
   const nameShown = nameDraft ?? displayName;
   const nameChanged = nameDraft !== null && nameDraft.trim() !== '' && nameDraft.trim() !== displayName;
 
-  // Saves to Dubly only: ScatterStudio's own profile is never written, so this changes how the person appears here and to their team.
+  // Changes how the person appears across Dubly and to their team.
   const saveProfile = async (patch: { name?: string; avatar?: string | null }, done: string) => {
     setSavingProfile(true);
     try {
@@ -282,19 +282,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
     }
     setChangingPassword(true);
     try {
-      await reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password.current));
-      await updatePassword(user, password.next);
+      await changePassword(password.current, password.next);
       setPassword({ current: '', next: '', confirm: '' });
-      onShowToast('Password Changed', 'Use the new password next time you sign in to Dubly or ScatterStudio.', 'success');
+      onShowToast('Password Changed', 'Your other devices were signed out. Use the new password next time you sign in.', 'success');
     } catch (err) {
-      const code = (err as { code?: string }).code || '';
-      const message = /wrong-password|invalid-credential/.test(code)
-        ? 'Your current password is not right.'
-        : /too-many-requests/.test(code)
-          ? 'Too many attempts. Wait a few minutes and try again.'
-          : /weak-password/.test(code)
-            ? 'Choose a stronger password.'
-            : (err as Error).message;
+      const status = (err as { status?: number }).status;
+      const message = status === 429 ? 'Too many attempts. Wait a few minutes and try again.' : (err as Error).message;
       onShowToast('Could Not Change Password', message, 'error');
     } finally {
       setChangingPassword(false);
@@ -379,7 +372,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
                 </div>
               </div>
             </Row>
-            <Row stacked title="Name" hint="How your teammates see you. Changing it here does not change your ScatterStudio profile.">
+            <Row stacked title="Name" hint="How your teammates see you across Dubly.">
               <form
                 className="flex gap-2"
                 onSubmit={(e) => {
@@ -413,7 +406,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
                   <span className="text-sm font-semibold text-[#0F172A] flex items-center gap-2">
                     <KeyRound className="w-4 h-4 text-[#64748B]" /> Change password
                   </span>
-                  <span className="text-xs text-[#64748B] block mt-0.5">This is also your ScatterStudio password.</span>
+                  <span className="text-xs text-[#64748B] block mt-0.5">Changing it signs you out on your other devices.</span>
                 </div>
                 <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                   <input type="password" autoComplete="current-password" placeholder="Current password" value={password.current} onChange={(e) => setPassword({ ...password, current: e.target.value })} className={inputClass} aria-label="Current password" />

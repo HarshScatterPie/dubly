@@ -2,7 +2,7 @@ import type { Response } from 'express';
 import { Router } from '../lib/router';
 import { rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
-import { clearAccountStateCache, requireAdmin } from '../lib/auth';
+import { requireAdmin } from '../lib/auth';
 import { log } from '../lib/log';
 import {
   acceptInvite,
@@ -109,8 +109,6 @@ workspaceRouter.patch('/members/:uid', requireAdmin, validateBody(schemas.change
 workspaceRouter.delete('/members/:uid', requireAdmin, async (req, res) => {
   try {
     const { loginDeleted } = await removeMember(req.workspaceId!, req.params.uid, req.uid!);
-    // The removed person's next request must meet the revoked session, not a cached "still signed in".
-    clearAccountStateCache(req.params.uid);
     log.info('member_removed', { workspaceId: req.workspaceId, removedUserId: req.params.uid, removedBy: req.uid, loginDeleted });
     res.status(204).send();
   } catch (err) {

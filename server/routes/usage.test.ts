@@ -1,6 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import { FieldValue } from 'firebase-admin/firestore';
-import { createUser, db, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { col, createUser, resetEmulators, startApi, usageOf as storedUsage, type TestApi, type TestUser } from '../test/helpers';
 import { env } from '../lib/env';
 import { clearPlanCaches, setWorkspacePlan } from '../lib/plans';
 import { setMailSenderForTests, type MailMessage } from '../lib/mailer';
@@ -36,7 +35,7 @@ describe('the Free plan', () => {
     expect(usage.resetsAt).toBeUndefined();
 
     // A workspace made before Free existed has no plan recorded, and keeps its monthly Starter allowance.
-    await db.collection('workspaces').doc(await workspaceIdOf(user)).update({ plan: FieldValue.delete() });
+    await col<{ _id: string }>('workspaces').updateOne({ _id: await workspaceIdOf(user) }, { $unset: { plan: '' } });
     clearPlanCaches();
     const legacy = await usageOf(user);
     expect(legacy).toMatchObject({ planId: 'starter', minutesLimit: 50, renewsMonthly: true });
@@ -50,9 +49,8 @@ describe('the Free plan', () => {
     const [first, second] = [await newProject(user), await newProject(user)];
 
     await startDubJob({ workspaceId, projectId: first, userId: user.uid, languages: ['hi'], minutes: 4 });
-    const usageDoc = await db.collection('workspaces').doc(workspaceId).collection('meta').doc('usage').get();
     // Kept under a period that never rolls over, so the 1st of the month gives nothing back.
-    expect(usageDoc.get('usagePeriod')).toBe('lifetime');
+    expect((await storedUsage(workspaceId))?.usagePeriod).toBe('lifetime');
     expect((await usageOf(user)).minutesDubbed).toBe(4);
 
     const refused = startDubJob({ workspaceId, projectId: second, userId: user.uid, languages: ['hi'], minutes: 2 });
@@ -83,7 +81,8 @@ describe('quota increase requests', () => {
     const res = await request(user, { ...valid, name: 'Asha <b>\r\nBcc: x@evil.test', email: 'spoof@evil.test', workspaceId: 'ws-someone-else' });
     expect(res.status).toBe(201);
     expect(res.body.emailed).toBe(true);
-    const stored = (await db.collection('dublyQuotaRequests').doc(res.body.id).get()).data()!;
+    const { _id, ...stored } = (await col<Record<string, unknown> & { _id: string }>('quotaRequests').findOne({ _id: res.body.id }))!;
+    expect(_id).toBe(res.body.id);
     expect(stored).toMatchObject({ email: 'asker@team.test', uid: user.uid, workspaceId, plan: 'enterprise', minutesPerMonth: 300, currentPlan: 'Starter', status: 'open' });
 
     expect(sent).toHaveLength(1);
@@ -99,7 +98,7 @@ describe('quota increase requests', () => {
     const res = await request(user, valid);
     expect(res.status).toBe(201);
     expect(res.body.emailed).toBe(false);
-    expect((await db.collection('dublyQuotaRequests').doc(res.body.id).get()).exists).toBe(true);
+    expect(await col('quotaRequests').countDocuments({ _id: res.body.id as never })).toBe(1);
   });
 
   it('refuses unsigned callers, bad input and more than five requests a day', async () => {
@@ -108,12 +107,12 @@ describe('quota increase requests', () => {
     for (const bad of [{ ...valid, plan: 'platinum' }, { ...valid, minutesPerMonth: 0 }, { ...valid, message: '' }, { ...valid, phone: '<script>' }]) {
       expect((await request(careless, bad)).status).toBe(400);
     }
-    expect((await db.collection('dublyQuotaRequests').get()).size).toBe(0);
+    expect(await col('quotaRequests').countDocuments()).toBe(0);
 
     const user = await createUser('busy@team.test');
     for (let i = 0; i < 5; i++) expect((await request(user, valid)).status).toBe(201);
     const limited = await request(user, valid);
     expect(limited.status).toBe(429);
-    expect((await db.collection('dublyQuotaRequests').get()).size).toBe(5);
+    expect(await col('quotaRequests').countDocuments()).toBe(5);
   });
 });

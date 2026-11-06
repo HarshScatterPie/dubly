@@ -28,15 +28,30 @@ function hasRender(p: DubbingProject): boolean {
   return Boolean(p.finalDubbedVideoUrl) || Object.values(p.languageOutputs ?? {}).some((o) => Boolean(o.finalDubbedVideoUrl));
 }
 
+// Lines of the transcript, from the lines themselves or, for a listed project (which leaves them out), from the server's count.
+export function transcriptLineCount(p: DubbingProject): number {
+  return p.transcriptSegments?.length || p.segmentCounts?.transcript || 0;
+}
+
+// Translated lines of one language, the same way.
+export function languageLineCount(p: DubbingProject, code: string): number {
+  return (
+    p.languageOutputs?.[code]?.localizedSegments?.length ||
+    (code === p.targetLanguage ? p.localizedSegments?.length : 0) ||
+    p.segmentCounts?.languages?.[code] ||
+    0
+  );
+}
+
 export function projectProgress(p: DubbingProject): ProjectProgress {
   const languages = p.targetLanguages?.length ? p.targetLanguages : [p.targetLanguage];
   const translated = languages.filter(
     (code) =>
-      Boolean(p.languageOutputs?.[code]?.localizedSegments?.length) ||
+      languageLineCount(p, code) > 0 ||
       Boolean(p.languageOutputs?.[code]?.finalDubbedVideoUrl) ||
-      (code === p.targetLanguage && (p.localizedSegments?.length > 0 || Boolean(p.finalDubbedVideoUrl)))
+      (code === p.targetLanguage && Boolean(p.finalDubbedVideoUrl))
   );
-  const analyzed = (p.transcriptSegments?.length ?? 0) > 0;
+  const analyzed = transcriptLineCount(p) > 0;
   // Only a dub run saves the voice choice; transcription never marks a project processing or failed.
   const dubStarted = hasRender(p) || p.status === 'processing' || p.status === 'failed' || p.status === 'completed';
 

@@ -2,6 +2,8 @@
 
 Tracks every finding of [enterprise-readiness-audit.md](enterprise-readiness-audit.md).
 
+> **2026-11-06:** Dubly moved off Firebase to MongoDB (accounts, sessions, records, files). Rows below that mention Firebase Auth, Firestore, rules or the bucket describe the state before that; see MONGODB.md and SECURITY.md for the current design.
+
 **Legend:** ✅ fixed and covered by tests · 🟡 fixed in code, but something outside the repo is still needed · 🔧 needs GCP/Firebase console work · ⏸ deferred (reason given).
 
 | ID | Finding | Status | What was done / what remains |

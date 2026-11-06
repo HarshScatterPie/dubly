@@ -14,7 +14,7 @@ Diagrams are Mermaid, so they render on GitHub and in any Markdown viewer with M
 |---|---|
 | Frontend | React 19, Vite, Tailwind (`src/`) |
 | Backend | Express 4 on Node 24, run with `tsx` (`server/`). One process that also serves the built frontend |
-| Data | Firebase Auth, Firestore, Cloud Storage |
+| Data | MongoDB (replica set): accounts and sessions, records, files in GridFS |
 | AI | Gemini 3.5 Flash-Lite on Vertex AI; Gemini 2.5 Flash TTS and Chirp 3 HD on Cloud Text-to-Speech; three models on the server (Silero VAD, SCRFD, DeepFilterNet3) |
 | Media | ffmpeg and ffprobe |
 | Hosting | One Compute Engine VM in asia-south1 |
@@ -29,7 +29,7 @@ The browser only talks to the Dubly server. The server holds the data, runs the 
 flowchart LR
   subgraph B["Browser"]
     SPA["React 19 SPA<br/>Dashboard, Dubbing Studio, Text-to-Voice,<br/>Projects, Usage, Team, Glossary, Settings"]
-    SDK["Firebase Auth SDK<br/>Google or email sign-in"]
+    COOKIE["Session cookie<br/>httpOnly, SameSite=Strict"]
   end
 
   subgraph S["Dubly server: one Node 24 process"]
@@ -40,30 +40,31 @@ flowchart LR
     CACHE[("TTS cache<br/>local disk")]
   end
 
-  subgraph G["Google Cloud and Firebase"]
-    AUTH["Firebase Auth"]
-    FS[("Firestore")]
-    GCS[("Cloud Storage")]
+  subgraph M["MongoDB (same machine, localhost only)"]
+    DB[("dubly database<br/>users, sessions, workspaces, projects, jobs ...")]
+    GRID[("GridFS<br/>videos, audio, thumbnails")]
+  end
+
+  subgraph G["Google Cloud (AI only)"]
     VX["Vertex AI<br/>Gemini 3.5 Flash-Lite"]
     TTS["Cloud Text-to-Speech<br/>Gemini 2.5 Flash TTS, Chirp 3 HD"]
   end
 
-  SMTP["SMTP server<br/>optional, invitation emails"]
+  SMTP["SMTP server<br/>invitations, sign-up and reset emails"]
 
-  SDK -->|"sign in, get ID token"| AUTH
-  SPA -->|"/api calls + Bearer ID token"| API
+  SPA -->|"sign in: email + password"| API
+  COOKIE -.->|"sent with every /api call"| API
   API -->|"JSON, polled progress"| SPA
-  API -->|"verify token"| AUTH
-  API -->|"read, write"| FS
-  API -->|"upload, download"| GCS
-  GCS -.->|"short-lived signed URLs: play and download media"| SPA
+  API -->|"sessions, records (transactions)"| DB
+  API -->|"stream files in and out"| GRID
+  API -.->|"/api/media signed URLs, HTTP Range: play and download"| SPA
   API --> JOBS
   JOBS --> LOCAL
   JOBS --> CLIENTS
   CLIENTS <--> CACHE
   CLIENTS -->|"audio + text in, JSON out"| VX
   CLIENTS -->|"text + style in, voice audio out"| TTS
-  API -.->|"invitations"| SMTP
+  API -.->|"emails"| SMTP
 ```
 
 ### Request path
@@ -73,7 +74,7 @@ Every `/api` call passes through the same chain in `server/app.ts`:
 1. Request id and access log
 2. gzip compression, security headers, CORS
 3. JSON body parser (2 MB limit)
-4. `requireAuth`: checks the Firebase ID token
+4. `requireAuth`: looks the session up in MongoDB (and refuses cross-site changes sent with the cookie)
 5. `requireWorkspace`: resolves the caller's workspace and role from the server's own membership lookup
 6. The route, with rate limits and zod validation
 7. The error normaliser, which keeps internal details out of responses
@@ -165,7 +166,7 @@ Points that matter:
 
 ## 5. Jobs, queues and reliability
 
-Every dub and transcription is a job document in Firestore (`jobs/{jobId}`), implemented in `server/lib/jobs.ts`.
+Every dub and transcription is a job document in MongoDB (`jobs`), implemented in `server/lib/jobs.ts`.
 
 | Concern | How it is handled |
 |---|---|
@@ -190,7 +191,7 @@ Keeping one machine fast: the ONNX models run in worker threads so they cannot f
 - A **workspace** owns projects and the monthly minute allowance. Every project path is `workspaces/{workspaceId}/projects/{id}`, and the workspace id always comes from the server-side membership lookup, never from the browser.
 - Each person belongs to exactly one workspace at a time, as `admin` or `editor`. A first-time user gets a personal workspace.
 - Teams form by **invitation**: an admin creates a link, emailed when SMTP is configured, and the invitee accepts it while signed in with the invited email.
-- The **plan** (`dublyPlans/{id}` in Firestore) sets the monthly minutes, whether paid extras and invitations are available, and which voice engines can be picked.
+- The **plan** (`plans` collection in MongoDB) sets the monthly minutes, whether paid extras and invitations are available, and which voice engines can be picked.
 
 With the Google Cloud setup, the default plans work out like this:
 

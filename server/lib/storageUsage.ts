@@ -1,8 +1,8 @@
-import { bucket } from './firebaseAdmin';
+import { storedBytesUnder } from './mediaStore';
 import { HttpError } from './httpError';
 import { limits } from './limits';
 
-// A workspace's storage is the total size of its objects in the bucket, cached briefly and refreshed after uploads and deletions.
+// A workspace's storage is the total size of its files in GridFS, cached briefly and refreshed after uploads and deletions.
 const CACHE_MS = 10 * 60 * 1000;
 const cache = new Map<string, { bytes: number; at: number }>();
 
@@ -13,8 +13,7 @@ export function invalidateStorageUsage(workspaceId: string): void {
 export async function workspaceStorageBytes(workspaceId: string): Promise<number> {
   const hit = cache.get(workspaceId);
   if (hit && Date.now() - hit.at < CACHE_MS) return hit.bytes;
-  const [files] = await bucket.getFiles({ prefix: `workspaces/${workspaceId}/`, autoPaginate: true });
-  const bytes = files.reduce((sum, file) => sum + (Number(file.metadata?.size) || 0), 0);
+  const bytes = await storedBytesUnder(`workspaces/${workspaceId}/`);
   cache.set(workspaceId, { bytes, at: Date.now() });
   return bytes;
 }

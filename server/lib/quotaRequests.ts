@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { db } from './firebaseAdmin';
+import { col } from './mongo';
 import { env } from './env';
 import { escapeHtml, sendMail, type MailMessage } from './mailer';
 import type { UserUsageStats } from '../../src/types';
@@ -27,8 +27,8 @@ export interface StoredQuotaRequest extends QuotaRequestInput {
   createdAt: string;
 }
 
-// Prefixed like dublyPlans: the Firestore project is shared with ScatterStudio. Closed to clients like every Dubly path.
-const requestsCol = () => db.collection('dublyQuotaRequests');
+// Read by operators only (Compass or a script); no route returns them.
+const requestsCol = () => col<StoredQuotaRequest & { _id: string }>('quotaRequests');
 
 const PLAN_LABELS: Record<QuotaRequestInput['plan'], string> = { starter: 'Starter', enterprise: 'Enterprise', custom: 'Custom' };
 
@@ -87,7 +87,7 @@ export async function submitQuotaRequest(
     status: 'open',
     createdAt: new Date().toISOString(),
   };
-  await requestsCol().doc(request.id).set(request);
+  await requestsCol().insertOne({ _id: request.id, ...request });
   const to = env.quotaRequestTo || env.smtpUser;
   const emailed = to ? await sendMail(buildQuotaRequestEmail(request, to)) : false;
   return { id: request.id, emailed };

@@ -5,7 +5,7 @@ import { mkdtemp, readFile, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { assertSafeDownloadUrl, isPublicAddress, streamToFile, type Resolver } from './safeDownload';
-import { createUser, db, resetEmulators, startApi, type TestApi } from '../test/helpers';
+import { createUser, readProject, resetEmulators, startApi, type TestApi } from '../test/helpers';
 
 const resolvesTo = (...addresses: string[]): Resolver => async () => addresses.map((address) => ({ address, family: address.includes(':') ? 6 : 4 }));
 const HOSTS = ['videos.example.com'];
@@ -153,7 +153,7 @@ describe('POST /api/projects/:id/import-sample', () => {
     }
     expect((await importIt({ sampleId: 'nope' })).status).toBe(400);
     expect((await importIt({})).status).toBe(400);
-    const stored = await db.collection('workspaces').doc((await api.call('GET', '/api/workspace', { token: user.token })).body.id).collection('projects').doc(project.body.id).get();
-    expect(stored.get('videoStoragePath')).toBeUndefined();
+    const stored = await readProject((await api.call('GET', '/api/workspace', { token: user.token })).body.id, project.body.id);
+    expect(stored?.videoStoragePath).toBeUndefined();
   });
 });

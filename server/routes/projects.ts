@@ -4,15 +4,16 @@ import multer from 'multer';
 import path from 'node:path';
 import { mkdir, rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { FieldValue } from 'firebase-admin/firestore';
-import { bucket, downloadFileFromStorage, getSignedDownloadUrl, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/firebaseAdmin';
+import { DELETE_FIELD } from '../lib/mongo';
+import { deleteStoredPrefix, downloadFileFromStorage, invalidateSignedUrlCache, uploadFileToStorage } from '../lib/mediaStore';
 import { isFaceScanAvailable, scanFaces } from '../lib/faceScan';
 import {
   createProject,
   deleteStoredProject,
   getProjectProgress,
   getStoredProject,
-  listStoredProjects,
+  listProjectSummaries,
+  toClientSummary,
   projectLanguages,
   segmentsForLanguage,
   toClientProject,
@@ -166,9 +167,10 @@ projectsRouter.post('/', validateBody(schemas.createProject), async (req, res) =
   res.status(201).json(await toClientProject(project));
 });
 
+// The list without the projects' lines (see listProjectSummaries); GET /:id returns one whole project.
 projectsRouter.get('/', async (req, res) => {
-  const projects = await listStoredProjects(req.workspaceId!);
-  res.json(await Promise.all(projects.map(toClientProject)));
+  const projects = await listProjectSummaries(req.workspaceId!);
+  res.json(await Promise.all(projects.map(toClientSummary)));
 });
 
 projectsRouter.get('/:id', async (req, res) => {
@@ -239,7 +241,7 @@ projectsRouter.delete('/:id', requireAdmin, async (req, res) => {
   const foreign = referenced.filter((p) => !p.startsWith(ownPrefix));
   if (foreign.length) log.warn('retained_shared_objects', { projectId: req.params.id, paths: foreign });
 
-  await bucket.deleteFiles({ prefix: ownPrefix, force: true });
+  await deleteStoredPrefix(ownPrefix);
   referenced.forEach(invalidateSignedUrlCache);
   await deleteSharesForProject(req.params.id);
   await deleteStoredProject(req.workspaceId!, req.params.id);
@@ -295,7 +297,7 @@ async function ingestSourceVideo(workspaceId: string, projectId: string, localVi
     videoFileSize: `${sizeMb.toFixed(1)} MB`,
     status: 'draft',
     // A new video's faces replace the old one's; an unscanned one clears them so the studio asks again.
-    faceScan: faceScan ?? (FieldValue.delete() as unknown as undefined),
+    faceScan: faceScan ?? (DELETE_FIELD as unknown as undefined),
   });
 }
 
@@ -308,8 +310,17 @@ projectsRouter.post('/:id/face-scan', rateLimit('face-scan', [['user', rateRules
   if (!stored.videoStoragePath) return res.status(400).json({ error: 'Upload a video first' });
   if (stored.faceScan && !req.body?.force) return res.json({ faceScan: stored.faceScan, available: true });
   if (!isFaceScanAvailable()) return res.json({ faceScan: null, available: false });
-  // ffmpeg seeks straight into the stored file over HTTP, so a scan never downloads the whole video.
-  const faceScan = await scanFaces(await getSignedDownloadUrl(stored.videoStoragePath), stored.videoDuration);
+  // ffmpeg only ever reads local files, so the video is copied out of the database for the scan and removed after it.
+  const scanDir = path.join(tmpDir, 'jobs', `face-scan-${randomUUID()}`);
+  let faceScan: Awaited<ReturnType<typeof scanFaces>> = null;
+  try {
+    await mkdir(scanDir, { recursive: true });
+    const localVideo = path.join(scanDir, `source${path.extname(stored.videoStoragePath) || '.mp4'}`);
+    await downloadFileFromStorage(stored.videoStoragePath, localVideo);
+    faceScan = await scanFaces(localVideo, stored.videoDuration);
+  } finally {
+    await rm(scanDir, { recursive: true, force: true });
+  }
   if (faceScan) await updateStoredProject(req.workspaceId!, req.params.id, { faceScan });
   res.json({ faceScan, available: true });
 });

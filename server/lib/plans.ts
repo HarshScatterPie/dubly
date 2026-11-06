@@ -16,6 +16,7 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
     teamInvites: false,
     voiceEngines: ['gemini-flash-lite'],
+    visibleWatermark: true,
   },
   starter: {
     id: 'starter',
@@ -27,6 +28,7 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     teamInvites: false,
     // Gemini 3.8 Flash and Chirp 3 HD voices are shown to Starter workspaces, locked.
     voiceEngines: ['gemini-flash-lite'],
+    visibleWatermark: true,
   },
   enterprise: {
     id: 'enterprise',
@@ -37,6 +39,8 @@ export const DEFAULT_PLANS: Record<PlanId, Plan> = {
     extraRates: { aiReview: 0.25, premiumVoices: 0.5, paceRetakes: 0.25 },
     teamInvites: true,
     voiceEngines: [...GEMINI_API_ENGINES],
+    // Enterprise dubs carry the AI metadata only. docs/AI-LABELLING.md says why that needs a legal check before relying on it.
+    visibleWatermark: false,
   },
 };
 
@@ -82,6 +86,7 @@ export function toPlan(id: PlanId, data: Record<string, unknown> | undefined): P
     teamInvites: typeof data?.teamInvites === 'boolean' ? data.teamInvites : base.teamInvites,
     // A plan left with no usable engine could not voice anything, so an empty or unreadable list keeps the built-in one.
     voiceEngines: engines.length ? engines : base.voiceEngines,
+    visibleWatermark: typeof data?.visibleWatermark === 'boolean' ? data.visibleWatermark : base.visibleWatermark,
   };
 }
 

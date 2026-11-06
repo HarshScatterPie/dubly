@@ -21,8 +21,9 @@ import {
 import { DubbingProject } from '../types';
 import { LANGUAGES, VOICES } from '../data/mockData';
 import { ConfirmDialog } from './ConfirmDialog';
-import { projectProgress, targetsSummary, transcriptLineCount } from '../lib/projectProgress';
+import { projectProgress, projectTitle, targetsSummary, transcriptLineCount } from '../lib/projectProgress';
 import { ProjectStatusBadge } from './ProjectStatusBadge';
+import { Thumbnail } from './Thumbnail';
 
 interface ProjectsHistoryProps {
   projects: DubbingProject[];
@@ -34,7 +35,12 @@ interface ProjectsHistoryProps {
   onNewDub: () => void;
   /** Pre-fills the search box — set when arriving here from the header's global search. */
   initialSearchTerm?: string;
+  /** Told what the box holds now, so coming back to this screen shows the same search, or none. */
+  onSearchChange?: (term: string) => void;
 }
+
+// Rows added at a time; a long history does not all load (and fetch its pictures) at once.
+const PAGE_SIZE = 25;
 
 export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
   projects,
@@ -43,14 +49,16 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
   onDeleteProject,
   onNewDub,
   initialSearchTerm,
+  onSearchChange,
 }) => {
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm || '');
   const [filterLang, setFilterLang] = useState('all');
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
 
   const filteredProjects = projects.filter((p) => {
     const matchesSearch =
-      p.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      projectTitle(p).toLowerCase().includes(searchTerm.toLowerCase()) ||
       p.videoFileName.toLowerCase().includes(searchTerm.toLowerCase());
     const matchesLang = filterLang === 'all' || p.targetLanguage === filterLang;
     return matchesSearch && matchesLang;
@@ -105,7 +113,12 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
             type="text"
             placeholder="Search projects by title or filename..."
             value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
+            onChange={(e) => {
+              setSearchTerm(e.target.value);
+              setVisibleCount(PAGE_SIZE);
+              onSearchChange?.(e.target.value);
+            }}
+            aria-label="Search your projects"
             className="w-full pl-10 pr-4 py-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs text-[#0F172A] placeholder-[#94A3B8] focus:outline-none focus:border-[#F05637]"
           />
         </div>
@@ -146,16 +159,16 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
               <thead className="bg-[#F8FAFC] text-[#64748B] uppercase tracking-wider font-semibold border-b border-[#E2E8F0]">
                 <tr>
                   <th className="py-3.5 px-5">Project</th>
-                  <th className="py-3.5 px-4">Language Pair</th>
-                  <th className="py-3.5 px-4">Voice Model</th>
-                  <th className="py-3.5 px-4">Duration</th>
+                  <th className="py-3.5 px-4 hidden xl:table-cell">Language Pair</th>
+                  <th className="py-3.5 px-4 hidden 2xl:table-cell">Voice Model</th>
+                  <th className="py-3.5 px-4 hidden xl:table-cell">Duration</th>
                   <th className="py-3.5 px-4">Status</th>
-                  <th className="py-3.5 px-4">Date</th>
+                  <th className="py-3.5 px-4 hidden lg:table-cell">Date</th>
                   <th className="py-3.5 px-5 text-right">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[#E2E8F0] text-[#0F172A]">
-                {filteredProjects.map((p) => {
+                {filteredProjects.slice(0, visibleCount).map((p) => {
                   // Only what the project really went through; a new project's stored voice and languages are placeholders.
                   const progress = projectProgress(p);
                   const sLang = progress.sourceLanguageName ? getLang(p.sourceLanguage) : undefined;
@@ -172,26 +185,26 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                       <td className="py-4 px-5">
                         <div className="flex items-center gap-3">
                           <div className="relative w-14 h-10 rounded-lg overflow-hidden shrink-0 bg-black">
-                            {p.videoThumbnailUrl ? (
-                              <img
-                                src={p.videoThumbnailUrl}
-                                alt={p.title}
-                                className="w-full h-full object-cover"
-                              />
-                            ) : (
-                              <div className="w-full h-full flex items-center justify-center bg-[#1b2233]">
-                                <Video className="w-4 h-4 text-slate-500" />
-                              </div>
-                            )}
+                            <Thumbnail src={p.videoThumbnailUrl} alt={projectTitle(p)} />
                             <div className="absolute inset-0 bg-black/30 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                               <Play className="w-3.5 h-3.5 text-white fill-current" />
                             </div>
                           </div>
                           <div className="min-w-0">
                             <h5 className="font-bold text-[#0F172A] group-hover:text-[#D94B2E] transition-colors truncate max-w-[220px]">
-                              {p.title}
+                              {/* The row answers the mouse; this is the same action for the keyboard. */}
+                              <button
+                                type="button"
+                                className="font-bold truncate max-w-full text-left"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onOpenProject(p);
+                                }}
+                              >
+                                {projectTitle(p)}
+                              </button>
                             </h5>
-                            <span className="text-[11px] text-[#94A3B8] font-mono block">
+                            <span className="text-[11px] text-[#94A3B8] font-mono block truncate max-w-[220px]">
                               {p.videoFileName}
                             </span>
                           </div>
@@ -199,7 +212,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                       </td>
 
                       {/* Language Pair */}
-                      <td className="py-4 px-4 whitespace-nowrap">
+                      <td className="py-4 px-4 whitespace-nowrap hidden xl:table-cell">
                         <div className="flex items-center gap-1.5 font-medium">
                           {sLang ? <span>{sLang.flag} {sLang.name.split(' ')[0]}</span> : <span className="italic text-[#94A3B8] font-normal">Not analyzed</span>}
                           <ArrowRight className="w-3 h-3 text-[#94A3B8]" />
@@ -208,7 +221,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                       </td>
 
                       {/* Voice Model */}
-                      <td className="py-4 px-4 whitespace-nowrap">
+                      <td className="py-4 px-4 whitespace-nowrap hidden 2xl:table-cell">
                         {progress.voiceName ? (
                           <div className="flex items-center gap-2">
                             {voice?.avatarUrl && <img src={voice.avatarUrl} alt={voice.name} className="w-6 h-6 rounded-full object-cover" />}
@@ -220,7 +233,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                       </td>
 
                       {/* Duration */}
-                      <td className="py-4 px-4 font-mono text-[#64748B] whitespace-nowrap">
+                      <td className="py-4 px-4 font-mono text-[#64748B] whitespace-nowrap hidden xl:table-cell">
                         {formatDuration(p.videoDuration)}
                       </td>
 
@@ -235,7 +248,7 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
                       </td>
 
                       {/* Date */}
-                      <td className="py-4 px-4 font-mono text-[#94A3B8] whitespace-nowrap">
+                      <td className="py-4 px-4 font-mono text-[#94A3B8] whitespace-nowrap hidden lg:table-cell">
                         {formatDate(p.createdAt)}
                       </td>
 
@@ -279,6 +292,17 @@ export const ProjectsHistory: React.FC<ProjectsHistoryProps> = ({
               </tbody>
             </table>
           </div>
+          {filteredProjects.length > visibleCount && (
+            <div className="p-4 text-center border-t border-[#E2E8F0]">
+              <button
+                type="button"
+                onClick={() => setVisibleCount((count) => count + PAGE_SIZE)}
+                className="px-4 py-2 rounded-lg border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] hover:bg-[#F8FAFC]"
+              >
+                Show more ({filteredProjects.length - visibleCount} left)
+              </button>
+            </div>
+          )}
         </div>
       )}
 

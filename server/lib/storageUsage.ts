@@ -20,7 +20,7 @@ export async function workspaceStorageBytes(workspaceId: string): Promise<number
 
 export const bytesToMb = (bytes: number) => Math.round((bytes / (1024 * 1024)) * 10) / 10;
 
-// Refuses an upload that would take the workspace past its storage allowance, when enforcement is switched on.
+// Refuses an upload that would take the workspace past its storage allowance (unless ENFORCE_STORAGE_LIMIT=false).
 export async function assertStorageAvailable(workspaceId: string, incomingBytes: number): Promise<void> {
   if (!limits.enforceStorageLimit) return;
   const used = await workspaceStorageBytes(workspaceId);

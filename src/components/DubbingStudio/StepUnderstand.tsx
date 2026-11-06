@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { pressable } from '../../lib/pressable';
 import {
   Play,
   Pause,
@@ -331,7 +332,7 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
                     </div>
                   ) : (
                     <p
-                      onClick={() => handlePlaySegment(segment)}
+                      {...pressable(() => handlePlaySegment(segment))}
                       className="text-sm text-[#0F172A] leading-relaxed cursor-pointer hover:text-[#D94B2E] transition-colors"
                     >
                       "{segment.text}"

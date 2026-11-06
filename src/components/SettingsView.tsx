@@ -26,6 +26,13 @@ import type { NavigationTab, PaidExtra, TranslationStyle, UserPreferences, UserU
 import { allowanceRate, effectiveExtras } from '../lib/planMath';
 import { enginesLabel, hasGeminiVoices, languageVoiced, listedEngines, premiumVoicesOffered, VOICE_ENGINE_INFO, VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../lib/voiceEngines';
 import { LANGUAGES, VOICES } from '../data/mockData';
+
+// "Hindi Male", not "Hindi Male · Hindi · male": only what the name does not already say.
+const voiceLabel = (voice: Voice) => {
+  const name = voice.name.replace(/\s*\(.*\)$/, '');
+  const extra = [voice.accent, voice.gender].filter((word) => word && !name.toLowerCase().includes(word.toLowerCase()));
+  return [name, ...extra].join(' · ');
+};
 import { DEFAULT_PREFERENCES } from '../data/preferences';
 import { useAuth, type UserProfile } from '../context/AuthContext';
 import { avatarFromFile, settingsService } from '../services/settingsService';
@@ -505,13 +512,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ preferences, onPrefe
             >
               <div className="flex gap-2">
                 <select value={defaultVoice?.id ?? draft.defaultVoiceId} onChange={(e) => update({ defaultVoiceId: e.target.value })} className={inputClass} aria-label="Default voice">
-                  {shownEngines.map((engine) => {
-                    const locked = !voiceEngines.includes(engine);
+                  {shownEngines.filter((engine) => voiceEngines.includes(engine)).map((engine) => {
                     return (
-                      <optgroup key={engine} label={`${VOICE_ENGINE_INFO[engine].label}${locked ? ' · Enterprise' : ''}`}>
+                      <optgroup key={engine} label={VOICE_ENGINE_INFO[engine].label}>
                         {VOICES.filter((v) => v.engine === engine).map((v) => (
-                          <option key={v.id} value={v.id} disabled={locked}>
-                            {v.name.replace(/\s*\(.*\)$/, '')} · {v.accent} · {v.gender}
+                          <option key={v.id} value={v.id}>
+                            {voiceLabel(v)}
                           </option>
                         ))}
                       </optgroup>

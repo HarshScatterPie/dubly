@@ -50,6 +50,7 @@ import {
   MAX_COMPRESSION,
   measureLoudness,
   muxVideoWithAudio,
+  probeMediaTags,
   normalizeLoudness,
   probeMedia,
   probeStreams,
@@ -72,6 +73,7 @@ import { describeVerdict, retakeStyle, reviewDubbedLines, type LineVerdict } fro
 import { lineGainsDb } from '../lib/levelMatch';
 import { stripPerformanceTags } from '../lib/performance';
 import { planForWorkspace } from '../lib/plans';
+import { appendAiXmp, newAiMark } from '../lib/aiMark';
 import { allowanceRate, effectiveExtras, NO_EXTRAS, type PaidExtrasChoice } from '../../src/lib/planMath';
 import { languageVoiced } from '../../src/lib/voiceEngines';
 import { isVertexConfigured, vertexCondenseLine, vertexHinglishToSpeechScript } from '../lib/vertexClient';
@@ -628,6 +630,8 @@ async function renderLanguage(params: {
   jobDir: string;
   costMeter: ReturnType<typeof createCostMeter>;
   voiceSelection: VoiceSelection;
+  // Whether the plan shows the visible AI label on this dub.
+  visibleWatermark: boolean;
   // The engines the workspace's plan includes; a line whose voice is on another engine is voiced as the same persona on an allowed one.
   voiceEngines: VoiceEngine[];
   ttsProvider: ProviderSettings['ttsProvider'];
@@ -650,7 +654,7 @@ async function renderLanguage(params: {
   // Integrated loudness (LUFS) the finished track is levelled to, taken from the original; null skips levelling.
   loudnessLufs: number | null;
   onProgress: (fraction: number, message: string) => Promise<void>;
-}): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[]; report: RenderReport }> {
+}): Promise<{ paths: { dubbedAudioStoragePath: string; finalDubbedVideoStoragePath: string }; segments: LocalizedSegment[]; report: RenderReport; aiMarkId: string }> {
   const { workspaceId, projectId, stored, languageCode, segments, videoLocalPath, background, costMeter } = params;
   const languageName = getLanguageName(languageCode);
   // Each language renders in its own directory: the stitcher writes fixed filenames
@@ -981,7 +985,8 @@ async function renderLanguage(params: {
   // Positive when the source's sound starts after its picture; transcript times count from the first sound, so the dub starts that much later too.
   const audioLead = audioLeadSeconds(params.layout);
   let finalVideoPath = path.join(langDir, 'dubbed.mp4');
-  await muxVideoWithAudio(videoLocalPath, stitchedAudioPath, finalVideoPath, { audioOffsetSeconds: Math.max(0, audioLead), languageCode });
+  const mark = newAiMark(params.visibleWatermark);
+  await muxVideoWithAudio(videoLocalPath, stitchedAudioPath, finalVideoPath, { audioOffsetSeconds: Math.max(0, audioLead), languageCode, mark });
 
   // The captions ride along as a subtitle track viewers can switch on, so every download has them.
   const spokenLines = finalSegments.filter((s) => stripPerformanceTags(s.translatedText).trim());
@@ -996,6 +1001,9 @@ async function renderLanguage(params: {
       log.warn('subtitle_track_failed', { languageCode, error: (err as Error).message });
     }
   }
+
+  // Last, because the steps above rewrite the file.
+  await appendAiXmp(finalVideoPath, mark.id);
 
   await params.onProgress(0.95, `${languageName}: uploading export...`);
   await assertStillActive(params.job);
@@ -1014,7 +1022,7 @@ async function renderLanguage(params: {
     await deleteStoredFile(stalePath);
   }
 
-  return { paths: { dubbedAudioStoragePath, finalDubbedVideoStoragePath }, segments: finalSegments, report };
+  return { paths: { dubbedAudioStoragePath, finalDubbedVideoStoragePath }, segments: finalSegments, report, aiMarkId: mark.id };
 }
 
 export interface PipelineResult {
@@ -1122,7 +1130,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
       };
 
       try {
-        const { paths, segments: renderedSegments, report } = await renderLanguage({
+        const { paths, segments: renderedSegments, report, aiMarkId } = await renderLanguage({
           job,
           workspaceId,
           projectId,
@@ -1135,6 +1143,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           costMeter,
           voiceSelection,
           voiceEngines: plan.voiceEngines,
+          visibleWatermark: plan.visibleWatermark,
           ttsProvider: settings.ttsProvider,
           // The choice of whoever started the dub.
           expressiveVoices: settings.preferences.expressiveVoices,
@@ -1158,6 +1167,7 @@ async function runDubPipeline(job: DubJob): Promise<PipelineResult> {
           progressPercent: 100,
           message: undefined,
           renderReport: report,
+          aiMarkId,
           wordsCount: segments.reduce((sum, s) => sum + stripPerformanceTags(s.translatedText).split(/\s+/).filter(Boolean).length, 0),
           ...paths,
         };
@@ -1388,6 +1398,9 @@ async function renderCaptionedVideo(videoStoragePath: string, captionedStoragePa
 
     const captionedLocalPath = path.join(jobDir, 'dubbed_captioned.mp4');
     await burnSubtitles(sourceLocalPath, assPath, captionedLocalPath);
+    // The label and metadata come through from the dub; the XMP box does not survive a re-encode, so it goes back on.
+    const aiMarkId = /Dubly mark ([0-9a-f-]{36})/.exec((await probeMediaTags(captionedLocalPath)).comment ?? '')?.[1];
+    if (aiMarkId) await appendAiXmp(captionedLocalPath, aiMarkId);
     await uploadFileToStorage(captionedStoragePath, captionedLocalPath, 'video/mp4');
     invalidateSignedUrlCache(captionedStoragePath);
   } finally {

@@ -29,6 +29,15 @@ function hasRender(p: DubbingProject): boolean {
 }
 
 // Lines of the transcript, from the lines themselves or, for a listed project (which leaves them out), from the server's count.
+// A file named by a phone or a chat app (WhatsApp saves a bare id) makes a title nobody can read.
+const BARE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** What to call a project on screen. */
+export function projectTitle(p: Pick<DubbingProject, 'title'>): string {
+  const title = (p.title ?? '').trim();
+  return !title || BARE_ID.test(title) ? 'Untitled video' : title;
+}
+
 export function transcriptLineCount(p: DubbingProject): number {
   return p.transcriptSegments?.length || p.segmentCounts?.transcript || 0;
 }

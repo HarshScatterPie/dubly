@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { buildCaptionCards, type CaptionCard, type CaptionLine } from '../../src/lib/captionCues';
 
 // The public page a share link opens: plain server-rendered HTML with a small inline player that behaves like the one in the studio
@@ -6,14 +7,15 @@ import { buildCaptionCards, type CaptionCard, type CaptionLine } from '../../src
 export const escapeHtml = (text: string) =>
   text.replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
 
-// The one inline script is allowed by its per-request nonce; the video comes from Cloud Storage, the logo from this server.
+// The one inline script is allowed by its per-request nonce; the video and the logo come from this server.
 export function shareCsp(nonce?: string): string {
   return [
     "default-src 'none'",
-    "style-src 'unsafe-inline'",
+    // Only this page's own stylesheet, by its hash; nothing injected into the page can style it.
+    `style-src 'sha256-${createHash('sha256').update(CSS).digest('base64')}'`,
     nonce ? `script-src 'nonce-${nonce}'` : "script-src 'none'",
     "img-src 'self' data:",
-    "media-src 'self' https://storage.googleapis.com",
+    "media-src 'self'",
     "base-uri 'none'",
     "form-action 'none'",
     "frame-ancestors 'none'",

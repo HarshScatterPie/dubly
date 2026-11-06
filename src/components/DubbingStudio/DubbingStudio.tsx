@@ -122,10 +122,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   }, []);
 
   // Video State
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(
-    initialPreset ? initialPreset.videoUrl : null
-  );
+  // Always Dubly's stored copy (a signed URL), for samples too, so the page loads media from nowhere else.
+  const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>(
     initialPreset ? `${initialPreset.title}.mp4` : ''
   );
@@ -376,9 +374,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
 
   // Handle user selecting custom video file
   const handleFileSelected = async (file: File) => {
+    const problem = videoService.problemWith(file);
+    if (problem) {
+      onShowToast('Video Not Accepted', problem, 'error');
+      return;
+    }
     const selection = ++selectionRef.current;
     const current = () => isMountedRef.current && selectionRef.current === selection;
-    setSelectedFile(file);
     setActivePresetId(undefined);
     setIsUploading(true);
     setFaceScan(null);
@@ -415,7 +417,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       if (!current()) return;
       onShowToast('Upload Failed', (err as Error).message, 'error');
       // Back to the drop zone: nothing was stored, so there is nothing to preview or analyse.
-      setSelectedFile(null);
       setProjectId(null);
     } finally {
       if (current()) setIsUploading(false);
@@ -427,9 +428,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const handleSelectSample = async (sample: SampleVideoPreset) => {
     const selection = ++selectionRef.current;
     const current = () => isMountedRef.current && selectionRef.current === selection;
-    setSelectedFile(null);
     setActivePresetId(sample.id);
-    setVideoPreviewUrl(sample.videoUrl);
+    setVideoPreviewUrl(null);
     setFileName(`${sample.title}.mp4`);
     setFileSizeFormatted(sample.fileSize);
     setDurationFormatted(sample.durationFormatted);
@@ -447,6 +447,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       setProjectId(draft.id);
       const imported = await projectService.importSample(draft.id, sample.id);
       if (!current()) return;
+      setVideoPreviewUrl(imported.videoUrl || null);
       setFaceScan(imported.faceScan ?? null);
       setDurationFormatted(videoService.formatDuration(imported.videoDuration));
       setVideoDuration(imported.videoDuration);
@@ -454,7 +455,10 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
       setFileSizeFormatted(imported.videoFileSize);
       onShowToast('Sample Loaded', `${sample.title} ready for dubbing.`, 'info');
     } catch (err) {
-      if (current()) onShowToast('Sample Import Failed', (err as Error).message, 'error');
+      if (!current()) return;
+      onShowToast('Sample Import Failed', (err as Error).message, 'error');
+      setActivePresetId(undefined);
+      setProjectId(null);
     } finally {
       if (current()) setIsUploading(false);
     }
@@ -490,7 +494,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const handleResetVideo = () => {
     selectionRef.current++;
     setIsUploading(false);
-    setSelectedFile(null);
     setVideoPreviewUrl(null);
     setActivePresetId(undefined);
     setProjectId(null);
@@ -974,7 +977,6 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     <>
       {step === 'upload' && (
         <StepUpload
-          selectedFile={selectedFile}
           videoPreviewUrl={videoPreviewUrl}
           fileName={fileName}
           fileSizeFormatted={fileSizeFormatted}

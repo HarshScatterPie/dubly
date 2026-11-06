@@ -34,7 +34,8 @@
 - **No server-side fetching of user URLs:** sample import takes a sample ID from a server list. The download is also checked: HTTPS only, allow-listed host, public IPs after DNS, no redirects, a timeout and a byte cap (`server/lib/safeDownload.ts`).
 
 ## Signed URLs and sharing
-- Media is private in the database (GridFS). Clients get signed URLs to `/api/media` (HMAC-SHA256 over the path and expiry, key in `system.mediaUrlKey` or `MEDIA_URL_SECRET`) valid for **3 hours**, each reused for at most 55 minutes. A changed path, signature or expiry gets `403`.
+- Media is private in the database (GridFS). Clients get signed URLs to `/api/media` (HMAC-SHA256 over the path and expiry, key in `system.mediaUrlKey` or `MEDIA_URL_SECRET`) valid for **3 hours**, each reused for at most 55 minutes. A changed path, signature or expiry gets `403`. The path inside a URL is sealed (AES-256-GCM), so a link shows no workspace, project or account id.
+- API answers are sent with `Cache-Control: no-store`. The browser keeps a copy of the app's opening data (`dubly.boot.v2.*`) for a fast first paint, without signed media links or email addresses; it is cleared on sign-out.
 - Share links are public for 24 hours, stored hashed, and can be turned off. The share page's own media URLs last at most 2 hours, and the page has a strict CSP and `Referrer-Policy: no-referrer`.
 
 ## API hardening
@@ -43,8 +44,8 @@
 - **Errors:** a single error format. Unplanned server errors never reach clients, only the log (with `request_id`).
 - **Headers:**
   - Enforced: `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`, and HSTS on HTTPS.
-  - The app's CSP ships as **Report-Only**. **To enforce it:** walk through sign-in, upload, analysis, translation, dubbing, export, share and text-to-voice with the browser console open. Add any legitimate source that gets reported to `APP_CSP` in `server/app.ts`, then rename the header to `Content-Security-Policy`.
-- **CORS** allows only `WEB_ORIGIN`. Authentication is a bearer token (no cookies), so CSRF doesn't apply.
+  - The app's CSP is enforced: scripts and styles only from this site, no `unsafe-inline`, media only from this site. The share page has its own stricter policy (its one script by nonce, its one stylesheet by hash).
+- **CORS** allows only `WEB_ORIGIN`. The session is an httpOnly `SameSite=Strict` cookie, so other sites cannot send it, and `/api/auth` also refuses cross-site requests (`Sec-Fetch-Site`, `Origin`).
 
 ## Secrets
 | Secret | Where it lives | Rotation |

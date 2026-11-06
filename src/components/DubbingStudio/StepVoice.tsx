@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { pressable } from '../../lib/pressable';
 import {
   Play,
   Pause,
@@ -343,7 +344,7 @@ export const StepVoice: React.FC<StepVoiceProps> = ({
           return (
             <div
               key={voice.id}
-              onClick={() => handleSelectVoice(voice)}
+              {...pressable(() => handleSelectVoice(voice))}
               aria-disabled={locked}
               title={locked ? `${VOICE_ENGINE_INFO[voice.engine].label} voices are available on the Enterprise plan` : undefined}
               className={`group relative overflow-hidden rounded-2xl p-5 border transition-all duration-200 flex flex-col justify-between ${

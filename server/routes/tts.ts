@@ -32,6 +32,9 @@ export function voiceHoldMinutes(text: string): number {
   return Math.max(1, Math.ceil(Array.from(text).length / HOLD_CHARS_PER_SECOND / 6)) / 10;
 }
 
+// One clip is one request to Google, which takes 5,000 bytes of text: about 5,000 letters of English, 1,600 of an Indian script.
+export const MAX_CLIP_TEXT_BYTES = 5000;
+
 // Charged clips being made per workspace; with the hold, this bounds how far a burst of requests can voice past the allowance.
 const clipsInFlight = new Map<string, number>();
 
@@ -81,6 +84,10 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
     }
     // The workspace's pronunciations apply here as in a dub, so a preview is how the render will sound.
     const spokenText = applySpokenForms(text, glossary);
+    if (Buffer.byteLength(spokenText, 'utf8') > MAX_CLIP_TEXT_BYTES) {
+      res.status(400).json({ error: 'This script is too long for one clip. Split it into shorter parts.', code: 'TEXT_TOO_LONG' });
+      return;
+    }
     // A sample line is free only as the pickers send it: with no direction of its own and untouched by the glossary, it maps to a
     // cached take, where any other text or direction would be a new one.
     const charged = !(SAMPLE_QUOTES.has(text.trim()) && spokenText === text && !delivery);

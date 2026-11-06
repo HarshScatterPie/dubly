@@ -21,11 +21,12 @@ import { hasPendingInvite, InviteAcceptDialog, takeInviteTokenFromUrl } from './
 import { InviteCard } from './components/Invitations';
 import { useMyInvites } from './lib/useMyInvites';
 import { hasLegacyPreferences, settingsService } from './services/settingsService';
-import { clearBootCaches, loadBootData, readBootCache, updateBootCache, writeBootCache, type BootData } from './lib/bootCache';
+import { assertAnswer, clearBootCaches, isUsageStats, loadBootData, readBootCache, updateBootCache, writeBootCache, type BootData } from './lib/bootCache';
 import { StudioMiniPlayer } from './components/StudioMiniPlayer';
 import { forgetStudioProject, recalledStudioProject, rememberStudioProject, type StudioStatus } from './lib/studioSession';
 import { projectProgress } from './lib/projectProgress';
 import { randomId } from './lib/randomId';
+import { pathFor, routeFor, tabDetails } from './lib/routes';
 import { allowanceRate, effectiveExtras } from './lib/planMath';
 import { DEFAULT_VOICE_ENGINES, VOICE_ENGINES } from './lib/voiceEngines';
 import { DEFAULT_PREFERENCES } from './data/preferences';
@@ -113,7 +114,12 @@ export default function App() {
   const { invites, refresh: refreshInvites } = useMyInvites(Boolean(user) && !booting);
   const [joiningInviteId, setJoiningInviteId] = useState<string | null>(null);
 
-  const [activeTab, setActiveTab] = useState<NavigationTab>('dashboard');
+  // The screen comes from the address, so a refresh stays where it was.
+  const [activeTab, setActiveTab] = useState<NavigationTab>(() => routeFor(window.location.pathname).tab);
+  // A project named by the address (/projects/<id>), still to be opened.
+  const [routedProjectId, setRoutedProjectId] = useState<string | null>(() => routeFor(window.location.pathname).projectId);
+  // The Text-to-Voice script lives here, so it survives moving to another screen and back.
+  const [voiceScript, setVoiceScript] = useState<string | null>(null);
   const [projects, setProjects] = useState<DubbingProject[]>([]);
   const [activeWorkspaceProject, setActiveWorkspaceProject] = useState<DubbingProject | null>(null);
   const [studioSession, setStudioSession] = useState<StudioSession | null>(null);
@@ -121,6 +127,8 @@ export default function App() {
   const studioContainerRef = useRef<HTMLDivElement>(null);
   const rememberedStudioIdRef = useRef<string | null>(null);
   const restoreTriedRef = useRef(false);
+  // Whether an unfinished studio from before a reload has been looked for; /dubbing waits for it instead of opening an empty studio over it.
+  const [studioRestored, setStudioRestored] = useState(false);
   // The user's saved defaults; null until loaded, when every consumer falls back to the built-in defaults.
   const [preferences, setPreferences] = useState<UserPreferences | null>(null);
   const [usage, setUsage] = useState<UserUsageStats>(EMPTY_USAGE);
@@ -141,6 +149,8 @@ export default function App() {
     setHistorySearch((prev) => ({ term: query, nonce: prev.nonce + 1 }));
     setActiveTab('history');
   };
+  // Whatever the search boxes hold now is what History opens with next time; a cleared search stays cleared.
+  const handleSearchEdited = (term: string) => setHistorySearch((prev) => ({ ...prev, term }));
 
   const showToast = (
     title: string,
@@ -154,7 +164,8 @@ export default function App() {
       type,
       timestamp: Date.now(),
     };
-    setToasts((prev) => [...prev, newToast]);
+    // The same message again while it is still showing adds nothing.
+    setToasts((prev) => (prev.some((t) => t.title === title && t.description === description) ? prev : [...prev, newToast]));
 
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== newToast.id));
@@ -172,7 +183,9 @@ export default function App() {
     if (!force && Date.now() - lastFetchedAtRef.current < REFRESH_THROTTLE_MS) return;
     lastFetchedAtRef.current = Date.now();
     try {
-      const [proj, usg] = await Promise.all([projectService.list(), apiGet<UserUsageStats>('/api/usage')]);
+      const [listed, answer] = await Promise.all([projectService.list(), apiGet<unknown>('/api/usage')]);
+      const proj = assertAnswer(listed, Array.isArray) as DubbingProject[];
+      const usg = assertAnswer(answer, isUsageStats);
       setProjects(proj);
       setUsage(usg);
       if (user) updateBootCache(user.uid, { projects: proj, usage: usg });
@@ -239,6 +252,8 @@ export default function App() {
         } else if (!cached) {
           primeProfile(null);
           showToast('Failed to Load Studio Data', (err as Error).message, 'error');
+        } else {
+          showToast('Could Not Refresh', 'Showing your last saved view. It updates when Dubly can be reached.', 'warning');
         }
       })
       .finally(() => {
@@ -270,15 +285,37 @@ export default function App() {
       setPreferences(null);
       setStudioSession(null);
       setStudioStatus(null);
+      setVoiceScript(null);
       rememberedStudioIdRef.current = null;
       restoreTriedRef.current = false;
+      setStudioRestored(false);
     }
   }, [user]);
 
+  // The address follows the screen, and the tab's title with it.
+  useEffect(() => {
+    const projectId = activeTab === 'workspace' ? activeWorkspaceProject?.id : null;
+    const path = pathFor(activeTab, projectId);
+    if (path && path !== window.location.pathname) window.history.pushState(null, '', path);
+    const page = activeTab === 'workspace' && activeWorkspaceProject ? activeWorkspaceProject.title : tabDetails(activeTab).title;
+    document.title = `${page} · Dubly`;
+  }, [activeTab, activeWorkspaceProject]);
+
+  // Back and Forward: the screen follows the address.
+  useEffect(() => {
+    const onAddressChanged = () => {
+      const route = routeFor(window.location.pathname);
+      setRoutedProjectId(route.projectId);
+      setActiveTab(route.tab);
+    };
+    window.addEventListener('popstate', onAddressChanged);
+    return () => window.removeEventListener('popstate', onAddressChanged);
+  }, []);
+
   // Opening the dubbing screen with no studio running starts a fresh one.
   useEffect(() => {
-    if (activeTab === 'dubbing' && !studioSession) setStudioSession(newStudioSession());
-  }, [activeTab, studioSession]);
+    if (activeTab === 'dubbing' && !studioSession && studioRestored) setStudioSession(newStudioSession());
+  }, [activeTab, studioSession, studioRestored]);
 
   // The studio's own video must not keep playing behind other screens; the mini player shows it instead.
   useEffect(() => {
@@ -303,7 +340,10 @@ export default function App() {
     if (!user || !workspace || restoreTriedRef.current) return;
     restoreTriedRef.current = true;
     const id = recalledStudioProject(user.uid);
-    if (!id) return;
+    if (!id) {
+      setStudioRestored(true);
+      return;
+    }
     projectService
       .get(id)
       .then((project) => {
@@ -314,8 +354,34 @@ export default function App() {
         }
         setStudioSession((current) => current ?? newStudioSession({ resumeProject: project }));
       })
-      .catch(() => forgetStudioProject());
+      .catch(() => forgetStudioProject())
+      .finally(() => setStudioRestored(true));
   }, [user, workspace]);
+
+  // A project's own address, on load or on Back: opened once the app is ready, or "not found" if this workspace has no such project.
+  useEffect(() => {
+    if (!user || !workspace || !routedProjectId) return;
+    if (activeWorkspaceProject?.id === routedProjectId) {
+      setRoutedProjectId(null);
+      return;
+    }
+    let cancelled = false;
+    projectService
+      .get(routedProjectId)
+      .then((project) => {
+        if (!cancelled) void handleOpenWorkspace(project);
+      })
+      .catch(() => {
+        if (!cancelled) setActiveTab('not-found');
+      })
+      .finally(() => {
+        if (!cancelled) setRoutedProjectId(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user, workspace, routedProjectId]);
 
   const handleCloseStudio = () => {
     setStudioSession(null);
@@ -424,7 +490,7 @@ export default function App() {
   const handleSaveProject = async (newProj: DubbingProject) => {
     setProjects((prev) => [newProj, ...prev.filter((p) => p.id !== newProj.id)]);
     try {
-      setUsage(await apiGet<UserUsageStats>('/api/usage'));
+      setUsage(assertAnswer(await apiGet<unknown>('/api/usage'), isUsageStats));
     } catch {
       // usage widget stays at its previous value until the next successful load
     }
@@ -451,8 +517,8 @@ export default function App() {
       setActiveTab('dubbing');
       return;
     }
-    // The list can be minutes old; the project may have moved on since.
-    const project = await projectService.get(listed.id).catch(() => null);
+    // The list can be minutes old; the project may have moved on since. A whole project was read just now.
+    const project = listed.summary ? await projectService.get(listed.id).catch(() => null) : listed;
     if (!project) {
       showToast('Could Not Open Project', 'Try again in a moment.', 'error');
       return;
@@ -665,6 +731,7 @@ export default function App() {
             onOpenNewProject={() => handleStartDubbing()}
             onOpenSettings={() => setActiveTab('settings')}
             onSearch={handleHeaderSearch}
+            onSearchCleared={() => handleSearchEdited('')}
             isPlayingAudio={isPlayingAudio}
             onStopAudio={handleStopAudio}
             invites={invites}
@@ -730,6 +797,9 @@ export default function App() {
             {activeTab === 'text-to-voice' && (
               <TextToVoiceStudio
                 voiceEngines={voiceEngines}
+                script={voiceScript}
+                onScriptChange={setVoiceScript}
+                minutesLeft={usageLoaded ? Math.max(0, usage.minutesLimit - usage.minutesDubbed) : undefined}
                 onShowToast={showToast}
                 onSendToDubbingWithAudio={handleSendToDubbingWithAudio}
               />
@@ -744,6 +814,7 @@ export default function App() {
                 onDeleteProject={isAdmin ? handleDeleteProject : undefined}
                 onNewDub={() => handleStartDubbing()}
                 initialSearchTerm={historySearch.term}
+                onSearchChange={handleSearchEdited}
               />
             )}
 
@@ -759,11 +830,25 @@ export default function App() {
             {activeTab === 'glossary' && <GlossaryView onShowToast={showToast} />}
 
             {activeTab === 'usage' && (
-              <UsageView usage={usage} onShowToast={showToast} />
+              <UsageView usage={usage} projects={projects} onShowToast={showToast} />
+            )}
+
+            {activeTab === 'not-found' && (
+              <div className="max-w-4xl mx-auto px-4 py-16 text-center space-y-4">
+                <h3 className="text-xl font-bold text-[#0F172A]">Page not found</h3>
+                <p className="text-xs text-[#64748B]">This address is not part of Dubly, or the project is no longer in this workspace.</p>
+                <button type="button" onClick={() => setActiveTab('dashboard')} className="px-5 py-2.5 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] text-white text-xs font-semibold">
+                  Go to the Dashboard
+                </button>
+              </div>
             )}
 
             {activeTab === 'workspace' && (
-              activeWorkspaceProject ? (
+              routedProjectId ? (
+                <div className="flex items-center justify-center py-24">
+                  <BrandLoader label="Opening your project…" />
+                </div>
+              ) : activeWorkspaceProject ? (
                 <ProjectWorkspace
                   project={activeWorkspaceProject}
                   onBack={() => setActiveTab(workspaceReturnTabRef.current === 'dubbing' ? 'history' : workspaceReturnTabRef.current)}

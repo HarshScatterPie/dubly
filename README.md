@@ -48,4 +48,5 @@ CI runs all of these, plus a dependency audit, a secret scan and a Docker build 
 | [DEPLOYMENT](docs/DEPLOYMENT.md) | Image, configuration, limits, rollback |
 | [RUNBOOK](docs/RUNBOOK.md) | Operating Dubly and handling incidents; log events and metrics |
 | [DISASTER-RECOVERY](docs/DISASTER-RECOVERY.md) | Backups, restore procedures, RPO/RTO |
+| [AI-LABELLING](docs/AI-LABELLING.md) | Watermarks and AI metadata in dubbed videos, and the rule behind them |
 | [ENTERPRISE-READINESS](docs/ENTERPRISE-READINESS.md) | Status of every audit finding |

@@ -12,7 +12,8 @@ export type NavigationTab =
   | 'team'
   | 'glossary'
   | 'usage'
-  | 'settings';
+  | 'settings'
+  | 'not-found';
 
 export type DubbingStep = 'upload' | 'understand' | 'localize' | 'voice' | 'export';
 
@@ -214,6 +215,8 @@ export interface LanguageOutput {
   finalDubbedVideoUrl?: string;
   /** How the last render of this language came out (sync, background). */
   renderReport?: RenderReport;
+  /** The id embedded in this render's file, which traces a copy found elsewhere back here. */
+  aiMarkId?: string;
 }
 
 export interface DubbingProject {
@@ -372,4 +375,6 @@ export interface Plan {
   teamInvites: boolean;
   /** The voice engines (models) the workspace's dubs and previews may use. */
   voiceEngines: VoiceEngine[];
+  /** Whether this plan's dubs carry the visible "Dubbed by Dubly Studio" label. Every dub carries the AI metadata either way. */
+  visibleWatermark: boolean;
 }

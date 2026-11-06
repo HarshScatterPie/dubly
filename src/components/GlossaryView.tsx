@@ -158,11 +158,14 @@ export const GlossaryView: React.FC<GlossaryViewProps> = ({ onShowToast }) => {
   const [draft, setDraft] = useState<GlossaryEntry[]>([]);
   const [canEdit, setCanEdit] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [saving, setSaving] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [newEntry, setNewEntry] = useState<GlossaryEntry>(emptyEntry);
 
-  useEffect(() => {
+  const load = () => {
+    setLoading(true);
+    setLoadFailed(false);
     workspaceService
       .getGlossary()
       .then((res) => {
@@ -170,8 +173,12 @@ export const GlossaryView: React.FC<GlossaryViewProps> = ({ onShowToast }) => {
         setDraft(res.entries);
         setCanEdit(res.canEdit);
       })
-      .catch((err) => onShowToast('Could Not Load Glossary', (err as Error).message, 'error'))
+      .catch(() => setLoadFailed(true))
       .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -256,6 +263,13 @@ export const GlossaryView: React.FC<GlossaryViewProps> = ({ onShowToast }) => {
         {loading ? (
           <div className="flex justify-center py-10">
             <Loader2 className="w-5 h-5 text-[#94A3B8] animate-spin" />
+          </div>
+        ) : loadFailed ? (
+          <div className="text-center py-10 space-y-3" role="alert">
+            <p className="text-xs text-[#64748B]">The glossary could not be loaded.</p>
+            <button type="button" onClick={load} className="px-4 py-2 rounded-lg border border-[#E2E8F0] text-xs font-semibold text-[#0F172A] hover:bg-[#F8FAFC]">
+              Try again
+            </button>
           </div>
         ) : draft.length === 0 ? (
           <p className="text-xs text-[#94A3B8] text-center py-10">No terms yet.</p>

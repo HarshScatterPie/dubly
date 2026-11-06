@@ -91,12 +91,12 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `MAX_ACTIVE_DUBS` | 4 | Dubs rendering at once on the server |
 | `MAX_HEAVY_REQUESTS` / `HEAVY_WAIT_SECONDS` | 3 / 600 | Concurrent transcriptions and caption renders / how long one waits before `503` |
 | `ONNX_WORKERS` | 2 (or fewer cores) | Worker threads for the face scan and voice-activity detection, started on demand. `0` runs them on the main thread, which freezes the API while they work |
-| `STORAGE_LIMIT_MB` / `ENFORCE_STORAGE_LIMIT` | 2048 / false | Allowance shown on the Usage page / refuse uploads past it |
+| `STORAGE_LIMIT_MB` / `ENFORCE_STORAGE_LIMIT` | 2048 / true | Allowance per workspace, shown on the Usage page / refuse uploads past it (`false` only shows it) |
 | `RATE_API_PER_MINUTE` | 600 | Any authenticated request, per user |
 | `RATE_TRANSCRIBE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 20 / 60 | |
 | `RATE_TRANSLATE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 40 / 120 | |
 | `RATE_DUB_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 30 / 90 | Dub starts |
-| `RATE_TTS_PER_HOUR` | 200 | Text-to-voice generations and previews (no text length limit; charged clips use plan minutes) |
+| `RATE_TTS_PER_HOUR` | 200 | Text-to-voice generations and previews. A clip is at most 5,000 bytes of text (Google's limit per request, about 1,600 letters of an Indian script); charged clips use plan minutes |
 | `MAX_VOICE_CLIPS_IN_FLIGHT` | 2 | Charged voice clips (Studio voiceovers, line previews) being made at once per workspace; more get `429 VOICE_BUSY` |
 | `RATE_EXPORT_PER_HOUR` | 30 | Export and captioned-render requests |
 | `RATE_IMPORT_SAMPLE_PER_HOUR` / `RATE_UPLOAD_PER_HOUR` | 20 / 30 | |

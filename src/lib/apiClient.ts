@@ -18,8 +18,15 @@ export const ACCESS_LOST_EVENT = 'dubly:access-lost';
 // The session is an httpOnly cookie, so a request needs nothing from script: the browser attaches it to same-origin calls on its own.
 const SAME_ORIGIN: RequestInit = { credentials: 'same-origin' };
 
+// For an answer that did not come from Dubly itself (a proxy's error page, say), so its wording never reaches the screen.
+function plainMessage(status: number): string {
+  if (status === 429) return 'Too many requests. Wait a moment and try again.';
+  if (status >= 500) return 'Dubly is having trouble right now. Try again in a moment.';
+  return 'That did not work. Try again.';
+}
+
 async function readError(res: Response): Promise<{ message: string; code?: string }> {
-  let message = res.statusText;
+  let message = plainMessage(res.status);
   let code: string | undefined;
   try {
     const body = await res.json();
@@ -29,8 +36,9 @@ async function readError(res: Response): Promise<{ message: string; code?: strin
     else if (error?.message) message = error.request_id && res.status >= 500 ? `${error.message} (ref ${String(error.request_id).slice(0, 8)})` : error.message;
     if (typeof error?.code === 'string') code = error.code;
   } catch {
-    // response body wasn't JSON — keep statusText
+    // Not JSON: not from Dubly, so the plain message stands.
   }
+  if (code === 'VALIDATION_FAILED') message = 'Something in that could not be read. Check it and try again.';
   // Refused before it reached Dubly (the Cloudflare front door takes at most 100 MB per request), so there is no JSON answer.
   if (res.status === 413 && !code) {
     message = 'This file is too large to send through this address (100 MB at most here). Use a shorter or smaller video, or upload it on the computer that runs Dubly.';
@@ -49,7 +57,11 @@ async function handle<T>(res: Response): Promise<T> {
     throw new ApiError(message, res.status, code);
   }
   if (res.status === 204) return undefined as T;
-  return res.json() as Promise<T>;
+  try {
+    return (await res.json()) as T;
+  } catch {
+    throw new ApiError(plainMessage(500), res.status, 'BAD_RESPONSE');
+  }
 }
 
 async function send(path: string, init: RequestInit): Promise<Response> {

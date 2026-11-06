@@ -15,9 +15,9 @@ export const limits = {
   maxHeavyRequests: num('MAX_HEAVY_REQUESTS', 3),
   // How long a transcription/caption request waits for a free slot before giving up, in ms (HEAVY_WAIT_SECONDS).
   heavyWaitMs: num('HEAVY_WAIT_SECONDS', 600) * 1000,
-  // Storage allowance per workspace, shown on the Usage page (STORAGE_LIMIT_MB); refused at upload only when ENFORCE_STORAGE_LIMIT=true.
+  // Storage allowance per workspace, shown on the Usage page (STORAGE_LIMIT_MB) and refused past at upload; ENFORCE_STORAGE_LIMIT=false only shows it.
   storageLimitMb: num('STORAGE_LIMIT_MB', 2048),
-  enforceStorageLimit: process.env.ENFORCE_STORAGE_LIMIT === 'true',
+  enforceStorageLimit: process.env.ENFORCE_STORAGE_LIMIT !== 'false',
   // Charged voice clips (Studio voiceovers, line previews) being made at once per workspace (MAX_VOICE_CLIPS_IN_FLIGHT).
   voiceClipsInFlightPerWorkspace: num('MAX_VOICE_CLIPS_IN_FLIGHT', 2),
 };

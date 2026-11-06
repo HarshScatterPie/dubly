@@ -23,6 +23,9 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { projectProgress, targetsSummary } from '../lib/projectProgress';
 import { ProjectStatusBadge } from './ProjectStatusBadge';
 import { DashboardHero } from './DashboardHero';
+import { Thumbnail } from './Thumbnail';
+import { pressable } from '../lib/pressable';
+import { projectTitle } from '../lib/projectProgress';
 
 interface DashboardProps {
   projects: DubbingProject[];
@@ -122,7 +125,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
               <span>Test with Ready-to-Dub Sample Videos</span>
             </h4>
             <p className="text-xs text-[#64748B]">
-              Try Dubly immediately with pre-loaded videos and verified multi-lingual transcripts.
+              Try Dubly immediately with pre-loaded videos and verified multilingual transcripts.
             </p>
           </div>
           <span className="text-[11px] font-mono text-[#94A3B8]">1-Click Instant Load</span>
@@ -132,15 +135,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
           {SAMPLE_VIDEOS.map((sample) => (
             <div
               key={sample.id}
-              onClick={() => onStartWithSample(sample.id)}
+              {...pressable(() => onStartWithSample(sample.id))}
               className="group relative flex items-center gap-3 p-2.5 rounded-xl bg-[#FFFFFF] hover:bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#F05637]/50 cursor-pointer transition-all"
             >
               <div className="relative w-16 h-12 rounded-lg overflow-hidden shrink-0">
-                <img
-                  src={sample.thumbnailUrl}
-                  alt={sample.title}
-                  className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                />
+                <Thumbnail src={sample.thumbnailUrl} alt={sample.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                 <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
                   <Play className="w-4 h-4 text-white fill-current opacity-90" />
                 </div>
@@ -201,20 +200,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
               >
                 {/* Thumbnail Header */}
                 <div
-                  onClick={() => onOpenProject(project)}
+                  {...pressable(() => onOpenProject(project))}
+                  aria-label={`Open ${projectTitle(project)}`}
                   className="relative h-36 bg-black cursor-pointer overflow-hidden"
                 >
-                  {project.videoThumbnailUrl ? (
-                    <img
-                      src={project.videoThumbnailUrl}
-                      alt={project.title}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center bg-[#1b2233]">
-                      <Video className="w-6 h-6 text-slate-500" />
-                    </div>
-                  )}
+                  <Thumbnail
+                    src={project.videoThumbnailUrl}
+                    alt={projectTitle(project)}
+                    iconClassName="w-6 h-6"
+                    className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+                  />
                   <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/20 to-transparent" />
 
                   {/* Play Overlay */}
@@ -243,7 +238,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       onClick={() => onOpenProject(project)}
                       className="text-sm font-bold text-[#0F172A] group-hover:text-[#D94B2E] transition-colors cursor-pointer truncate"
                     >
-                      {project.title}
+                      {projectTitle(project)}
                     </h4>
 
                     {/* Language Translation Mapping: only what analysis and translation actually established */}

@@ -144,7 +144,8 @@ describe('usage accounting', () => {
     const saved = { ...limits };
     try {
       limits.storageLimitMb = 0.001;
-      // Off (the default): the upload proceeds to content validation, which rejects this non-video.
+      // Switched off: the upload proceeds to content validation, which rejects this non-video.
+      limits.enforceStorageLimit = false;
       expect((await upload()).body.error.code).toBe('UNSUPPORTED_MEDIA');
       limits.enforceStorageLimit = true;
       const refused = await upload();

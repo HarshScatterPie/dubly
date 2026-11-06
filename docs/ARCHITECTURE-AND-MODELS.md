@@ -210,6 +210,7 @@ Each extra an Enterprise user switches on makes every dubbed minute use more of 
 
 - **One machine.** The office PC runs the Node process on `127.0.0.1:8787` next to its local MongoDB; `deploy/local-prod/run.ps1` keeps both running. People reach it at `https://dubly.scatterpie.workers.dev`, a Cloudflare Worker that forwards to a Cloudflare tunnel. Only one instance can run, because the queues, rate limits and caches live in memory. The same app also builds as one Docker image.
 - **Checked, not deployed, by GitHub.** Push to `main` and CI plus the Release gate test it (correctness, performance and model-call budgets, security). The PC is updated by hand once both are green (DEPLOYMENT.md).
+- **AI labels.** Free and Starter dubs carry a visible label, and every dub carries AI metadata and a unique id (AI-LABELLING.md).
 - **Credentials.** Key files in `server/credentials/` (or `CREDENTIALS_DIR`). On a Google host, `CREDENTIALS_MODE=adc` would use its service account and no key files.
 
 ---

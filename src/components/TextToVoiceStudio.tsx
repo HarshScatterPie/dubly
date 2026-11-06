@@ -24,22 +24,35 @@ import { VoiceEngineBadge } from './VoiceEngineBadge';
 import { WaveformVisualizer } from './WaveformVisualizer';
 import { textToSpeechService } from '../services/textToSpeechService';
 import { renderService } from '../services/renderService';
+import { pressable } from '../lib/pressable';
 
 interface TextToVoiceStudioProps {
   onShowToast: (title: string, desc?: string, type?: 'success' | 'info' | 'error') => void;
   onSendToDubbingWithAudio?: (script: string, voiceId: string, sampleVideoId?: string) => void;
   /** The voice engines the workspace's plan includes; the other voices are shown locked. */
   voiceEngines?: VoiceEngine[];
+  /** The script, kept by the app so it survives leaving this screen; null until the person has changed the opening example. */
+  script: string | null;
+  onScriptChange: (script: string) => void;
+  /** Minutes left on the plan, once known. */
+  minutesLeft?: number;
 }
+
+const OPENING_SCRIPT =
+  'Welcome to Dubly. With our state-of-the-art neural voice engine, you can turn any written script into broadcast-quality speech with natural breathing, authentic emotion, and perfect cadence.';
+// One clip is one request to Google, which takes 5,000 bytes of text; the server refuses more too. Indian scripts use three bytes a letter.
+const MAX_CLIP_TEXT_BYTES = 5000;
 
 export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
   onShowToast,
   onSendToDubbingWithAudio,
   voiceEngines = VOICE_ENGINES,
+  script,
+  onScriptChange,
+  minutesLeft,
 }) => {
-  const [scriptText, setScriptText] = useState<string>(
-    'Welcome to Dubly. With our state-of-the-art neural voice engine, you can turn any written script into broadcast-quality speech with natural breathing, authentic emotion, and perfect cadence.'
-  );
+  const scriptText = script ?? OPENING_SCRIPT;
+  const setScriptText = onScriptChange;
   const [selectedLanguageCode, setSelectedLanguageCode] = useState<string>('en');
   const [selectedVoiceId, setSelectedVoiceId] = useState<string>('gemini-lite-kore');
 
@@ -120,6 +133,10 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
   const handleGenerateVoice = async (): Promise<string | null> => {
     if (!scriptText.trim()) {
       onShowToast('Empty Script', 'Please enter some text to synthesize.', 'error');
+      return null;
+    }
+    if (new TextEncoder().encode(scriptText).length > MAX_CLIP_TEXT_BYTES) {
+      onShowToast('Script Too Long', 'This script is too long for one clip. Split it into shorter parts.', 'error');
       return null;
     }
 
@@ -215,6 +232,8 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
   const charCount = scriptText.length;
   const wordCount = scriptText.trim().split(/\s+/).filter(Boolean).length;
   const estDurationSec = generatedAudioUrl ? Math.round(generatedDuration) : Math.max(1, Math.round((wordCount / 2.5) / speed));
+  const scriptTooLong = new TextEncoder().encode(scriptText).length > MAX_CLIP_TEXT_BYTES;
+  const overAllowance = minutesLeft !== undefined && estDurationSec / 60 > minutesLeft;
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fade-in">
@@ -277,9 +296,22 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                 setGeneratedAudioUrl(null);
               }}
               rows={8}
+              aria-label="Script to turn into speech"
+              aria-invalid={scriptTooLong}
               placeholder="Paste your script here..."
               className="w-full p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] focus:border-[#F05637] text-[#0F172A] text-base leading-relaxed placeholder-[#94A3B8] focus:outline-none focus:ring-1 focus:ring-[#F05637] font-sans resize-none transition-all"
             />
+
+            {scriptTooLong && (
+              <p className="text-xs font-semibold text-rose-600" role="alert">
+                Too long for one clip. Keep it under about 5,000 letters (about 1,600 in Hindi and other Indian scripts), or split it into parts.
+              </p>
+            )}
+            {!scriptTooLong && overAllowance && (
+              <p className="text-xs font-semibold text-amber-700" role="status">
+                This would take about {Math.ceil(estDurationSec / 60)} min, and your plan has {Math.floor(minutesLeft ?? 0)} min left.
+              </p>
+            )}
 
             {/* Quick Helper */}
             <div className="flex items-center justify-between text-xs text-[#94A3B8] pt-1">
@@ -449,14 +481,14 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
                   return (
                     <div
                       key={v.id}
-                      onClick={() => {
+                      {...pressable(() => {
                         if (locked) {
                           onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, `Your plan includes ${enginesLabel(voiceEngines)} voices. Upgrade to Enterprise to use this one.`, 'info');
                           return;
                         }
                         setSelectedVoiceId(v.id);
                         setGeneratedAudioUrl(null);
-                      }}
+                      })}
                       aria-disabled={locked}
                       className={`flex items-center justify-between p-3 rounded-2xl border transition-all ${
                         locked
@@ -555,8 +587,8 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
             <button
               type="button"
               onClick={() => void handleGenerateVoice()}
-              disabled={isGenerating}
-              className="w-full flex items-center justify-center gap-2 py-3.5 px-6 rounded-xl bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white font-bold text-xs tracking-wide shadow-xl shadow-[0_0_20px_rgba(240,86,55,0.4)] transition-all duration-200 disabled:opacity-50"
+              disabled={isGenerating || scriptTooLong}
+              className="w-full flex items-center justify-center gap-2 py-3.5 px-6 rounded-xl disabled:opacity-50 bg-[#F05637] hover:bg-[#D94B2E] active:bg-[#B3391F] text-white font-bold text-xs tracking-wide shadow-xl shadow-[0_0_20px_rgba(240,86,55,0.4)] transition-all duration-200 disabled:opacity-50"
             >
               <Sparkles className="w-4 h-4 text-[#ff9d83]" />
               <span>{isGenerating ? 'Synthesizing Neural Speech...' : 'Generate Voice'}</span>
@@ -590,7 +622,7 @@ export const TextToVoiceStudio: React.FC<TextToVoiceStudioProps> = ({
               {SAMPLE_VIDEOS.map((sample) => (
                 <div
                   key={sample.id}
-                  onClick={() => handleMergeWithVideo(sample.id)}
+                  {...pressable(() => handleMergeWithVideo(sample.id))}
                   className="group flex items-center gap-3 p-3 rounded-2xl bg-[#F8FAFC] hover:bg-[#E2E8F0] border border-[#E2E8F0] hover:border-[#F05637]/60 cursor-pointer transition-all"
                 >
                   <img

@@ -75,15 +75,16 @@ export function normalizeErrorResponses(req: express.Request, res: express.Respo
   next();
 }
 
-// Enforced: scripts only from this site, nothing framed, no plugins; the only outside sources are Google Fonts, Unsplash images and the sample videos.
-// Every stored file is served by this server (/api/media), so media needs no other origin beyond the sample videos.
+// Enforced: scripts and styles only from this site, nothing framed, no plugins; the only outside sources are Google Fonts and Unsplash images.
+// Every stored file, samples included once imported, is served by this server (/api/media), so media needs no other origin.
+// Styles need no 'unsafe-inline': the page has no <style> element, and React sets element styles through the DOM, which CSP allows.
 const APP_CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "style-src 'self' https://fonts.googleapis.com",
   'font-src https://fonts.gstatic.com',
   "img-src 'self' data: blob: https://images.unsplash.com",
-  "media-src 'self' data: blob: https://interactive-examples.mdn.mozilla.net https://images-assets.nasa.gov",
+  "media-src 'self' data: blob:",
   "connect-src 'self' data: blob:",
   "frame-src 'none'",
   "form-action 'self'",
@@ -157,6 +158,12 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
       },
     })
   );
+  // Answers are private to whoever asked: neither the browser nor anything in between keeps them. A route with its own policy (media,
+  // the share page's logo) sets it after this.
+  app.use('/api', (_req, res, next) => {
+    res.setHeader('Cache-Control', 'no-store');
+    next();
+  });
   app.use(express.json({ limit: '2mb' }));
 
   // Liveness plus the database: a server that cannot reach MongoDB is not healthy, whatever else works.

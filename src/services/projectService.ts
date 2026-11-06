@@ -16,8 +16,15 @@ export class ProjectService {
     return apiGet<DubbingProject[]>('/api/projects');
   }
 
+  // Two screens (or a double click) asking at once share one request: a whole project is the largest thing the API sends.
+  private reading = new Map<string, Promise<DubbingProject>>();
+
   public get(projectId: string): Promise<DubbingProject> {
-    return apiGet<DubbingProject>(`/api/projects/${projectId}`);
+    const running = this.reading.get(projectId);
+    if (running) return running;
+    const request = apiGet<DubbingProject>(`/api/projects/${projectId}`).finally(() => this.reading.delete(projectId));
+    this.reading.set(projectId, request);
+    return request;
   }
 
   /** Status, percentage and message only: what a progress bar polls, instead of the whole project (transcript, every language, signed URLs). */

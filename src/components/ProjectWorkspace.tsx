@@ -4,6 +4,7 @@
  */
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { pressable } from '../lib/pressable';
 import {
   ArrowLeft,
   Check,
@@ -721,14 +722,14 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
               return (
                 <div
                   key={v.id}
-                  onClick={() => {
+                  {...pressable(() => {
                     if (isRedubbing) return;
                     if (locked) {
                       onShowToast(`${VOICE_ENGINE_INFO[v.engine].label} is an Enterprise voice`, `Your plan includes ${enginesLabel(voiceEngines)} voices. Upgrade to Enterprise to use this one.`, 'info');
                       return;
                     }
                     setPendingVoiceId(v.id);
-                  }}
+                  })}
                   aria-disabled={locked}
                   className={`p-4 rounded-2xl border transition-all ${isRedubbing || locked ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'} ${
                     isSelected ? 'bg-[#FFF4F1] border-[#F05637] ring-1 ring-[#F05637]' : locked ? 'bg-white border-dashed border-[#CBD5E1]' : 'bg-white border-[#E2E8F0] hover:border-[#CBD5E1]'

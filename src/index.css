@@ -56,6 +56,12 @@
 }
 
 @layer base {
+  /* Cards and rows that act as buttons show the keyboard user where they are, as real buttons do. */
+  [role='button']:focus-visible {
+    outline: 2px solid var(--color-coral-500, #f05637);
+    outline-offset: 2px;
+  }
+
   body {
     background-color: var(--color-background);
     color: var(--color-foreground);

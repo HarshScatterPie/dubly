@@ -53,6 +53,7 @@ try {
     ['referrer-policy', 'strict-origin-when-cross-origin'],
   ]) check(page.res.headers.get(name) === value, `security header ${name}: ${value}`);
   check(/script-src 'self'/.test(page.res.headers.get('content-security-policy') ?? ''), 'content security policy is enforced');
+check(!/unsafe-inline/.test(page.res.headers.get('content-security-policy') ?? ''), 'no inline styles or scripts are allowed');
 
   const script = /src="(\/assets\/[^"]+\.js)"/.exec(page.body)?.[1];
   check(Boolean(script), 'the page loads a hashed script bundle');

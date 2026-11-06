@@ -4,6 +4,7 @@
  */
 
 import React, { useState } from 'react';
+import { pressable } from '../../lib/pressable';
 import {
   Sparkles,
   ArrowRight,
@@ -371,7 +372,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
 
             {/* Cultural Adaptation Toggle */}
             <div
-              onClick={onToggleAdaptExpressions}
+              {...pressable(onToggleAdaptExpressions)}
               className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] cursor-pointer hover:border-[#CBD5E1] transition-colors"
             >
               <div>
@@ -553,7 +554,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
                       </div>
                     ) : (
                       <p
-                        onClick={() => handleStartEdit(loc)}
+                        {...pressable(() => handleStartEdit(loc))}
                         className="text-xs sm:text-sm text-[#0F172A] font-medium leading-relaxed cursor-pointer hover:text-[#D94B2E] transition-colors"
                       >
                         "{loc.translatedText}"

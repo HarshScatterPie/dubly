@@ -257,7 +257,7 @@ export const DashboardHero: React.FC<DashboardHeroProps> = ({ projects, onNaviga
   const stats = [
     { label: 'Projects', value: projects.length },
     { label: 'Dubs ready', value: progress.filter((p) => p.complete).length },
-    { label: 'Languages', value: new Set(progress.flatMap((p) => p.targetLanguageNames)).size },
+    { label: 'Languages dubbed', value: new Set(progress.flatMap((p) => p.targetLanguageNames)).size },
   ];
 
   return (

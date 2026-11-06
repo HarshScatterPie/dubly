@@ -2,6 +2,7 @@ import { execFile } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { AI_LABEL_PATH, aiMetadataArgs, type AiMark } from './aiMark';
 import { captionRenderEnv } from './fonts';
 import { ffmpeg, ffmpegPath, ffprobePath } from './mediaTools';
 
@@ -28,6 +29,25 @@ export interface MediaProbe {
   hasVideo: boolean;
   // ffprobe's container name list, e.g. "mov,mp4,m4a,3gp,3g2,mj2" or "matroska,webm".
   formatName: string;
+}
+
+/** The file's own metadata tags (comment, description, ...). */
+export function probeMediaTags(filePath: string): Promise<Record<string, string>> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      ffprobePath,
+      ['-v', 'error', ...SAFE_INPUT_OPTIONS, '-show_entries', 'format_tags', '-of', 'json', filePath],
+      { timeout: PROBE_TIMEOUT_MS, windowsHide: true },
+      (err, stdout) => {
+        if (err) return reject(new Error(`ffprobe could not read the file: ${err.message.split('\n')[0]}`));
+        try {
+          resolve((JSON.parse(stdout) as { format?: { tags?: Record<string, string> } }).format?.tags ?? {});
+        } catch {
+          reject(new Error('ffprobe returned unreadable output'));
+        }
+      }
+    );
+  });
 }
 
 // ffprobe run directly (not through fluent-ffmpeg) so it gets the same protocol restriction and a timeout.
@@ -251,22 +271,45 @@ function playsEverywhere(layout: StreamLayout | null): boolean {
   return layout.video.codec === 'h264' && /^(yuv420p|yuvj420p)$/.test(layout.video.pixFmt || 'yuv420p');
 }
 
+// The label's height as a share of the picture's shorter side: small, but readable on a phone. A floor keeps it legible on tiny videos.
+const LABEL_HEIGHT_SHARE = 0.05;
+const LABEL_MIN_HEIGHT_PX = 24;
+
+// The "Dubbed by Dubly Studio" label in the bottom right corner, sized from the picture. Sides are padded to even numbers for H.264.
+function labelFilter(layout: StreamLayout | null): string {
+  const shorterSide = Math.min(layout?.video?.width || 1280, layout?.video?.height || 720);
+  const height = Math.max(LABEL_MIN_HEIGHT_PX, Math.round(shorterSide * LABEL_HEIGHT_SHARE));
+  const margin = Math.round(height * 0.6);
+  return `[2:v]scale=-1:${height}[label];[0:v:0][label]overlay=W-w-${margin}:H-h-${margin}:format=auto,pad=ceil(iw/2)*2:ceil(ih/2)*2[picture]`;
+}
+
 /**
  * Lays the dubbed track under the picture: web-ready MP4 (moov atom first, so the player
  * starts before the whole file has downloaded), the picture copied untouched when browsers
  * can already play it, and the audio shifted by `audioOffsetSeconds` when the source's
- * sound started later (positive) or earlier (negative) than its picture.
+ * sound started later (positive) or earlier (negative) than its picture. `mark` says the
+ * result is AI-made: always in its metadata, and in the picture when the plan shows a label.
  */
 export async function muxVideoWithAudio(
   videoPath: string,
   audioPath: string,
   outputPath: string,
-  opts: { audioOffsetSeconds?: number; languageCode?: string } = {}
+  opts: { audioOffsetSeconds?: number; languageCode?: string; mark?: AiMark } = {}
 ): Promise<void> {
   const layout = await probeStreams(videoPath).catch(() => null);
   const offset = opts.audioOffsetSeconds ?? 0;
   const shift = (seconds: number) => (seconds > 0.001 ? ['-itsoffset', seconds.toFixed(3)] : []);
   const language = opts.languageCode ? ISO_639_2[opts.languageCode] : undefined;
+  const labelled = Boolean(opts.mark?.visibleLabel);
+  // A label is part of the picture, so that picture is encoded anew; a fast preset keeps the cost to a fraction of the dub itself.
+  const picture = labelled
+    ? ['-filter_complex', labelFilter(layout), '-map', '[picture]']
+    : ['-map', '0:v:0'];
+  const pictureCodec = labelled
+    ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p']
+    : playsEverywhere(layout)
+      ? ['-c:v', 'copy']
+      : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p'];
   await runFfmpeg(
     [
       ...shift(-offset),
@@ -275,12 +318,14 @@ export async function muxVideoWithAudio(
       ...shift(offset),
       ...SAFE_INPUT_OPTIONS,
       '-i', audioPath,
-      '-map', '0:v:0',
+      ...(labelled ? [...SAFE_INPUT_OPTIONS, '-i', AI_LABEL_PATH] : []),
+      ...picture,
       '-map', '1:a:0',
-      ...(playsEverywhere(layout) ? ['-c:v', 'copy'] : ['-c:v', 'libx264', '-preset', 'medium', '-crf', '18', '-pix_fmt', 'yuv420p']),
+      ...pictureCodec,
       '-c:a', 'aac',
       '-b:a', '192k',
       ...(language ? ['-metadata:s:a:0', `language=${language}`] : []),
+      ...(opts.mark ? aiMetadataArgs(opts.mark.id) : []),
       '-movflags', '+faststart',
       '-shortest',
       '-y', outputPath,

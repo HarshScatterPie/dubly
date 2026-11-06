@@ -12,6 +12,7 @@ import {
   Settings,
 } from 'lucide-react';
 import { NavigationTab } from '../types';
+import { tabDetails } from '../lib/routes';
 import type { MyInvite } from '../services/workspaceService';
 import { NotificationBell } from './Invitations';
 import scatterPieLogo from '../assets/scatterpie-logo.png';
@@ -22,6 +23,7 @@ interface HeaderProps {
   onOpenNewProject: () => void;
   onOpenSettings: () => void;
   onSearch: (query: string) => void;
+  onSearchCleared: () => void;
   isPlayingAudio: boolean;
   onStopAudio: () => void;
   // Workspace invitations waiting for this person, shown in the bell with a Join workspace button.
@@ -36,6 +38,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenNewProject,
   onOpenSettings,
   onSearch,
+  onSearchCleared,
   isPlayingAudio,
   onStopAudio,
   invites,
@@ -43,35 +46,7 @@ export const Header: React.FC<HeaderProps> = ({
   onJoinInvite,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
-  const getTabDetails = (tab: NavigationTab) => {
-    switch (tab) {
-      case 'dashboard':
-        return { title: 'Studio Overview', subtitle: 'Global AI Dubbing & Voice Workspace' };
-      case 'dubbing':
-        return { title: 'Video Dubbing Studio', subtitle: 'Translate existing speech into 40+ languages and Indian dialects' };
-      case 'text-to-voice':
-        return { title: 'Text-to-Voice Studio', subtitle: 'Generate humanlike voiceovers from raw scripts' };
-      case 'workspace':
-        return { title: 'Project Workspace', subtitle: 'Multi-stage timeline and transcript editor' };
-      case 'history':
-        return { title: 'Project History', subtitle: 'All past localized media and exports' };
-      case 'usage':
-        return { title: 'Usage & Quotas', subtitle: 'Monitor minutes, storage, and engine allocation' };
-      case 'settings':
-        return { title: 'Settings', subtitle: 'Your account, dubbing defaults and notifications' };
-      case 'team':
-        return { title: 'Team', subtitle: 'Members, roles and invitations' };
-      case 'glossary':
-        return { title: 'Glossary', subtitle: 'Terms every translation and voice must get right' };
-      default:
-        // Without this, adding a tab to NavigationTab and forgetting to name it here
-        // returns undefined and the header crashes the whole page on `details.title`.
-        // A plain fallback keeps a new section usable until it gets its own copy.
-        return { title: 'Dubly', subtitle: 'AI dubbing and voice workspace' };
-    }
-  };
-
-  const details = getTabDetails(activeTab);
+  const details = tabDetails(activeTab);
 
   return (
     <header className="sticky top-0 z-30 bg-background/90 backdrop-blur-md border-b border-border">
@@ -89,16 +64,16 @@ export const Header: React.FC<HeaderProps> = ({
         {/* The sidebar carries the brand on desktop; below md it is a closed drawer */}
         <img src={scatterPieLogo} alt="ScatterPie" className="md:hidden h-5 w-auto shrink-0 select-none" draggable={false} />
 
-        {/* A fixed width from lg up, so the search box starts at the same place on every screen instead of sliding with the title's length */}
-        <div className="hidden sm:block min-w-0 lg:w-72 lg:shrink-0">
+        {/* A fixed width, so a long title or subtitle is cut short and never squeezes the search box or the buttons */}
+        <div className="hidden sm:block min-w-0 flex-1 md:flex-none md:w-48 lg:w-72 md:shrink-0">
           <h1 className="text-base sm:text-lg font-semibold text-foreground tracking-tight truncate font-display">
             {details.title}
           </h1>
-          <p className="text-xs text-muted-foreground hidden md:block mt-0.5 truncate">{details.subtitle}</p>
+          <p className="text-xs text-muted-foreground hidden lg:block mt-0.5 truncate">{details.subtitle}</p>
         </div>
 
         {/* Desktop search — submits to Project History, which is where results land */}
-        <div className="hidden md:flex items-center gap-2 flex-1 max-w-md ml-4">
+        <div className="hidden md:flex items-center gap-2 flex-1 min-w-[140px] max-w-md ml-4">
           <form
             className="relative w-full"
             onSubmit={(e) => {
@@ -109,14 +84,18 @@ export const Header: React.FC<HeaderProps> = ({
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
             <input
               value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
+              onChange={(e) => {
+                setSearchQuery(e.target.value);
+                if (!e.target.value) onSearchCleared();
+              }}
+              aria-label="Search projects"
               placeholder="Search projects…"
               className="w-full pl-9 pr-3 py-2 rounded-md bg-white border border-border text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
             />
           </form>
         </div>
 
-        <div className="ml-auto flex items-center gap-3">
+        <div className="ml-auto flex items-center gap-3 shrink-0">
           {isPlayingAudio && (
             <button
               type="button"
@@ -142,7 +121,7 @@ export const Header: React.FC<HeaderProps> = ({
           <button
             type="button"
             onClick={onOpenNewProject}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-md bg-coral-500 hover:bg-coral-600 text-white text-xs font-semibold shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all duration-150"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-md whitespace-nowrap shrink-0 bg-coral-500 hover:bg-coral-600 text-white text-xs font-semibold shadow-[0_0_20px_rgba(240,86,55,0.3)] transition-all duration-150"
           >
             <Plus className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">New Dub</span>

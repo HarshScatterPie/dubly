@@ -73,7 +73,8 @@ describe('share page', () => {
     expect(csp).toContain("script-src 'nonce-bm9uY2U='");
     expect(csp).toContain("default-src 'none'");
     expect(csp).toContain("img-src 'self' data:");
-    expect(csp).toContain('https://storage.googleapis.com');
+    expect(csp).toContain("media-src 'self'");
+    expect(csp).not.toContain('unsafe-inline');
     expect(csp).not.toContain('unsafe-eval');
     expect(shareCsp()).toContain("script-src 'none'");
   });

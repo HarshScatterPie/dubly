@@ -18,9 +18,10 @@ import {
 import { SampleVideoPreset } from '../../types';
 import { SAMPLE_VIDEOS } from '../../data/mockData';
 import { VideoPlayer } from '../VideoPlayer';
+import { pressable } from '../../lib/pressable';
+import { Thumbnail } from '../Thumbnail';
 
 interface StepUploadProps {
-  selectedFile: File | null;
   videoPreviewUrl: string | null;
   fileName: string;
   fileSizeFormatted: string;
@@ -37,7 +38,6 @@ interface StepUploadProps {
 }
 
 export const StepUpload: React.FC<StepUploadProps> = ({
-  selectedFile,
   videoPreviewUrl,
   fileName,
   fileSizeFormatted,
@@ -73,13 +73,14 @@ export const StepUpload: React.FC<StepUploadProps> = ({
   return (
     <div className="space-y-8 animate-fade-in">
       {/* Upload Zone or Active Workspace */}
-      {!videoPreviewUrl && !(selectedFile && isUploading) ? (
+      {!videoPreviewUrl && !isUploading ? (
         <div className="space-y-6">
           {/* Big Dropzone */}
           <div
             onDragOver={(e) => e.preventDefault()}
             onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
+            {...pressable(() => fileInputRef.current?.click())}
+            aria-label="Choose a video to upload"
             className="relative group cursor-pointer overflow-hidden rounded-3xl glass-panel border-2 border-dashed border-[#E2E8F0] hover:border-[#F05637]/70 p-10 sm:p-16 text-center transition-all duration-200 hover:shadow-[0_0_30px_rgba(240,86,55,0.15)]"
           >
             <input
@@ -122,7 +123,7 @@ export const StepUpload: React.FC<StepUploadProps> = ({
                   <span>Try a sample video</span>
                 </h4>
                 <p className="text-xs text-[#64748B]">
-                  Don't have a video file ready? Test our full multi-lingual AI dubbing pipeline in seconds.
+                  Don't have a video file ready? Test our full multilingual AI dubbing pipeline in seconds.
                 </p>
               </div>
             </div>
@@ -131,15 +132,11 @@ export const StepUpload: React.FC<StepUploadProps> = ({
               {SAMPLE_VIDEOS.map((sample) => (
                 <div
                   key={sample.id}
-                  onClick={() => onSelectSample(sample)}
+                  {...pressable(() => onSelectSample(sample))}
                   className="group relative overflow-hidden rounded-xl bg-[#FFFFFF] hover:bg-[#F8FAFC] border border-[#E2E8F0] hover:border-[#F05637]/60 cursor-pointer p-3 transition-all"
                 >
                   <div className="relative h-28 rounded-lg overflow-hidden mb-3 bg-black">
-                    <img
-                      src={sample.thumbnailUrl}
-                      alt={sample.title}
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                    />
+                    <Thumbnail src={sample.thumbnailUrl} alt={sample.title} className="w-full h-full object-cover group-hover:scale-105 transition-transform" />
                     <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
                       <Play className="w-6 h-6 text-white fill-current opacity-90 group-hover:scale-110 transition-transform" />
                     </div>
@@ -185,10 +182,10 @@ export const StepUpload: React.FC<StepUploadProps> = ({
               {videoPreviewUrl ? (
                 <VideoPlayer src={videoPreviewUrl} className="w-full aspect-video" />
               ) : (
-                // Shown while the file uploads; the stored copy plays here once Dubly has it.
+                // Shown while the video is on its way; the stored copy plays here once Dubly has it.
                 <div className="w-full aspect-video bg-[#0F172A] flex flex-col items-center justify-center gap-3 text-slate-300" role="status">
                   <RefreshCw className="w-6 h-6 animate-spin text-coral-400" />
-                  <span className="text-xs font-medium">Uploading. The preview plays here once it is stored.</span>
+                  <span className="text-xs font-medium">Getting your video ready. The preview plays here in a moment.</span>
                 </div>
               )}
             </div>

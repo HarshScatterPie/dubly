@@ -1,4 +1,4 @@
-import type { Response } from 'express';
+import type { NextFunction, Request, Response } from 'express';
 import { Router } from '../lib/router';
 import multer from 'multer';
 import path from 'node:path';
@@ -325,15 +325,32 @@ projectsRouter.post('/:id/face-scan', rateLimit('face-scan', [['user', rateRules
   res.json({ faceScan, available: true });
 });
 
-projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['user', rateRules.uploadPerUser]]), upload.single('file'), async (req, res) => {
-  const stored = await requireProject(req.workspaceId!, req.params.id);
-  if (!stored) return res.status(404).json({ error: 'Project not found' });
+// Room for the multipart wrapping around the file itself.
+const MULTIPART_OVERHEAD_BYTES = 1024 * 1024;
+
+// Answered from the headers, before a byte is written to disk: a body that says it is over the limit, or a project this caller cannot reach.
+async function checkUploadRequest(req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (Number(req.headers['content-length']) > MAX_SOURCE_VIDEO_BYTES + MULTIPART_OVERHEAD_BYTES) {
+    res.setHeader('Connection', 'close');
+    res.status(413).json({ error: 'That file is too large.', code: 'FILE_TOO_LARGE' });
+    return;
+  }
+  if (!(await requireProject(req.workspaceId!, req.params.id))) {
+    res.setHeader('Connection', 'close');
+    res.status(404).json({ error: 'Project not found' });
+    return;
+  }
+  next();
+}
+
+projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['user', rateRules.uploadPerUser]]), checkUploadRequest, upload.single('file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No video file uploaded' });
   // Always true (multer wrote it there under a name of our own); checked so no later change can let a request steer a path.
   const localPath = path.resolve(req.file.path);
   if (!localPath.startsWith(path.resolve(uploadDir) + path.sep)) return res.status(400).json({ error: 'The upload could not be read' });
 
   try {
+    if (req.file.size === 0) return res.status(400).json({ error: 'That file is empty.', code: 'EMPTY_FILE' });
     await assertStorageAvailable(req.workspaceId!, req.file.size);
     const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, localPath, req.file.originalname, req.file.size);
     res.json(await toClientProject(updated));

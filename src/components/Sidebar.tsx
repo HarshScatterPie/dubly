@@ -21,6 +21,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { NavigationTab, UserUsageStats } from '../types';
+import { pressable } from '../lib/pressable';
 import { useAuth } from '../context/AuthContext';
 import { Avatar } from './Avatar';
 import scatterPieLogoWhite from '../assets/scatterpie-logo-white.png';
@@ -90,7 +91,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
     const isActive = activeTab === id;
     return (
       <div
-        onClick={() => handleNav(id)}
+        {...pressable(() => handleNav(id))}
+        aria-label={label}
+        aria-current={isActive ? 'page' : undefined}
         data-testid={`nav-${id}`}
         className={`group flex items-center gap-3 px-3 py-2.5 rounded-md text-sm cursor-pointer transition-colors ${
           isActive ? 'bg-white/8 text-white' : 'text-slate-400 hover:text-white hover:bg-white/5'
@@ -120,7 +123,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
       >
         <div className="px-4 py-5 flex items-center justify-between">
           <div
-            onClick={() => handleNav('dashboard')}
+            {...pressable(() => handleNav('dashboard'))}
+            aria-label="Dubly home"
             className="flex items-center gap-2.5 cursor-pointer group min-w-0"
           >
             <div className="w-8 h-8 bg-coral-500 rounded-lg flex items-center justify-center shadow-[0_0_15px_rgba(240,86,55,0.4)] shrink-0 group-hover:scale-105 transition-transform">
@@ -208,7 +212,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <Avatar name={displayName} src={avatarSrc} className="w-9 h-9 text-xs" />
             {!collapsed && (
               <>
-                <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleNav('settings')}>
+                <div className="flex-1 min-w-0 cursor-pointer" {...pressable(() => handleNav('settings'))} aria-label="Open your settings">
                   <p className="text-sm font-medium truncate" data-testid="sidebar-user-name">
                     {displayName}
                   </p>

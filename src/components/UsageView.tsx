@@ -13,15 +13,20 @@ import {
   Globe2,
   FileCheck,
 } from 'lucide-react';
-import { UserUsageStats } from '../types';
+import { DubbingProject, UserUsageStats } from '../types';
+import { LANGUAGES } from '../data/mockData';
+import { projectProgress } from '../lib/projectProgress';
 import { QuotaRequestDialog } from './QuotaRequestDialog';
 
 interface UsageViewProps {
   usage: UserUsageStats;
+  /** The workspace's projects, so these counts match the Dashboard's. */
+  projects: DubbingProject[];
   onShowToast: (title: string, description?: string, type?: 'success' | 'error' | 'info' | 'warning') => void;
 }
 
-export const UsageView: React.FC<UsageViewProps> = ({ usage, onShowToast }) => {
+export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToast }) => {
+  const languagesDubbed = new Set(projects.flatMap((p) => projectProgress(p).targetLanguageNames)).size;
   const [requestOpen, setRequestOpen] = useState(false);
   const minutesPercent = Math.min(100, Math.round((usage.minutesDubbed / usage.minutesLimit) * 100));
   const storagePercent = Math.min(100, Math.round((usage.storageUsedMb / usage.storageLimitMb) * 100));
@@ -33,7 +38,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onShowToast }) => {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h2 className="text-2xl sm:text-3xl font-extrabold text-[#0F172A] tracking-tight">
-            Usage & Analytics
+            Usage & Limits
           </h2>
           <p className="text-xs sm:text-sm text-[#64748B] mt-1">
             Track your neural synthesis minutes, API quotas, and storage consumption.
@@ -110,7 +115,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onShowToast }) => {
               <span className="text-sm text-[#94A3B8] font-mono">words</span>
             </div>
             <p className="text-[11px] text-[#64748B]">
-              Across {usage.languagesUsed} languages in {usage.totalProjects} projects
+              Dubbed into {languagesDubbed} {languagesDubbed === 1 ? 'language' : 'languages'} across {projects.length} {projects.length === 1 ? 'project' : 'projects'}
             </p>
           </div>
 
@@ -188,7 +193,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, onShowToast }) => {
             <span className="text-[10px] text-[#94A3B8] uppercase tracking-wider block font-bold">
               Language Support
             </span>
-            <span className="text-sm font-bold text-[#0F172A]">20 Languages</span>
+            <span className="text-sm font-bold text-[#0F172A]">{LANGUAGES.length} Languages</span>
           </div>
 
           <div className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">

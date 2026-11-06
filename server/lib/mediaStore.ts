@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createReadStream, createWriteStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { Readable, Transform, type TransformCallback } from 'node:stream';
@@ -204,7 +204,27 @@ export function resetMediaKeyForTests(): void {
   bucketInstance = null;
 }
 
-const b64url = (text: string) => Buffer.from(text, 'utf8').toString('base64url');
+const sealKey = (k: Buffer) => createHmac('sha256', k).update('media-path-seal').digest();
+
+// The path in a media URL is sealed, so a link says nothing about workspaces, projects or accounts. Its IV comes from the path, so
+// a path always seals to the same text: the URL stays stable for the browser's cache, and nothing but "same file" can be learned.
+function sealPath(k: Buffer, storagePath: string): string {
+  const iv = createHmac('sha256', k).update(`iv\n${storagePath}`).digest().subarray(0, 12);
+  const cipher = createCipheriv('aes-256-gcm', sealKey(k), iv);
+  const body = Buffer.concat([cipher.update(storagePath, 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), body]).toString('base64url');
+}
+
+function openPath(k: Buffer, sealed: string): string | null {
+  try {
+    const raw = Buffer.from(sealed, 'base64url');
+    const decipher = createDecipheriv('aes-256-gcm', sealKey(k), raw.subarray(0, 12));
+    decipher.setAuthTag(raw.subarray(12, 28));
+    return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
+}
 
 function signature(k: Buffer, storagePath: string, expiresSec: number, downloadName: string): string {
   return createHmac('sha256', k).update(`${storagePath}\n${expiresSec}\n${downloadName}`).digest('base64url');
@@ -213,9 +233,10 @@ function signature(k: Buffer, storagePath: string, expiresSec: number, downloadN
 async function sign(storagePath: string, expiresAtMs: number, downloadName = ''): Promise<string> {
   assertStoragePath(storagePath);
   const expiresSec = Math.floor(expiresAtMs / 1000);
-  const sig = signature(await key(), storagePath, expiresSec, downloadName);
+  const k = await key();
+  const sig = signature(k, storagePath, expiresSec, downloadName);
   const dl = downloadName ? `&dl=${encodeURIComponent(downloadName)}` : '';
-  return `/api/media/${b64url(storagePath)}?e=${expiresSec}${dl}&s=${sig}`;
+  return `/api/media/${sealPath(k, storagePath)}?e=${expiresSec}${dl}&s=${sig}`;
 }
 
 export interface VerifiedMediaRequest {
@@ -230,14 +251,15 @@ export async function verifyMediaUrl(encodedPath: string, query: Record<string, 
   const s = typeof query.s === 'string' ? query.s : '';
   const dl = typeof query.dl === 'string' ? query.dl : '';
   if (!Number.isInteger(e) || !s || e * 1000 <= now) return null;
-  let storagePath: string;
+  const k = await key();
+  const storagePath = openPath(k, encodedPath);
+  if (!storagePath) return null;
   try {
-    storagePath = Buffer.from(encodedPath, 'base64url').toString('utf8');
     assertStoragePath(storagePath);
   } catch {
     return null;
   }
-  const expected = Buffer.from(signature(await key(), storagePath, e, dl));
+  const expected = Buffer.from(signature(k, storagePath, e, dl));
   const given = Buffer.from(s);
   if (expected.length !== given.length || !timingSafeEqual(expected, given)) return null;
   return { storagePath, expiresAtMs: e * 1000, downloadName: dl };

@@ -11,14 +11,13 @@ export interface VideoMetadata {
   resolution: string;
   detectedAudio: string;
   detectedLanguage: string;
-  previewUrl: string;
 }
 
 export class VideoService {
   /**
-   * What is known about a picked video before it is uploaded: its name, size and a local preview. Its length and picture size
-   * come from the server, which measures the file itself as part of the upload (ffprobe), so nothing here guesses them and the
-   * upload never waits on the browser decoding the file first.
+   * What is known about a picked video before it is uploaded: its name and size. Its length and picture size come from the
+   * server, which measures the file itself as part of the upload (ffprobe), so nothing here guesses them and the upload never
+   * waits on the browser decoding the file first. The preview is the stored copy (a signed URL), so what plays is what Dubly has.
    */
   public describeLocalFile(file: File): VideoMetadata {
     return {
@@ -29,8 +28,6 @@ export class VideoService {
       resolution: 'Measuring…',
       detectedAudio: 'Not yet analyzed',
       detectedLanguage: 'Pending analysis',
-      // A blob: URL for this file only; the studio revokes it when the preview changes or closes.
-      previewUrl: URL.createObjectURL(file),
     };
   }
 

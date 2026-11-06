@@ -73,7 +73,7 @@ export const StepUpload: React.FC<StepUploadProps> = ({
   return (
     <div className="space-y-8 animate-fade-in">
       {/* Upload Zone or Active Workspace */}
-      {!videoPreviewUrl ? (
+      {!videoPreviewUrl && !(selectedFile && isUploading) ? (
         <div className="space-y-6">
           {/* Big Dropzone */}
           <div
@@ -182,10 +182,15 @@ export const StepUpload: React.FC<StepUploadProps> = ({
               </button>
             </div>
             <div className="relative rounded-2xl overflow-hidden border border-[#E2E8F0] shadow-2xl bg-[#FFFFFF]">
-              <VideoPlayer
-                src={videoPreviewUrl}
-                className="w-full aspect-video"
-              />
+              {videoPreviewUrl ? (
+                <VideoPlayer src={videoPreviewUrl} className="w-full aspect-video" />
+              ) : (
+                // Shown while the file uploads; the stored copy plays here once Dubly has it.
+                <div className="w-full aspect-video bg-[#0F172A] flex flex-col items-center justify-center gap-3 text-slate-300" role="status">
+                  <RefreshCw className="w-6 h-6 animate-spin text-coral-400" />
+                  <span className="text-xs font-medium">Uploading. The preview plays here once it is stored.</span>
+                </div>
+              )}
             </div>
           </div>
 

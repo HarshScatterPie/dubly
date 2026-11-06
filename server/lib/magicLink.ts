@@ -55,17 +55,18 @@ function sameHash(a: string | undefined, b: string): boolean {
   return timingSafeEqual(Buffer.from(a), Buffer.from(b));
 }
 
-// The browser's own secret for its attempts; kept if it already has one, so asking twice still lets either link sign it in.
-function browserSecret(req: Request, res: Response): string {
+// A random value that ties this browser to its attempts (only its hash is stored); kept if the browser already has one, so asking
+// twice still lets either link sign it in.
+function browserBinding(req: Request, res: Response): string {
   const existing = readCookie(req, ATTEMPT_COOKIE);
-  const secret = existing && /^[A-Za-z0-9_-]{40,64}$/.test(existing) ? existing : randomBytes(32).toString('base64url');
-  res.cookie(ATTEMPT_COOKIE, secret, { httpOnly: true, sameSite: 'strict', secure: cookieIsSecure(req), path: '/api/auth/magic', maxAge: LINK_TTL_MS });
-  return secret;
+  const binding = existing && /^[A-Za-z0-9_-]{40,64}$/.test(existing) ? existing : randomBytes(32).toString('base64url');
+  res.cookie(ATTEMPT_COOKIE, binding, { httpOnly: true, sameSite: 'strict', secure: cookieIsSecure(req), path: '/api/auth/magic', maxAge: LINK_TTL_MS });
+  return binding;
 }
 
 function heldByThisBrowser(req: Request, doc: AttemptDoc): boolean {
-  const secret = readCookie(req, ATTEMPT_COOKIE);
-  return Boolean(secret) && sameHash(doc.browserHash, sha256(secret!));
+  const binding = readCookie(req, ATTEMPT_COOKIE);
+  return Boolean(binding) && sameHash(doc.browserHash, sha256(binding!));
 }
 
 /** Records the attempt and returns what to email (nothing for an address without a usable account). */
@@ -87,7 +88,7 @@ export async function startMagicSignIn(
     uid: usable?._id ?? null,
     email: address,
     linkHash: sha256(linkToken),
-    browserHash: sha256(browserSecret(req, res)),
+    browserHash: sha256(browserBinding(req, res)),
     status: 'sent',
     codeTries: 0,
     requestedFrom: from,

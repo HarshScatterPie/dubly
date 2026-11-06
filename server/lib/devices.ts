@@ -48,8 +48,9 @@ export async function noteDevice(req: Request, res: Response, uid: string, metho
 
   const info = clientInfo(req);
   const context: SignInContext = { ...info, method, at: new Date() };
-  // Per account and device, so one browser shared by two accounts is new to each of them once.
-  const id = sha256(`${deviceId}:${uid}`);
+  // Per account and device, so one browser shared by two accounts is new to each of them once. Only the cookie's value is hashed
+  // (a database read cannot be replayed as someone's device); the account id is not secret.
+  const id = `${sha256(deviceId)}:${uid}`;
   const seen = await devices().findOneAndUpdate(
     { _id: id, uid },
     { $set: { lastSeenAt: context.at, device: info.device, ip: info.ip, location: info.location } }

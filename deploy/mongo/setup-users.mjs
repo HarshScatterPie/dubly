@@ -48,7 +48,7 @@ await admin.command({ createUser: 'dubly_admin', pwd: creds.dubly_admin, roles: 
 // From here on the localhost exception is gone; the rest is done as the administrator.
 await client.close();
 
-const adminClient = new MongoClient(`mongodb://dubly_admin:${encodeURIComponent(creds.dubly_admin)}@${hostPort}/?authSource=admin&directConnection=true`);
+const adminClient = new MongoClient(`mongodb://dubly_admin:${encodeURIComponent(creds.dubly_admin)}@${hostPort}/?authSource=admin&directConnection=true`); // trufflehog:ignore
 await adminClient.connect();
 const adminDb = adminClient.db('admin');
 await adminDb.command({ createUser: 'dubly_app', pwd: creds.dubly_app, roles: [{ role: 'readWrite', db: 'dubly' }], mechanisms: ['SCRAM-SHA-256'] });
@@ -63,7 +63,7 @@ await adminDb.command({
 });
 await adminClient.close();
 
-const uri = (user, db) => `mongodb://${user}:${encodeURIComponent(creds[user])}@${hostPort}/${db}?authSource=admin&directConnection=true`;
+const uri = (user, db) => `mongodb://${user}:${encodeURIComponent(creds[user])}@${hostPort}/${db}?authSource=admin&directConnection=true`; // trufflehog:ignore
 const text = `# Dubly MongoDB credentials, created ${new Date().toISOString()}. Keep this file private.
 
 # Compass / operations (root):

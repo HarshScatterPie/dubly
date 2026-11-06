@@ -17,7 +17,7 @@ Diagrams are Mermaid, so they render on GitHub and in any Markdown viewer with M
 | Data | MongoDB (replica set): accounts and sessions, records, files in GridFS |
 | AI | Gemini 3.5 Flash-Lite on Vertex AI; Gemini 2.5 Flash TTS and Chirp 3 HD on Cloud Text-to-Speech; three models on the server (Silero VAD, SCRFD, DeepFilterNet3) |
 | Media | ffmpeg and ffprobe |
-| Hosting | One Compute Engine VM in asia-south1 |
+| Hosting | One Windows PC in the office, reached through a Cloudflare Worker and tunnel |
 
 ---
 
@@ -208,10 +208,9 @@ Each extra an Enterprise user switches on makes every dubbed minute use more of 
 
 ## 7. Where it runs
 
-- **One machine.** A single Compute Engine VM, `dubly-app`, in asia-south1. nginx forwards port 80 to the Node process on `127.0.0.1:8787`, and systemd keeps it running. Only one instance can run, because the queues, rate limits and caches live in memory. The same app also builds as one Docker image.
-- **Deploys itself.** Push to `main`, CI runs, and a timer on the VM checks every 2 minutes. If the newest commit passed CI, it builds a new release folder, switches to it, restarts and checks `/api/healthz`. An unhealthy release is switched back.
-- **Sleeps when idle.** A Cloud Run service, `dubly-wake`, starts the stopped VM when someone opens the wake URL. A watchdog on the VM powers it off after a quiet period with no unsettled jobs. The scripts are in `deploy/sleep`.
-- **Credentials.** `CREDENTIALS_MODE=adc` uses the VM's own service account and no key files. Locally, key files in `server/credentials/` are used.
+- **One machine.** The office PC runs the Node process on `127.0.0.1:8787` next to its local MongoDB; `deploy/local-prod/run.ps1` keeps both running. People reach it at `https://dubly.scatterpie.workers.dev`, a Cloudflare Worker that forwards to a Cloudflare tunnel. Only one instance can run, because the queues, rate limits and caches live in memory. The same app also builds as one Docker image.
+- **Checked, not deployed, by GitHub.** Push to `main` and CI plus the Release gate test it (correctness, performance and model-call budgets, security). The PC is updated by hand once both are green (DEPLOYMENT.md).
+- **Credentials.** Key files in `server/credentials/` (or `CREDENTIALS_DIR`). On a Google host, `CREDENTIALS_MODE=adc` would use its service account and no key files.
 
 ---
 
@@ -293,7 +292,7 @@ Gemini 2.5 Flash TTS and Chirp 3 HD share one voice roster (Aoede, Charon, Kore 
 - **Used for:** the face scan stored on the project. When a speaker is on screen, every line is paced to fit the mouth
 
 ### 6. DeepFilterNet3
-- **File:** the `deep-filter` static binary, v0.5.6 (installed by `deploy/vm/deploy.sh`, pinned by hash in the Dockerfile)
+- **File:** the `deep-filter` static binary, v0.5.6 (`server/bin/deep-filter.exe` on the PC, pinned by hash in the Dockerfile)
 - **Runs on:** the Dubly server, one CPU core, in 5-minute chunks so memory stays flat however long the video is
 - **Used for:** separating the speaker from the background. It is built for noise rather than music, so a loud music bed can keep a trace of the voice
 

@@ -84,3 +84,9 @@
 - **Roll back the project storage split:** `npx tsx server/scripts/unsplit_projects.ts` (dry run), then `--apply`.
 - **Move a workspace to another plan:** `npx tsx server/scripts/set_plan.ts <workspace id | member email> enterprise` (or `starter`). With no plan argument, it shows the current plan. The server picks up the change within a minute. Moving to Starter keeps existing teammates, but no new ones can join, including through links sent earlier.
 - **Change what a plan includes:** edit the `starter` or `enterprise` document in the `plans` collection (Compass) (`minutesPerMonth`, `paidExtras`, `extraRates`, `teamInvites`, `name`). Every workspace on that plan follows within a minute.
+
+## Emails
+Every email shares one design (`server/lib/emailTemplates.ts`): HTML with a plain-text copy, hero pictures embedded in the message (`server/assets/email`, redrawn with `node server/scripts/render_email_art.mjs`).
+- **Look at all of them:** `npx tsx server/scripts/preview_emails.ts <folder>` writes every email with sample data and an `index.html`; nothing is sent.
+- **What goes when:** confirm email, password reset and sign-in link (on request), new-device sign-in (first sign-in from each further device), welcome (first sign-in, once; "welcome back" for accounts moved from Firebase), password changed (every reset or change), usage at 80% and at 100% (to the workspace's admins, once each per usage period), invitations, quota requests (to the team, plus a receipt to the person asking).
+- **Everyone needs a new password link** (e.g. after a move): `WEB_ORIGIN=<public address> npx tsx server/scripts/send_reset_links.ts` lists who would get one; add `--send` to send. Each new link replaces that account's earlier one.

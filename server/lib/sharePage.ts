@@ -88,7 +88,7 @@ const LOGO_MARK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" st
 
 function chrome(title: string, description: string, body: string, extraHead = '', script = ''): string {
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="robots" content="noindex"><meta name="theme-color" content="#FAFAF7"><title>${escapeHtml(title)}</title>
+<meta name="robots" content="noindex"><meta name="theme-color" content="#FAFAF7"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png"><title>${escapeHtml(title)}</title>
 <meta property="og:site_name" content="Dubly"><meta property="og:title" content="${escapeHtml(title)}"><meta property="og:description" content="${escapeHtml(description)}">${extraHead}
 <style>${CSS}</style></head><body><div class="glow g1"></div><div class="glow g2"></div>
 <header class="top"><img class="sp-logo" src="${SHARE_LOGO_PATH}" alt="ScatterPie"><span class="badge"><span class="d">${LOGO_MARK}</span><span>Dubbed with <b>Dubly</b></span></span></header>

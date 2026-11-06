@@ -22,13 +22,16 @@ import {
   toPublicUser,
   type UserDoc,
 } from '../lib/accounts';
-import { authLink, buildResetEmail, buildVerifyEmail, deliverAuthEmail } from '../lib/authEmail';
+import { authLink, buildMagicLinkEmail, buildResetEmail, buildVerifyEmail, deliverAuthEmail } from '../lib/authEmail';
+import { METHOD_LABELS, noteDevice, type SignInMethod } from '../lib/devices';
+import { LINK_TTL_MS, openMagicLink, startMagicSignIn, verifyMagicCode } from '../lib/magicLink';
 import { clearSessionCookie, requireAuth, requireSameOrigin, sessionTokenOf, setSessionCookie } from '../lib/auth';
 import { clientIp, forget, hit, rateLimit, retryAfter } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
 import { schemas, validateBody } from '../lib/validation';
 import { invalidateMembership } from '../lib/workspaces';
 import { log } from '../lib/log';
+import { notifyNewDevice, notifyPasswordChanged, scheduleWelcome } from '../lib/notifications';
 
 /**
  * Sign-in and account management, all against MongoDB (lib/accounts.ts). Answers never say whether an email has an account:
@@ -48,10 +51,19 @@ function addressLimited(res: Response, scope: string, email: string, rule: typeo
   return true;
 }
 
-async function signIn(req: Request, res: Response, user: Pick<UserDoc, '_id' | 'email' | 'emailVerified' | 'displayName'>): Promise<void> {
+async function signIn(req: Request, res: Response, user: Pick<UserDoc, '_id' | 'email' | 'emailVerified' | 'displayName'>, method: SignInMethod): Promise<void> {
+  // This browser's earlier session (another account, or the same one) ends here rather than living on unseen until it expires.
+  const previous = sessionTokenOf(req);
+  if (previous?.via === 'cookie') await revokeSession(previous.token);
   const { token, expiresAt } = await createSession(user._id, { userAgent: req.get('user-agent'), ip: clientIp(req) ?? undefined });
   setSessionCookie(req, res, token, expiresAt);
   invalidateMembership(user._id);
+  // A device this account has not used before (when it has used others) gets the owner a "new sign-in" email.
+  const { isNew, context } = await noteDevice(req, res, user._id, method);
+  if (isNew) notifyNewDevice(user.email, { device: context.device, location: context.location, ip: context.ip, at: context.at, method: METHOD_LABELS[method] });
+  // The first sign-in (with a confirmed email or a workspace to join) gets the welcome email; later ones do nothing.
+  scheduleWelcome(user._id);
+  log.info('signed_in', { userId: user._id, method, newDevice: isNew });
   res.status(200).json({ user: toPublicUser(user) });
 }
 
@@ -129,7 +141,7 @@ authRouter.post('/verify-email', ipLimit('auth-token', rateRules.signupPerIp), v
   }
   await markEmailVerified(user._id);
   log.info('email_verified', { userId: user._id });
-  await signIn(req, res, { ...user, emailVerified: true });
+  await signIn(req, res, { ...user, emailVerified: true }, 'email-confirmation');
 });
 
 authRouter.post('/login', ipLimit('login', rateRules.loginPerIp), validateBody(schemas.login), async (req, res) => {
@@ -157,8 +169,7 @@ authRouter.post('/login', ipLimit('login', rateRules.loginPerIp), validateBody(s
     res.status(403).json({ error: 'This account has been disabled. Contact ScatterPie.', code: 'ACCOUNT_DISABLED' });
     return;
   }
-  log.info('signed_in', { userId: user._id });
-  await signIn(req, res, user);
+  await signIn(req, res, user, 'password');
 });
 
 authRouter.post('/logout', async (req, res) => {
@@ -215,7 +226,8 @@ authRouter.post('/reset-password', ipLimit('auth-token', rateRules.signupPerIp),
   await revokeAllSessions(user._id);
   await markEmailVerified(user._id);
   log.info('password_reset', { userId: user._id });
-  await signIn(req, res, { ...user, emailVerified: true });
+  notifyPasswordChanged(user.email, 'reset');
+  await signIn(req, res, { ...user, emailVerified: true }, 'password-reset');
 });
 
 authRouter.post(
@@ -239,6 +251,60 @@ authRouter.post(
     // Signed out everywhere, then signed in again here with a fresh session.
     await revokeAllSessions(req.uid!);
     log.info('password_changed', { userId: req.uid });
-    await signIn(req, res, user);
+    notifyPasswordChanged(req.email!, 'change');
+    await signIn(req, res, user, 'password');
   }
 );
+
+// --- Sign-in by email link, no password (lib/magicLink.ts) -----------------------------------------------------------------
+
+/** Emails a one-time sign-in link; answers the same whether or not the address has an account. */
+authRouter.post('/magic/request', ipLimit('auth-email', rateRules.authEmailPerIp), validateBody(schemas.emailOnly), async (req, res) => {
+  const email = normalizeEmail(req.body.email);
+  if (!isEmail(email)) {
+    res.status(400).json({ error: 'Enter a valid email address.', code: 'INVALID_EMAIL' });
+    return;
+  }
+  if (addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
+  const { attemptId, expiresInSeconds, send } = await startMagicSignIn(req, res, email);
+  if (send) {
+    const link = authLink('magic', send.linkToken);
+    inBackground(() => deliverAuthEmail(buildMagicLinkEmail(send.account.email, link, send.from, LINK_TTL_MS / 60_000), link), 'magic_link_mail_failed');
+  }
+  res.status(202).json({ attemptId, expiresInSeconds });
+});
+
+/** The emailed link was opened: signs in the browser that asked, or shows a code to type there. */
+authRouter.post('/magic/open', ipLimit('auth-token', rateRules.signupPerIp), validateBody(schemas.authToken), async (req, res) => {
+  const result = await openMagicLink(req, req.body.token);
+  if (result.kind === 'invalid') {
+    res.status(400).json({ error: 'This sign-in link has expired or was already used. Ask for a new one on the sign-in page.', code: 'INVALID_LINK' });
+    return;
+  }
+  if (result.kind === 'code') {
+    res.status(200).json({ status: 'code', code: result.code, requestedFrom: { device: result.from.device, location: result.from.location, at: result.from.at } });
+    return;
+  }
+  // Opening the link proves the inbox.
+  await markEmailVerified(result.account._id);
+  await signIn(req, res, { ...result.account, emailVerified: true }, 'email-link');
+});
+
+/** The code from the link, typed on the device that asked. */
+authRouter.post('/magic/verify', ipLimit('magic-verify', rateRules.loginPerIp), validateBody(schemas.magicCode), async (req, res) => {
+  const result = await verifyMagicCode(req, req.body.attemptId, req.body.code);
+  if (result.kind === 'not-opened') {
+    res.status(409).json({ error: 'Open the link in the email first; on another device it shows the code.', code: 'NOT_OPENED' });
+    return;
+  }
+  if (result.kind === 'wrong') {
+    res.status(400).json({ error: `That code is not right. ${result.triesLeft} ${result.triesLeft === 1 ? 'try' : 'tries'} left.`, code: 'WRONG_CODE', triesLeft: result.triesLeft });
+    return;
+  }
+  if (result.kind === 'invalid') {
+    res.status(400).json({ error: 'This sign-in has expired. Ask for a new link.', code: 'INVALID_CODE' });
+    return;
+  }
+  await markEmailVerified(result.account._id);
+  await signIn(req, res, { ...result.account, emailVerified: true }, 'email-code');
+});

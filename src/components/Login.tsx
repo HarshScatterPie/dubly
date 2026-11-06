@@ -35,7 +35,12 @@ function passwordIssue(password: string, confirm: string): string | null {
 type Mode = 'signin' | 'signup' | 'check-email';
 
 export const Login: React.FC = () => {
-  const { signInWithEmail, signUp, sendPasswordReset, completePasswordReset, cancelPasswordReset, resetToken, notice, error } = useAuth();
+  const { signInWithEmail, signUp, sendPasswordReset, completePasswordReset, cancelPasswordReset, resetToken, notice, error, magicAttempt, requestMagicLink, verifyMagicCode, cancelMagic } =
+    useAuth();
+  // Sign in with an emailed link instead of a password.
+  const [useLink, setUseLink] = useState(false);
+  const [code, setCode] = useState('');
+  const [resendIn, setResendIn] = useState(0);
   const [mode, setMode] = useState<Mode>('signin');
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState('');
@@ -118,8 +123,32 @@ export const Login: React.FC = () => {
     });
   };
 
+  // A new link may be asked for once a short wait has passed.
+  useEffect(() => {
+    if (resendIn <= 0) return;
+    const t = window.setTimeout(() => setResendIn((n) => n - 1), 1000);
+    return () => window.clearTimeout(t);
+  }, [resendIn]);
+
+  const sendLink = () =>
+    guarded(async () => {
+      await requestMagicLink(email);
+      setCode('');
+      setResendIn(30);
+    });
+
+  const handleCode = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (code.replace(/\D/g, '').length !== 6) return setFormError('Enter the 6-digit code.');
+    void guarded(() => verifyMagicCode(code));
+  };
+
   const handleSignIn = (e: React.FormEvent) => {
     e.preventDefault();
+    if (useLink) {
+      if (email) void sendLink();
+      return;
+    }
     if (!email || !password) return;
     // The context shows the reason in `error`; nothing else to do here.
     void guarded(() => signInWithEmail(email, password).catch(() => undefined));
@@ -139,8 +168,18 @@ export const Login: React.FC = () => {
     }
   };
 
-  const heading = resetToken ? 'Choose a new password' : signup ? 'Join your team' : mode === 'signup' ? 'Create your account' : 'Dubly Studio';
-  const subheading = resetToken
+  const heading = magicAttempt
+      ? 'Check your inbox'
+      : resetToken
+        ? 'Choose a new password'
+        : signup
+          ? 'Join your team'
+          : mode === 'signup'
+            ? 'Create your account'
+            : 'Dubly Studio';
+  const subheading = magicAttempt
+      ? 'Your sign-in link is on its way.'
+      : resetToken
     ? 'Set the password you will use to sign in from now on.'
     : mode === 'signup'
       ? 'Start dubbing in minutes. We will email you a link to confirm your address.'
@@ -148,6 +187,7 @@ export const Login: React.FC = () => {
         ? 'One more step.'
         : 'Sign in to continue.';
   const shownError = formError || (mode === 'signin' && !resetToken && !signup ? error : null);
+  const showSignIn = !resetToken && !signup && !magicAttempt && mode === 'signin';
 
   return (
     <div className="relative min-h-screen bg-background text-foreground flex flex-col antialiased overflow-hidden">
@@ -172,6 +212,43 @@ export const Login: React.FC = () => {
           </div>
 
           {notice && !resetToken && <p className="text-xs text-center text-[#9A3412] bg-[#FFF4F1] border border-[#FFC4B3] rounded-md p-3">{notice}</p>}
+
+          {/* This device asked for a link: wait for it, or take the code it shows on another device. */}
+          {magicAttempt && (
+            <div className="space-y-4">
+              <p className="flex items-start gap-2 text-xs text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-md p-3">
+                <MailCheck className="w-4 h-4 shrink-0" />
+                <span>
+                  If <strong>{magicAttempt.email}</strong> has a Dubly account, a sign-in link is on its way. Open it <strong>on this device</strong> and you are in
+                  straight away. Opened it on your phone? It shows a 6-digit code: type it below.
+                </span>
+              </p>
+              <form onSubmit={handleCode} className="space-y-3">
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={7}
+                  value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/[^\d]/g, '').slice(0, 6))}
+                  placeholder="6-digit code"
+                  className="w-full px-3 py-3 rounded-md bg-white border border-border text-center font-mono text-2xl tracking-[0.4em] text-foreground placeholder:text-sm placeholder:tracking-normal placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-coral-500/30 focus:border-coral-400"
+                />
+                <button type="submit" disabled={busy || code.length !== 6} className={primaryButton}>
+                  {busy && <Loader2 className="w-4 h-4 animate-spin" />}
+                  <span>Sign in with code</span>
+                </button>
+              </form>
+              <div className="flex items-center justify-between">
+                <button type="button" onClick={() => { cancelMagic(); setFormError(null); }} className={linkButton}>
+                  Use my password instead
+                </button>
+                <button type="button" onClick={() => void sendLink()} disabled={busy || resendIn > 0} className={linkButton}>
+                  {resendIn > 0 ? `Send again in ${resendIn}s` : 'Send a new link'}
+                </button>
+              </div>
+            </div>
+          )}
 
           {/* Opened from a password-reset email. */}
           {resetToken && (
@@ -262,7 +339,7 @@ export const Login: React.FC = () => {
             </form>
           )}
 
-          {!resetToken && !signup && mode === 'signin' && (
+          {showSignIn && (
             <>
               {invited && (
                 <div className="flex items-start gap-2.5 p-3 rounded-md bg-[#FFF4F1] border border-[#FFC4B3] text-xs text-[#9A3412]">
@@ -277,17 +354,25 @@ export const Login: React.FC = () => {
                 <Field icon={Mail}>
                   <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email address" className={inputClass} />
                 </Field>
-                <Field icon={Lock}>
-                  <input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className={inputClass} />
-                </Field>
-                <div className="flex justify-end">
-                  <button type="button" onClick={handleForgotPassword} disabled={resetState === 'sending'} className={linkButton}>
-                    {resetState === 'sending' ? 'Sending reset link…' : 'Forgot password?'}
-                  </button>
+                {!useLink && (
+                  <Field icon={Lock}>
+                    <input type="password" required autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" className={inputClass} />
+                  </Field>
+                )}
+                <div className="flex items-center justify-between gap-3">
+                  <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
+                    <input type="checkbox" checked={useLink} onChange={(e) => setUseLink(e.target.checked)} className="w-4 h-4 rounded accent-coral-500" />
+                    Email me a sign-in link (no password)
+                  </label>
+                  {!useLink && (
+                    <button type="button" onClick={handleForgotPassword} disabled={resetState === 'sending'} className={`${linkButton} shrink-0`}>
+                      {resetState === 'sending' ? 'Sending…' : 'Forgot password?'}
+                    </button>
+                  )}
                 </div>
                 <button type="submit" disabled={busy} className={primaryButton}>
-                  {busy && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <span>Sign In</span>
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin" /> : useLink ? <Mail className="w-4 h-4" /> : null}
+                  <span>{useLink ? 'Email me a link' : 'Sign In'}</span>
                 </button>
               </form>
               <p className="text-center text-xs text-muted-foreground">

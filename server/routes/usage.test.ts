@@ -85,8 +85,10 @@ describe('quota increase requests', () => {
     expect(_id).toBe(res.body.id);
     expect(stored).toMatchObject({ email: 'asker@team.test', uid: user.uid, workspaceId, plan: 'enterprise', minutesPerMonth: 300, currentPlan: 'Starter', status: 'open' });
 
-    expect(sent).toHaveLength(1);
-    expect(sent[0].to).toBe('sales@scatterpie.test');
+    // The team's copy, then the receipt for the person who asked.
+    expect(sent.map((m) => m.to)).toEqual(['sales@scatterpie.test', 'asker@team.test']);
+    expect(sent[1].subject).toMatch(/we got your request/i);
+    expect(sent[1].html).not.toContain('<b>');
     expect(sent[0].subject).not.toMatch(/[\r\n]/);
     expect(sent[0].html).toContain('Asha &lt;b&gt;');
     expect(sent[0].html).not.toContain('<b>');

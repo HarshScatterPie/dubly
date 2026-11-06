@@ -99,9 +99,26 @@ export async function uploadBufferToStorage(storagePath: string, buffer: Buffer,
   await writeFrom(storagePath, Readable.from([buffer]), contentType, buffer.length);
 }
 
+// A player seeking through a video sends many range requests for the same file; its record is kept briefly instead of read for each.
+// Every write and delete in this process clears the entry (invalidateSignedUrlCache), so a re-render is never served stale.
+const FILE_CACHE_MS = 30_000;
+const fileCache = new Map<string, { file: MediaFile; at: number }>();
+// Bumped by every invalidation: a lookup that was already reading when a path changed does not cache what it read.
+let fileCacheEpoch = 0;
+
 // The newest complete version stored under a path (an upload in progress has no checksum yet and is not served).
 export async function findStoredFile(storagePath: string): Promise<MediaFile | null> {
-  return filesCol().findOne({ filename: storagePath, 'metadata.sha256': { $nin: ['', null] } }, { sort: { uploadDate: -1 } });
+  const hit = fileCache.get(storagePath);
+  if (hit && Date.now() - hit.at < FILE_CACHE_MS) return hit.file;
+  const epoch = fileCacheEpoch;
+  const file = await filesCol().findOne({ filename: storagePath, 'metadata.sha256': { $nin: ['', null] } }, { sort: { uploadDate: -1 } });
+  if (file && epoch === fileCacheEpoch) {
+    if (fileCache.size >= 2000) fileCache.clear();
+    fileCache.set(storagePath, { file, at: Date.now() });
+  } else if (!file) {
+    fileCache.delete(storagePath);
+  }
+  return file;
 }
 
 export async function fileExists(storagePath: string): Promise<boolean> {
@@ -183,6 +200,7 @@ function key(): Promise<Buffer> {
 export function resetMediaKeyForTests(): void {
   signingKey = null;
   signedUrlCache.clear();
+  fileCache.clear();
   bucketInstance = null;
 }
 
@@ -249,7 +267,14 @@ export async function signReadUrl(storagePath: string, expiresAtMs: number, down
   return sign(storagePath, expiresAtMs, downloadName ?? '');
 }
 
-/** Call after overwriting or deleting a path, so the next read mints a fresh URL (the stored file's id changes, and so does its ETag). */
+/** Call after overwriting or deleting a path, so the next read mints a fresh URL and finds the new version (its id, and so its ETag, change). */
 export function invalidateSignedUrlCache(storagePath: string): void {
   signedUrlCache.delete(storagePath);
+  forgetStoredFile(storagePath);
+}
+
+/** Drops only the remembered file record (its signed URL stays valid), e.g. when reading the version it named failed. */
+export function forgetStoredFile(storagePath: string): void {
+  fileCache.delete(storagePath);
+  fileCacheEpoch++;
 }

@@ -23,11 +23,13 @@ beforeEach(async () => {
 
 const profile = (token?: string) => api.call('GET', '/api/profile', { token });
 // Mail goes out after the answer; give it a moment.
-const nextMail = async (): Promise<MailMessage> => {
-  for (let i = 0; i < 50 && !mail.length; i++) await new Promise((r) => setTimeout(r, 20));
-  const message = mail.shift();
-  if (!message) throw new Error('no mail was sent');
-  return message;
+// The next email matching `subject` (other emails, e.g. a welcome sent in the background, are left in the queue).
+const nextMail = async (subject: RegExp = /./, to?: string): Promise<MailMessage> => {
+  const find = () => mail.findIndex((m) => subject.test(m.subject) && (!to || m.to === to));
+  for (let i = 0; i < 100 && find() < 0; i++) await new Promise((r) => setTimeout(r, 20));
+  const at = find();
+  if (at < 0) throw new Error(`no mail matching ${subject} was sent`);
+  return mail.splice(at, 1)[0];
 };
 const linkToken = (message: MailMessage, param: 'verify' | 'reset') => decodeURIComponent(new RegExp(`[?&]${param}=([^\\s&"]+)`).exec(message.text)![1]);
 const cookieOf = (headers: Headers) => (headers.get('set-cookie') || '').split(';')[0];
@@ -114,7 +116,7 @@ describe('sign-up, email confirmation and sign-in', () => {
     expect(blocked.status).toBe(403);
     expect(blocked.body.error.code).toBe('EMAIL_NOT_VERIFIED');
 
-    const message = await nextMail();
+    const message = await nextMail(/confirm your email/i);
     expect(message.to).toBe('asha@team.test');
     const verified = await api.call('POST', '/api/auth/verify-email', { body: { token: linkToken(message, 'verify') } });
     expect(verified.status).toBe(200);
@@ -136,7 +138,7 @@ describe('sign-up, email confirmation and sign-in', () => {
     const again = await api.call('POST', '/api/auth/signup', { body: { name: 'Eve', email: 'taken@team.test', password: 'eves password' } });
     expect(again.status).toBe(202);
     expect(again.body).toEqual({ status: 'verify-email', email: 'taken@team.test' });
-    expect((await nextMail()).subject).toMatch(/reset/i);
+    expect((await nextMail(/reset/i, 'taken@team.test')).subject).toMatch(/reset/i);
     expect((await api.call('POST', '/api/auth/login', { body: { email: 'taken@team.test', password: 'eves password' } })).status).toBe(401);
     expect((await api.call('POST', '/api/auth/login', { body: { email: 'taken@team.test', password: 'original password' } })).status).toBe(200);
   });
@@ -207,7 +209,7 @@ describe('password reset and change', () => {
     const user = await createUser('reset@team.test', 'old password 1');
     const forgot = await api.call('POST', '/api/auth/forgot-password', { body: { email: 'reset@team.test' } });
     expect(forgot.status).toBe(202);
-    const token = linkToken(await nextMail(), 'reset');
+    const token = linkToken(await nextMail(/reset your/i), 'reset');
 
     // A weak choice does not spend the link.
     expect((await api.call('POST', '/api/auth/reset-password', { body: { token, password: 'short' } })).status).toBe(400);
@@ -222,7 +224,7 @@ describe('password reset and change', () => {
     const forgot = await api.call('POST', '/api/auth/forgot-password', { body: { email: 'ghost@team.test' } });
     expect(forgot.status).toBe(202);
     await new Promise((r) => setTimeout(r, 200));
-    expect(mail).toHaveLength(0);
+    expect(mail.filter((m) => m.to === 'ghost@team.test')).toHaveLength(0);
   });
 
   it('changes the password only with the current one, and starts a fresh session', async () => {

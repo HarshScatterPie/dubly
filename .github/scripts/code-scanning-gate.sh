@@ -34,7 +34,7 @@ exec 3>&1
   if [ -z "$alerts" ]; then
     echo "None."
   else
-    echo "| Alert | Severity | Rule | Where | Blocks deploy |"
+    echo "| Alert | Severity | Rule | Where | Fails the gate |"
     echo "|---|---|---|---|---|"
     while IFS=$'\t' read -r number severity rule file line; do
       blocks=no
@@ -50,7 +50,7 @@ exec 3>&1
 } >> "$SUMMARY"
 
 if [ "$blocking" -gt 0 ]; then
-  echo "$blocking open high or critical code-scanning alert(s); fix them, or dismiss false positives on GitHub, before this can deploy." >&2
+  echo "$blocking open high or critical code-scanning alert(s); fix them, or dismiss false positives on GitHub, before this gate can pass." >&2
   exit 1
 fi
 echo "No blocking code-scanning alerts."

@@ -9,7 +9,7 @@ import { serverRoot } from './paths';
  * Splits the source audio into speech and everything else, so a dub can replace only the
  * speaker while the rest of the soundtrack keeps playing underneath it.
  *
- * DeepFilterNet3 (MIT/Apache-2.0, a single static binary that deploy/vm/deploy.sh installs)
+ * DeepFilterNet3 (MIT/Apache-2.0, a single static binary in server/bin, or DEEP_FILTER_PATH)
  * pulls the speech out; the background is what is left once that speech is subtracted from
  * the source. It is built for noise rather than music, so a loud music bed can keep a trace
  * of the voice; callers treat separation as optional and fall back to ducking the raw source.

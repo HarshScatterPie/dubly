@@ -1,6 +1,6 @@
 import type { Request, Response } from 'express';
 import { Router } from '../lib/router';
-import { findStoredFile, openStoredFileStream, verifyMediaUrl } from '../lib/mediaStore';
+import { findStoredFile, forgetStoredFile, openStoredFileStream, verifyMediaUrl } from '../lib/mediaStore';
 import { rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
 import { log } from '../lib/log';
@@ -102,7 +102,10 @@ async function serve(req: Request, res: Response): Promise<void> {
   stream.on('error', (err) => {
     if (!res.headersSent) res.status(500).end();
     else res.destroy(err);
-    if ((err as NodeJS.ErrnoException).code !== 'ERR_STREAM_PREMATURE_CLOSE') log.error('media_stream_failed', err, { storagePath: verified.storagePath });
+    if ((err as NodeJS.ErrnoException).code === 'ERR_STREAM_PREMATURE_CLOSE') return;
+    // Most likely that version was replaced or deleted by another process after it was looked up: look it up afresh next time.
+    forgetStoredFile(verified.storagePath);
+    log.error('media_stream_failed', err, { storagePath: verified.storagePath });
   });
   stream.pipe(res);
 }

@@ -37,6 +37,13 @@ interface AuthContextValue {
   resetToken: string | null;
   /** A message to show on the sign-in screen after an email link was used (or could not be). */
   notice: string | null;
+  /** This device asked for a sign-in link and is waiting for it (or for the code it shows on another device). */
+  magicAttempt: MagicAttempt | null;
+  /** This page was opened from a sign-in link on a device that did not ask: the code to type on the one that did. */
+  magicCode: MagicCode | null;
+  requestMagicLink: (email: string) => Promise<void>;
+  verifyMagicCode: (code: string) => Promise<void>;
+  cancelMagic: () => void;
   signInWithEmail: (email: string, password: string) => Promise<void>;
   /** Creates an account; it is used once the emailed link confirms the address. */
   signUp: (name: string, email: string, password: string) => Promise<void>;
@@ -49,6 +56,19 @@ interface AuthContextValue {
   // The profile arrives with the app's startup data (GET /api/bootstrap) rather than in a request of its own.
   primeProfile: (profile: UserProfile | null) => void;
   signOut: () => Promise<void>;
+}
+
+export interface MagicAttempt {
+  attemptId: string;
+  email: string;
+  expiresAt: number;
+}
+
+export interface MagicCode {
+  code: string;
+  device: string;
+  location: string | null;
+  at: string;
 }
 
 interface ServerUser {
@@ -70,7 +90,7 @@ export function friendlyAuthError(err: unknown): string {
 }
 
 // Takes a one-time token from the address bar (an emailed link), so it is not left in the history or sent on as a Referer.
-function takeParam(name: 'verify' | 'reset'): string | null {
+function takeParam(name: 'verify' | 'reset' | 'magic'): string | null {
   const url = new URL(window.location.href);
   const value = url.searchParams.get(name);
   if (!value) return null;
@@ -92,6 +112,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [resetToken, setResetToken] = useState<string | null>(null);
+  const [magicAttempt, setMagicAttempt] = useState<MagicAttempt | null>(null);
+  const [magicCode, setMagicCode] = useState<MagicCode | null>(null);
 
   // On load: finish an emailed link if the page was opened from one, otherwise ask the server whether this browser has a session.
   useEffect(() => {
@@ -99,8 +121,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     (async () => {
       const verify = takeParam('verify');
       const reset = takeParam('reset');
+      const magic = takeParam('magic');
       if (reset) setResetToken(reset);
       try {
+        if (magic) {
+          try {
+            const opened = await post<{ user?: ServerUser; status?: 'code'; code?: string; requestedFrom?: { device: string; location: string | null; at: string } }>(
+              '/api/auth/magic/open',
+              { token: magic }
+            );
+            if (cancelled) return;
+            if (opened.user) {
+              setUser(toAuthUser(opened.user));
+              return;
+            }
+            if (opened.code && opened.requestedFrom) setMagicCode({ code: opened.code, ...opened.requestedFrom });
+          } catch (err) {
+            if (!cancelled) setNotice(friendlyAuthError(err));
+          }
+        }
         if (verify) {
           try {
             const { user: verified } = await post<{ user: ServerUser }>('/api/auth/verify-email', { token: verify });
@@ -125,6 +164,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       cancelled = true;
     };
   }, []);
+
+  // While waiting for an emailed link: opened in another tab of this browser, it signs this browser in, so this tab notices and follows.
+  useEffect(() => {
+    if (!magicAttempt || user) return;
+    const timer = window.setInterval(async () => {
+      if (Date.now() > magicAttempt.expiresAt) {
+        window.clearInterval(timer);
+        return;
+      }
+      try {
+        const { user: current } = await authFetch<{ user: ServerUser }>('/api/auth/me');
+        setMagicAttempt(null);
+        setUser(toAuthUser(current));
+      } catch {
+        // Not yet.
+      }
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [magicAttempt, user]);
 
   // Signing out forgets the profile; on sign-in the app primes it (child effects run first, so this must not reset a primed one).
   useEffect(() => {
@@ -176,6 +234,21 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       await post('/api/auth/signup', { name: name.trim(), email: email.trim(), password });
     });
 
+  const requestMagicLink = (email: string) =>
+    run(async () => {
+      const address = email.trim();
+      const { attemptId, expiresInSeconds } = await post<{ attemptId: string; expiresInSeconds: number }>('/api/auth/magic/request', { email: address });
+      setMagicAttempt({ attemptId, email: address, expiresAt: Date.now() + expiresInSeconds * 1000 });
+    });
+
+  const verifyMagicCode = (code: string) =>
+    run(async () => {
+      if (!magicAttempt) throw new Error('Ask for a new sign-in link first.');
+      const { user: signedIn } = await post<{ user: ServerUser }>('/api/auth/magic/verify', { attemptId: magicAttempt.attemptId, code: code.replace(/\D/g, '') });
+      setMagicAttempt(null);
+      setUser(toAuthUser(signedIn));
+    });
+
   const sendPasswordReset = (email: string) =>
     run(async () => {
       await post('/api/auth/forgot-password', { email: email.trim() });
@@ -215,6 +288,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         error,
         resetToken,
         notice,
+        magicAttempt,
+        magicCode,
+        requestMagicLink,
+        verifyMagicCode,
+        cancelMagic: () => {
+          setMagicAttempt(null);
+          setMagicCode(null);
+        },
         signInWithEmail,
         signUp,
         sendPasswordReset,

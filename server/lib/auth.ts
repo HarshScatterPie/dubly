@@ -28,13 +28,22 @@ export const SESSION_COOKIE = 'dubly_session';
 export function sessionTokenOf(req: Request): { token: string; via: 'cookie' | 'bearer' } | null {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ')) return { token: header.slice('Bearer '.length).trim(), via: 'bearer' };
+  const value = readCookie(req, SESSION_COOKIE);
+  return value ? { token: value, via: 'cookie' } : null;
+}
+
+// One cookie's value from the request, or null.
+export function readCookie(req: Request, name: string): string | null {
   const cookies = req.headers.cookie;
   if (!cookies) return null;
   for (const part of cookies.split(';')) {
     const eq = part.indexOf('=');
-    if (eq > 0 && part.slice(0, eq).trim() === SESSION_COOKIE) {
-      const value = decodeURIComponent(part.slice(eq + 1).trim());
-      return value ? { token: value, via: 'cookie' } : null;
+    if (eq > 0 && part.slice(0, eq).trim() === name) {
+      try {
+        return decodeURIComponent(part.slice(eq + 1).trim()) || null;
+      } catch {
+        return null;
+      }
     }
   }
   return null;

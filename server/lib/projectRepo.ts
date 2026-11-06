@@ -274,7 +274,8 @@ function nextResetIso(date = new Date()): string {
 }
 
 // voiceSecondsCarry: seconds of voice clips not yet charged, because the ledger counts minutes in tenths (see settleVoiceMinutes).
-type StoredUsage = UserUsageStats & { usagePeriod?: string; voiceSecondsCarry?: number };
+// alerts: the usage period each usage email was last sent for (notifications.ts), written only by that module.
+type StoredUsage = UserUsageStats & { usagePeriod?: string; voiceSecondsCarry?: number; alerts?: Record<string, string> };
 
 // The usage period of a plan whose allowance is a one-time total (Free): it never rolls over.
 const LIFETIME_PERIOD = 'lifetime';
@@ -307,6 +308,8 @@ function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
 function ledgerOf(usage: StoredUsage): Partial<StoredUsage> {
   const ledger: Partial<StoredUsage> = { ...usage };
   for (const field of PLAN_FIELDS) delete ledger[field];
+  // Never written back from a read: a charge running beside an alert must not undo its mark.
+  delete ledger.alerts;
   return ledger;
 }
 
@@ -346,6 +349,7 @@ export async function reserveDubMinutes(workspaceId: string, minutes: number): P
   await withTransaction(async (session) => {
     await (await prepareReservation(session, workspaceId, minutes)).commit();
   });
+  afterCharge(workspaceId);
 }
 
 // How a refusal names what needed the minutes, and what the person can do instead.
@@ -423,11 +427,13 @@ export async function prepareRefund(
  * under the allowance; settleVoiceMinutes then swaps the hold for what the clip really took. Returns the usage period to settle in.
  */
 export async function reserveVoiceMinutes(workspaceId: string, minutes: number): Promise<string> {
-  return withTransaction(async (session) => {
+  const period = await withTransaction(async (session) => {
     const reservation = await prepareReservation(session, workspaceId, minutes, VOICE_WORDING);
     await reservation.commit();
     return reservation.period;
   });
+  afterCharge(workspaceId);
+  return period;
 }
 
 // Seconds that make up one tenth of a minute, the step the ledger counts in.
@@ -467,6 +473,34 @@ export async function assertMinutesToDub(workspaceId: string, videoSeconds: numb
   const usage = rollUsage(stored, plan);
   // Rounded up to the tenth, so a refusal never reads "needs 5 min but 5 are left" for a video a few seconds over.
   assertCovered(usage, plan, Math.max(0.1, Math.ceil(((videoSeconds || 0) / 60) * 10 - 1e-9) / 10), VIDEO_WORDING);
+}
+
+export interface MinuteStatus {
+  used: number;
+  limit: number;
+  period: string;
+  renewsMonthly: boolean;
+  planName: string;
+  resetsAt?: string;
+}
+
+// The minutes ledger as the plan sees it, for usage emails: no storage measuring, one read.
+export async function getMinuteStatus(workspaceId: string): Promise<MinuteStatus> {
+  const [stored, plan] = await Promise.all([readUsage(workspaceId), planForWorkspace(workspaceId)]);
+  const usage = rollUsage(stored, plan);
+  return {
+    used: usage.minutesDubbed,
+    limit: usage.minutesLimit,
+    period: usage.usagePeriod!,
+    renewsMonthly: plan.renewsMonthly,
+    planName: plan.name,
+    ...(plan.renewsMonthly ? { resetsAt: nextResetIso() } : {}),
+  };
+}
+
+// After minutes are charged: the usage emails check, in the background (loaded on use, as notifications.ts reads this module).
+function afterCharge(workspaceId: string): void {
+  void import('./notifications').then((m) => m.scheduleUsageCheck(workspaceId));
 }
 
 export function currentUsagePeriod(): string {

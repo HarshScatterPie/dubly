@@ -43,6 +43,8 @@ export const COLLECTIONS = [
   'users',
   'sessions',
   'authTokens',
+  'loginAttempts',
+  'devices',
   'userSettings',
   'workspaces',
   'members',
@@ -71,6 +73,16 @@ const INDEXES: Partial<Record<CollectionName, IndexDescription[]>> = {
   authTokens: [
     { key: { uid: 1, purpose: 1 }, name: 'uid_purpose' },
     { key: { expiresAt: 1 }, expireAfterSeconds: 0, name: 'ttl' },
+  ],
+  // Email-link sign-ins: found by the link's hash, gone 15 minutes after they were asked for.
+  loginAttempts: [
+    { key: { linkHash: 1 }, unique: true, name: 'link' },
+    { key: { expiresAt: 1 }, expireAfterSeconds: 0, name: 'ttl' },
+  ],
+  // Devices each account has signed in from, for "new sign-in" emails; forgotten after two years unused, as their cookie is.
+  devices: [
+    { key: { uid: 1 }, name: 'uid' },
+    { key: { lastSeenAt: 1 }, expireAfterSeconds: 2 * 365 * 24 * 60 * 60, name: 'unused_ttl' },
   ],
   members: [
     { key: { workspaceId: 1, uid: 1 }, unique: true, name: 'workspace_uid' },

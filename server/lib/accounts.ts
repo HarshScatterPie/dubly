@@ -255,6 +255,9 @@ export async function setUserDisabled(uid: string, disabled: boolean): Promise<v
 export async function deleteUser(uid: string): Promise<void> {
   await revokeAllSessions(uid);
   await authTokens().deleteMany({ uid });
+  // Where they signed in from, and sign-in links still waiting, go with the account.
+  await col('devices').deleteMany({ uid });
+  await col('loginAttempts').deleteMany({ uid });
   await users().deleteOne({ _id: uid });
   forgetAccount(uid);
 }

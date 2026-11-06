@@ -2,42 +2,25 @@
 
 One process runs everything: the API, the built frontend, jobs, and scheduled maintenance. Run **exactly one instance** (see ARCHITECTURE.md → Scaling).
 
-## Current production: GCE VM `dubly-app` with auto-deploy from `main`
+## Current production: the office PC
 
 | | |
 |---|---|
-| Machine | `dubly-app`, asia-south1-b, project `scatter-studio-live-2026`, 2 vCPU / 2 GB, Ubuntu 22.04 |
-| Traffic | nginx :80 → `127.0.0.1:8787` (`client_max_body_size 500M`, `proxy_read_timeout 600s`). **No HTTPS yet** (see below) |
-| Process | `dubly.service` (systemd, user `harsh.vardhan`), Node 24 from `/opt/node-24`, `KillMode=mixed`, `TimeoutStopSec=40` |
-| Code | `~/dubly` → symlink to `~/dubly-releases/<commit>` (the three newest are kept) |
-| Secrets and shared files | `~/dubly-shared/`: `server.env`, `web.env` (VITE client config), `credentials/`, `cache/`, `runtime.env` (capacity limits and `TRUST_PROXY`) |
-| Deploys | `dubly-autodeploy.timer` runs every 2 min: if `main` has a new commit **and that commit's CI and Release gate runs both passed**, `deploy/vm/deploy.sh` builds it in a new release folder, switches, restarts, checks `/api/healthz`, and switches back if unhealthy |
+| Machine | The Windows PC in the office, next to its local MongoDB (MONGODB.md). The GCE VM is gone, and so is auto-deploy |
+| Traffic | `https://dubly.scatterpie.workers.dev` (a Cloudflare Worker, free plan) → a Cloudflare tunnel → `127.0.0.1:8787`. Nothing on the PC listens on the network |
+| Process | `deploy/local-prod/run.ps1`: starts MongoDB, the tunnel and the app (`NODE_ENV=production`, `HOST=127.0.0.1`, sign-up closed), checks every 15 s and restarts whatever stopped |
+| Files | `%USERPROFILE%\dubly-prod` (logs, the tunnel's address, the Worker's shared secret); the database in `%USERPROFILE%\dubly-mongo`, never inside OneDrive |
 
-**How a change reaches production:** push to `main` → CI and the Release gate run side by side (the gate takes longest, ≈15–20 min, mostly waiting for GitHub's CodeQL scan of the same commit) → within 2 minutes of both passing, the VM deploys it. A commit that fails either is never deployed. The workflows the VM waits for can be changed with `DUBLY_REQUIRED_WORKFLOWS` in `runtime.env`.
+Setup, the fixed address and backups are in [deploy/local-prod/README.md](../deploy/local-prod/README.md).
+
+**How a change reaches production:** push to `main` → CI and the Release gate check it on GitHub (≈15–20 min; the gate waits for GitHub's CodeQL scan of the same commit). **Nothing deploys from GitHub.** Once both are green, update the PC by hand: `git pull`, `npm ci` if the lockfile changed, `npm run build`, then `stop.ps1` and `run.ps1` (or end the `node server/index.ts` process and the launcher restarts it within 15 s). Don't update the PC to a commit with a red run.
 
 **What the Release gate checks** (`.github/workflows/release-gate.yml`; each job writes its numbers to the run's summary page):
 - **Dub performance and model-call budgets** (`npm run test:perf`, `server/perf/pipeline.perf.ts`): uploads a generated two-voice video, analyses, translates, dubs, re-dubs it unchanged, adds Hinglish, dubs that and retakes one line, all through the real API with real ffmpeg, voice activity and face detection against a throwaway MongoDB; only Google's models are faked (instant, counted, with the ~10 a minute Gemini 2.5 TTS quota). It fails if a step pays for model work it already had (a re-dub with nothing changed must make **no** model call; a one-line retake at most 3 voice and 4 text calls), or exceeds its time per video minute, main-thread stall, API latency during a dub, or memory budget. `PERF_BUDGET_SCALE` scales the time budgets.
-- **Production start, headers and bundle size**: the frontend's gzip size (`server/perf/bundle-budget.mjs`), then the server started exactly as `dubly.service` starts it (`server/perf/prod-smoke.mjs`): boot time, the built app and its security and cache headers, the API refusing unsigned requests, a 400-request burst, memory, and a clean stop on SIGTERM.
-- **Advisories, workflows and code scanning**: no critical advisory in any dependency and no high one in what ships, valid workflows (actionlint), and no open high or critical CodeQL alert on `main` (it waits for CodeQL to finish analysing the commit). `js/missing-rate-limiting` is allowed: CodeQL only recognises third-party rate-limit packages, while every route it reports is limited by `server/lib/rateLimit.ts` or `requireAuth`. Dismiss those alerts as false positives on GitHub to keep the Security tab readable.
+- **Production start, headers and bundle size**: the frontend's gzip size (`server/perf/bundle-budget.mjs`), then the server started the way production starts it (`server/perf/prod-smoke.mjs`): boot time, the built app and its security and cache headers (an enforced Content-Security-Policy among them), the API refusing unsigned requests, a 400-request burst, memory, and a clean stop on SIGTERM.
+- **Advisories, workflows and code scanning**: no critical advisory in any dependency and no high one in what ships, valid workflows (actionlint), and no open high or critical CodeQL alert on `main` (it waits for CodeQL to finish analysing the commit). `js/missing-rate-limiting` is allowed: CodeQL only recognises third-party rate-limit packages, while every route it reports is limited by `server/lib/rateLimit.ts`, `requireAuth` and the global `express-rate-limit` cap in `server/app.ts`. Dismiss those alerts as false positives on GitHub to keep the Security tab readable.
 
-**Setup (already done once; re-runnable):** on the VM run `bash ~/dubly/deploy/vm/install.sh`. It installs checksum-verified Node 24, adopts the old hand-copied install as a `legacy-…` release, moves secrets into `~/dubly-shared`, and installs and enables the units.
-
-**Operating it:**
-```bash
-gcloud compute ssh dubly-app --zone asia-south1-b
-journalctl -u dubly -f                          # app logs (JSON)
-journalctl -u dubly-autodeploy -n 50            # what the deployer did
-cat ~/dubly/REVISION                            # live commit
-bash ~/dubly/deploy/vm/deploy.sh <sha>          # deploy a specific commit by hand
-ln -sfn ~/dubly-releases/<older-sha> ~/dubly && sudo systemctl restart dubly   # instant rollback
-sudo systemctl stop dubly-autodeploy.timer      # pause auto-deploy (e.g. while rolled back)
-rm ~/.dubly-autodeploy/skip-<sha>               # let the deployer retry a commit it gave up on
-```
-A rollback to a release from **before** the project-storage split also needs the unsplit script (see Rollback below).
-
-**Still to do on this VM:**
-- **HTTPS.** nginx serves plain HTTP on the IP address, so sign-in tokens cross the network unencrypted. This needs a domain name; then `certbot --nginx` (Let's Encrypt), and HSTS is sent automatically once `TRUST_PROXY` sees HTTPS.
-- **Keyless credentials.** The VM's service account runs with limited access scopes, so `CREDENTIALS_MODE=adc` won't work until the VM is stopped and given the `cloud-platform` scope (plus the IAM roles in SECURITY.md). Until then, it uses the key files in `~/dubly-shared/credentials`.
+**Still open:** the tunnel is a quick tunnel (its address changes on every restart; the Worker follows it, but uploads are capped at 100 MB per request and there is no uptime promise). A domain on Cloudflare would give a named tunnel. The PC must stay on and awake.
 
 ## Container deployment (alternative)
 
@@ -50,7 +33,7 @@ docker build -t dubly:<git-sha> .
 ```
 - **Reproducibility:** `npm ci` from `package-lock.json`, and the base image is `node:24-trixie-slim`, which includes Debian's ffmpeg. For byte-for-byte rebuilds, pin the base image by digest (`--build-arg NODE_IMAGE=node:24-trixie-slim@sha256:…`), and tag images by git SHA.
 - **Not in the image:** the optional Python engines (CTC word timing, lip-sync, background separation). They need a torch virtualenv, so without it those features report as unavailable and the app falls back as designed.
-- **CI** (`.github/workflows/ci.yml`) builds the image on every push and PR, but **doesn't publish or deploy it**. Promotion to production is manual (below).
+- **CI** (`.github/workflows/ci.yml`) builds the image on every push and PR, but **doesn't publish or deploy it**.
 
 ## Run
 
@@ -59,12 +42,12 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
   --stop-timeout 40 \
   -e NODE_ENV=production -e WEB_ORIGIN=https://dubly.example.com -e TRUST_PROXY=1 \
   -e VERTEX_PROJECT_ID=… -e CREDENTIALS_MODE=adc \
-  -e MONGODB_URI='mongodb://dubly_app:…@host.docker.internal:27017/dubly?authSource=admin&directConnection=true' -e MONGODB_DB=dubly \
+  -e MONGODB_URI="$(cat /secure/dubly-mongodb-uri)" -e MONGODB_DB=dubly \
   -v dubly-cache:/app/server/cache \
   dubly:<git-sha>
 ```
 - **Database:** the container reaches MongoDB on the host (or a MongoDB container on the same Docker network); it stays bound to localhost or that private network, never a public port. See MONGODB.md.
-- **Credentials:** prefer `CREDENTIALS_MODE=adc` with the VM or Cloud Run service account (permissions are listed in SECURITY.md). If key files are unavoidable, mount them read-only: `-v /secure/dubly-credentials:/app/server/credentials:ro`. Never bake them into the image.
+- **Credentials:** prefer `CREDENTIALS_MODE=adc` with the host's Google service account (a GCE VM or Cloud Run) (permissions are listed in SECURITY.md). If key files are unavoidable, mount them read-only: `-v /secure/dubly-credentials:/app/server/credentials:ro`. Never bake them into the image.
 - **Secret settings** such as `GEMINI_API_KEY` and `SMTP_PASS` come from the platform's secret manager as environment variables, or from a mounted env file with `DUBLY_ENV_FILE`.
 - **Stop timeout:** `--stop-timeout` must be longer than `SHUTDOWN_GRACE_MS` (25 s). Docker's default of 10 s would kill the drain before it finishes.
 - **Health checks:** `GET /api/healthz` answers 200 as long as the process serves requests; the image's `HEALTHCHECK` uses it.
@@ -77,7 +60,7 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `PORT` | 8787 | Listen port |
 | `NEW_WORKSPACE_PLAN` | free | Plan a newly created workspace starts on (`free`, `starter`, `enterprise`); existing workspaces keep theirs |
 | `QUOTA_REQUEST_TO` | the SMTP account (`SMTP_USER`) | Where "Request Quota Increase" forms are emailed; they are also stored in `dublyQuotaRequests` |
-| `HOST` | every interface | Listen address. Behind nginx on the same VM set `127.0.0.1`, so nobody can reach the app around the proxy and forge the `X-Forwarded-For` that per-IP limits trust |
+| `HOST` | every interface | Listen address. Behind a proxy or tunnel on the same machine set `127.0.0.1`, so nobody can reach the app around it and forge the `X-Forwarded-For` that per-IP limits trust |
 | `WEB_ORIGIN` | http://localhost:3000 | The only CORS origin allowed |
 | `VERTEX_PROJECT_ID`, `VERTEX_GEMINI_LOCATION`, `GEMINI_STT_MODEL`, `GEMINI_TRANSLATE_MODEL` | —, global, gemini-3.5-flash-lite ×2 | AI providers |
 | `TTS_ENGINE` | cloud | `cloud` offers Gemini 2.5 Flash voices (every plan) and Chirp 3 HD voices (Enterprise), both through Google Cloud TTS with no Gemini API key. Chirp 3 HD also voices any line Gemini cannot, and premium voices are off. Santali cannot be dubbed. **Raise the Vertex AI quota** for `gemini-2.5-flash-tts` in the `global` region (about 10 requests a minute by default, measured 2026-09-29), or most lines of a dub fall back to Chirp 3 HD. `chirp` offers only Chirp 3 HD voices; re-takes are off too, and Odia and Santali cannot be dubbed. `gemini` voices each line on its voice's own engine (Gemini 3.8 Flash-Lite, Gemini 3.8 Flash or Chirp 3 HD, as the workspace's plan allows) and needs a paid `GEMINI_API_KEY` |

@@ -48,14 +48,18 @@ type Scope = 'user' | 'workspace' | 'ip';
  * visitor's address in X-Dubly-Client-IP together with a shared secret (EDGE_SHARED_SECRET); without that secret the header is ignored.
  */
 export function clientIp(req: Request): string | null {
-  const secret = process.env.EDGE_SHARED_SECRET;
-  if (secret) {
-    const given = Buffer.from(req.get('x-dubly-edge-secret') ?? '');
-    const expected = Buffer.from(secret);
-    const forwarded = req.get('x-dubly-client-ip')?.trim();
-    if (forwarded && given.length === expected.length && timingSafeEqual(given, expected) && /^[0-9a-fA-F:.]{2,45}$/.test(forwarded)) return forwarded;
-  }
+  const forwarded = req.get('x-dubly-client-ip')?.trim();
+  if (forwarded && fromTrustedEdge(req) && /^[0-9a-fA-F:.]{2,45}$/.test(forwarded)) return forwarded;
   return req.ip ?? req.socket.remoteAddress ?? null;
+}
+
+// Whether the request came through Dubly's own front door, which proves itself with the shared secret.
+export function fromTrustedEdge(req: Request): boolean {
+  const secret = process.env.EDGE_SHARED_SECRET;
+  if (!secret) return false;
+  const given = Buffer.from(req.get('x-dubly-edge-secret') ?? '');
+  const expected = Buffer.from(secret);
+  return given.length === expected.length && timingSafeEqual(given, expected);
 }
 
 function scopeKey(req: Request, scope: Scope): string | null {

@@ -171,6 +171,7 @@ export const schemas = {
   signup: z.object({ email: z.string().trim().min(3).max(254), password: z.string().min(1).max(200), name: z.string().trim().min(1).max(60) }),
   login: z.object({ email: z.string().trim().min(1).max(254), password: z.string().min(1).max(200) }),
   emailOnly: z.object({ email: z.string().trim().min(1).max(254) }),
+  magicCode: z.object({ attemptId: z.string().regex(/^[A-Za-z0-9_-]{16,40}$/), code: z.string().trim().regex(/^\d{6}$/, 'Six digits') }),
   authToken: z.object({ token: z.string().min(20).max(100) }),
   resetPassword: z.object({ token: z.string().min(20).max(100), password: z.string().min(1).max(200) }),
   changePassword: z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(1).max(200) }),

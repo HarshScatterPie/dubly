@@ -1,36 +1,37 @@
-import { env } from './env';
-import { escapeHtml, sendMail, type MailMessage } from './mailer';
+import { sendMail, type MailMessage } from './mailer';
+import { composeEmail } from './emailTemplates';
+import { appUrl } from './authEmail';
 import type { InviteSummary } from './workspaces';
 
 // The same link the Team page shows; WEB_ORIGIN must be the address people open Dubly at.
 export function inviteUrl(token: string): string {
-  return `${env.webOrigin.replace(/\/+$/, '')}/?invite=${encodeURIComponent(token)}`;
+  return `${appUrl()}/?invite=${encodeURIComponent(token)}`;
 }
 
 export function buildInviteEmail(invite: InviteSummary, workspaceName: string, link: string): MailMessage {
-  const role = invite.role === 'admin' ? 'an Admin' : 'an Editor';
+  const role = invite.role === 'admin' ? 'Admin' : 'Editor';
   const until = new Date(invite.expiresAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long', year: 'numeric', timeZone: 'Asia/Kolkata' });
   const inviter = invite.invitedByName || 'A teammate';
-  const subject = `${inviter} invited you to ${workspaceName} on Dubly`;
-  const text = [
-    `${inviter} invited you to join the ${workspaceName} workspace on Dubly as ${role}.`,
-    '',
-    `Open this link. If you are new to Dubly you will be asked to choose a password; otherwise sign in with ${invite.email}. Then press Join workspace:`,
-    link,
-    '',
-    `The link works until ${until}, and only for ${invite.email}. If you already have an account and don't know its password, use "Forgot password?" on the sign-in page.`,
-    "If you weren't expecting this invitation, you can ignore this email.",
-  ].join('\n');
-  const e = escapeHtml;
-  const html = `<div style="font-family:Arial,Helvetica,sans-serif;max-width:520px;margin:0 auto;color:#0F172A">
-  <h2 style="font-size:18px;margin:0 0 12px">Join ${e(workspaceName)} on Dubly</h2>
-  <p style="font-size:14px;line-height:1.5">${e(inviter)} invited you to join the <strong>${e(workspaceName)}</strong> workspace as ${role}.</p>
-  <p style="margin:24px 0"><a href="${e(link)}" style="background:#F05637;color:#ffffff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:bold;font-size:14px;display:inline-block">Open invitation</a></p>
-  <p style="font-size:13px;line-height:1.5;color:#475569">New to Dubly? You'll be asked to choose a password, then press <em>Join workspace</em>. Already have an account? Sign in with <strong>${e(invite.email)}</strong>. The link works until ${e(until)}, and only for that email. If you don't know your existing password, use <em>Forgot password?</em> on the sign-in page.</p>
-  <p style="font-size:12px;color:#94A3B8;word-break:break-all">Or copy this link: ${e(link)}</p>
-  <p style="font-size:12px;color:#94A3B8">If you weren't expecting this invitation, you can ignore this email.</p>
-</div>`;
-  return { to: invite.email, subject, text, html };
+  return composeEmail({
+    to: invite.email,
+    subject: `${inviter} invited you to ${workspaceName} on Dubly`,
+    preheader: `Join ${workspaceName} and start dubbing videos together.`,
+    hero: 'sunrise',
+    eyebrow: "You're invited",
+    title: `Join ${workspaceName} on Dubly`,
+    paragraphs: [
+      `${inviter} invited you to the **${workspaceName}** workspace. You will share its projects, voices and glossary with the rest of the team.`,
+      `New to Dubly? You'll choose a password first. Already have an account? Sign in with **${invite.email}**, then press **Join workspace**.`,
+    ],
+    details: [
+      ['Workspace', workspaceName],
+      ['Your role', role],
+      ['Invited by', inviter],
+      ['Link works until', until],
+    ],
+    button: { label: 'Open invitation', url: link },
+    footnote: `The link works only for **${invite.email}**. If you weren't expecting this invitation, you can ignore this email.`,
+  });
 }
 
 // Emails the invitation when mail is configured; false means the admin shares the link by hand, as before.

@@ -11,6 +11,7 @@ import { BrandLoader, BrandSplash } from './components/BrandLoader';
 import { Dashboard } from './components/Dashboard';
 import { ToastContainer } from './components/Toast';
 import { Login } from './components/Login';
+import { MagicCodeScreen } from './components/MagicCodeScreen';
 import { useAuth, type UserProfile } from './context/AuthContext';
 import { textToSpeechService } from './services/textToSpeechService';
 import { projectService } from './services/projectService';
@@ -96,7 +97,7 @@ interface WorkspaceAccessProblem {
 }
 
 export default function App() {
-  const { user, loading: authLoading, signOut, primeProfile, resendVerification } = useAuth();
+  const { user, loading: authLoading, signOut, primeProfile, resendVerification, magicCode } = useAuth();
   const [verifyMail, setVerifyMail] = useState<'idle' | 'sending' | 'sent' | 'logged'>('idle');
   // True while a visit with nothing cached waits for its startup data behind the loading screen.
   const [booting, setBooting] = useState(false);
@@ -517,6 +518,11 @@ export default function App() {
   if (authLoading) {
     return <BrandSplash />;
   }
+  // Opened from a sign-in link that another device asked for: the code comes first, even when this device is signed in itself.
+  if (magicCode) {
+    return <MagicCodeScreen />;
+  }
+
 
   if (!user) {
     return <Login />;

@@ -16,52 +16,22 @@ export interface VideoMetadata {
 
 export class VideoService {
   /**
-   * Reads metadata and creates preview object URL from user-uploaded video file
+   * What is known about a picked video before it is uploaded: its name, size and a local preview. Its length and picture size
+   * come from the server, which measures the file itself as part of the upload (ffprobe), so nothing here guesses them and the
+   * upload never waits on the browser decoding the file first.
    */
-  public async parseVideoFile(file: File): Promise<VideoMetadata> {
-    const previewUrl = URL.createObjectURL(file);
-    const sizeInMb = (file.size / (1024 * 1024)).toFixed(1);
-
-    return new Promise((resolve) => {
-      const video = document.createElement('video');
-      video.preload = 'metadata';
-      video.src = previewUrl;
-
-      video.onloadedmetadata = () => {
-        const duration = Math.round(video.duration) || 30;
-        const mins = Math.floor(duration / 60);
-        const secs = duration % 60;
-        const durationFormatted = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-        const resolution = `${video.videoWidth || 1920} × ${video.videoHeight || 1080} (${video.videoHeight >= 1080 ? 'Full HD' : 'HD'})`;
-
-        resolve({
-          fileName: file.name,
-          fileSizeFormatted: `${sizeInMb} MB`,
-          durationSeconds: duration,
-          durationFormatted,
-          resolution,
-          // Real values are not known until the Analyze step actually runs STT —
-          // showing a confident guess here would be exactly the kind of fake
-          // "detection" this app is supposed to stop doing.
-          detectedAudio: 'Not yet analyzed',
-          detectedLanguage: 'Pending analysis',
-          previewUrl,
-        });
-      };
-
-      video.onerror = () => {
-        resolve({
-          fileName: file.name,
-          fileSizeFormatted: `${sizeInMb} MB`,
-          durationSeconds: 32,
-          durationFormatted: '00:32',
-          resolution: 'Unknown',
-          detectedAudio: 'Not yet analyzed',
-          detectedLanguage: 'Pending analysis',
-          previewUrl,
-        });
-      };
-    });
+  public describeLocalFile(file: File): VideoMetadata {
+    return {
+      fileName: file.name,
+      fileSizeFormatted: `${(file.size / (1024 * 1024)).toFixed(1)} MB`,
+      durationSeconds: 0,
+      durationFormatted: '--:--',
+      resolution: 'Measuring…',
+      detectedAudio: 'Not yet analyzed',
+      detectedLanguage: 'Pending analysis',
+      // A blob: URL for this file only; the studio revokes it when the preview changes or closes.
+      previewUrl: URL.createObjectURL(file),
+    };
   }
 
   public formatDuration(seconds: number): string {

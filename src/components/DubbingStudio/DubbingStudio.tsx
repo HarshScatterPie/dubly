@@ -124,6 +124,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   const [videoPreviewUrl, setVideoPreviewUrl] = useState<string | null>(
     initialPreset ? initialPreset.videoUrl : null
   );
+  // A local file's preview holds the whole file in memory until its blob: URL is let go: done when it is replaced or the studio closes.
+  React.useEffect(() => {
+    const url = videoPreviewUrl;
+    return () => {
+      if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+    };
+  }, [videoPreviewUrl]);
   const [fileName, setFileName] = useState<string>(
     initialPreset ? `${initialPreset.title}.mp4` : ''
   );
@@ -379,8 +386,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setIsUploading(true);
     setFaceScan(null);
 
-    // Instant client-side preview while the real upload runs.
-    const meta = await videoService.parseVideoFile(file);
+    // Instant local preview; the upload starts at once and brings back the measured length and picture size.
+    const meta = videoService.describeLocalFile(file);
     setVideoPreviewUrl(meta.previewUrl);
     setFileName(meta.fileName);
     setFileSizeFormatted(meta.fileSizeFormatted);

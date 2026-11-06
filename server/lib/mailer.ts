@@ -2,11 +2,20 @@ import nodemailer, { type Transporter } from 'nodemailer';
 import { env } from './env';
 import { log } from './log';
 
+// A picture carried inside the message and shown by the HTML as cid:<cid>.
+export interface MailAttachment {
+  filename: string;
+  content: Buffer;
+  cid: string;
+  contentType: string;
+}
+
 export interface MailMessage {
   to: string;
   subject: string;
   text: string;
   html: string;
+  attachments?: MailAttachment[];
 }
 
 type Send = (message: MailMessage & { from: string }) => Promise<unknown>;

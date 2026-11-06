@@ -1,9 +1,9 @@
 name: Release gate
 
-# What must hold before a commit may reach the VM, beyond CI's correctness checks: a whole dub within its time, memory and
-# model-call budgets (no model work paid for twice), the production server starting and serving correctly, the frontend
-# within its size budget, and no critical advisory or open high/critical code-scanning alert. The VM deploys a commit only
-# when this workflow and CI have both passed for it (deploy/vm/autodeploy.sh).
+# What must hold for a commit beyond CI's correctness checks: a whole dub within its time, memory and model-call budgets (no
+# model work paid for twice), the production server starting and serving correctly, the frontend within its size budget, and
+# no critical advisory or open high/critical code-scanning alert. Checks only: nothing is deployed from GitHub. Production runs
+# on the office PC (deploy/local-prod), which is updated by hand once both workflows are green.
 on:
   push:
     branches: [main]

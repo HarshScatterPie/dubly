@@ -31,6 +31,11 @@ async function readError(res: Response): Promise<{ message: string; code?: strin
   } catch {
     // response body wasn't JSON — keep statusText
   }
+  // Refused before it reached Dubly (the Cloudflare front door takes at most 100 MB per request), so there is no JSON answer.
+  if (res.status === 413 && !code) {
+    message = 'This file is too large to send through this address (100 MB at most here). Use a shorter or smaller video, or upload it on the computer that runs Dubly.';
+    code = 'FILE_TOO_LARGE';
+  }
   return { message, code };
 }
 

@@ -118,7 +118,10 @@ export interface StartDubJobInput {
 export async function startDubJob(input: StartDubJobInput): Promise<{ job: DubJob; replayed: boolean }> {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await startDubJobOnce(input);
+      const started = await startDubJobOnce(input);
+      // Minutes were just charged: the usage emails check, in the background.
+      if (!started.replayed) void import('./notifications').then((m) => m.scheduleUsageCheck(input.workspaceId));
+      return started;
     } catch (err) {
       // A run whose process died still holds the project; settle it as interrupted (refunding it) and try once more.
       if (err instanceof StaleActiveJob && attempt === 0) {

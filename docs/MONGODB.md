@@ -34,7 +34,7 @@ To set it up on another PC:
 
 ### Looking at the data in Compass
 
-Open Compass, choose **New connection**, and paste the `dubly_admin` connection string from `CREDENTIALS.txt` (`mongodb://dubly_admin:...@127.0.0.1:27017/admin?authSource=admin&directConnection=true`). The app's data is in the `dubly` database. Files are in `media.files` (one document per file; `filename` is the storage path) and `media.chunks` (their bytes).
+Open Compass, choose **New connection**, and paste the `dubly_admin` connection string from `CREDENTIALS.txt` (the line under "Compass / operations"; it points at `127.0.0.1:27017` with `authSource=admin&directConnection=true`). The app's data is in the `dubly` database. Files are in `media.files` (one document per file; `filename` is the storage path) and `media.chunks` (their bytes).
 
 Never edit `sessions`, `authTokens` or `users.passwordHash` by hand. To give someone a new password, send a reset link: `npm run user:create -- person@example.com` prints one for an existing account too.
 

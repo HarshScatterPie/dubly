@@ -1,5 +1,4 @@
 import type { NavigationTab } from '../types';
-import { LANGUAGES } from '../data/mockData';
 
 // Every screen has its own address, so a refresh stays put, Back works and a link can be shared. The server answers any of them with the app.
 const TAB_PATHS: Partial<Record<NavigationTab, string>> = {
@@ -38,7 +37,7 @@ export function tabDetails(tab: NavigationTab): { title: string; subtitle: strin
     case 'dashboard':
       return { title: 'Studio Overview', subtitle: 'Global AI Dubbing & Voice Workspace' };
     case 'dubbing':
-      return { title: 'Video Dubbing Studio', subtitle: `Translate speech into ${LANGUAGES.length} languages and dialects` };
+      return { title: 'Video Dubbing Studio', subtitle: 'Translate speech into 40+ languages and dialects' };
     case 'text-to-voice':
       return { title: 'Text-to-Voice Studio', subtitle: 'Generate humanlike voiceovers from raw scripts' };
     case 'workspace':
@@ -46,7 +45,7 @@ export function tabDetails(tab: NavigationTab): { title: string; subtitle: strin
     case 'history':
       return { title: 'Project History', subtitle: 'All past localized media and exports' };
     case 'usage':
-      return { title: 'Usage & Limits', subtitle: 'Monitor minutes, storage, and engine allocation' };
+      return { title: 'Usage & Limits', subtitle: 'Monitor your minutes and storage' };
     case 'settings':
       return { title: 'Settings', subtitle: 'Your account, dubbing defaults and notifications' };
     case 'team':

@@ -314,7 +314,7 @@ export const DashboardHero: React.FC<DashboardHeroProps> = ({ projects, onNaviga
             <RotatingLanguage />
           </h2>
           <p className="hero-rise mt-3 text-sm sm:text-base text-slate-300 max-w-lg leading-relaxed" style={{ animationDelay: '240ms' }}>
-            ScatterPie&apos;s AI dubbing studio transcribes, translates and re-voices your videos in {LANGUAGES.length} Indian and
+            ScatterPie&apos;s AI dubbing studio transcribes, translates and re-voices your videos in 40+ Indian and
             global languages, keeping the speaker&apos;s tone and pacing.
           </p>
 

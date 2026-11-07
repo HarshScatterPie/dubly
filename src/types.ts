@@ -356,6 +356,11 @@ export interface UserUsageStats {
   teamInvites: boolean;
   /** The voice engines this plan can use; voices of the others are shown locked. */
   voiceEngines: VoiceEngine[];
+  /** Whether this plan's dubs show the "Dubbed by Dubly Studio" label; every plan's dubs carry the AI tags in the file. */
+  visibleWatermark: boolean;
+  /** The largest source video accepted, and its longest length. */
+  maxUploadMb: number;
+  maxVideoMinutes: number;
 }
 
 export type PlanId = 'free' | 'starter' | 'enterprise';

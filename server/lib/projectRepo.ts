@@ -253,10 +253,13 @@ const DEFAULT_USAGE: UserUsageStats = {
   extraRates: DEFAULT_PLANS.starter.extraRates,
   teamInvites: false,
   voiceEngines: DEFAULT_PLANS.starter.voiceEngines,
+  visibleWatermark: DEFAULT_PLANS.starter.visibleWatermark,
+  maxUploadMb: bytesToMb(limits.maxSourceVideoBytes),
+  maxVideoMinutes: limits.maxVideoSeconds / 60,
 };
 
-// Taken from the workspace's plan on every read, never trusted from (or written to) the usage document.
-const PLAN_FIELDS = ['minutesLimit', 'renewsMonthly', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites', 'voiceEngines'] as const;
+// Taken from the workspace's plan and this server's limits on every read, never trusted from (or written to) the usage document.
+const PLAN_FIELDS = ['minutesLimit', 'renewsMonthly', 'activePlan', 'planId', 'paidExtrasAllowed', 'extraRates', 'teamInvites', 'voiceEngines', 'visibleWatermark', 'maxUploadMb', 'maxVideoMinutes'] as const;
 
 // Minutes reset on the 1st of every month, India time, since that is where the team and its users are.
 const USAGE_TIME_ZONE = 'Asia/Kolkata';
@@ -302,6 +305,7 @@ function rollUsage(stored: StoredUsage | undefined, plan: Plan): StoredUsage {
     extraRates: plan.extraRates,
     teamInvites: plan.teamInvites,
     voiceEngines: plan.voiceEngines,
+    visibleWatermark: plan.visibleWatermark,
   };
 }
 

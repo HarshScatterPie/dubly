@@ -8,7 +8,6 @@ import {
   Clock,
   HardDrive,
   Gauge,
-  ShieldCheck,
   Zap,
   Globe2,
   FileCheck,
@@ -16,6 +15,7 @@ import {
 import { DubbingProject, UserUsageStats } from '../types';
 import { LANGUAGES } from '../data/mockData';
 import { projectProgress } from '../lib/projectProgress';
+import { languageVoiced } from '../lib/voiceEngines';
 import { QuotaRequestDialog } from './QuotaRequestDialog';
 
 interface UsageViewProps {
@@ -25,12 +25,22 @@ interface UsageViewProps {
   onShowToast: (title: string, description?: string, type?: 'success' | 'error' | 'info' | 'warning') => void;
 }
 
+const PlanFact: React.FC<{ label: string; value: string; note: string }> = ({ label, value, note }) => (
+  <div className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
+    <span className="text-[10px] text-[#94A3B8] uppercase tracking-wider block font-bold">{label}</span>
+    <span className="text-sm font-bold text-[#0F172A] block">{value}</span>
+    <span className="text-[11px] text-[#64748B] block">{note}</span>
+  </div>
+);
+
 export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToast }) => {
   const languagesDubbed = new Set(projects.flatMap((p) => projectProgress(p).targetLanguageNames)).size;
   const [requestOpen, setRequestOpen] = useState(false);
   const minutesPercent = Math.min(100, Math.round((usage.minutesDubbed / usage.minutesLimit) * 100));
   const storagePercent = Math.min(100, Math.round((usage.storageUsedMb / usage.storageLimitMb) * 100));
   const minutesLeft = Math.max(0, Math.round((usage.minutesLimit - usage.minutesDubbed) * 10) / 10);
+  const refreshDate = usage.resetsAt ? new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long' }) : null;
+  const languagesOffered = LANGUAGES.filter((l) => languageVoiced(l.code, usage.voiceEngines)).length;
 
   return (
     <div className="max-w-[1600px] mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-8 animate-fade-in">
@@ -41,7 +51,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToa
             Usage & Limits
           </h2>
           <p className="text-xs sm:text-sm text-[#64748B] mt-1">
-            Track your neural synthesis minutes, API quotas, and storage consumption.
+            Track your dubbing minutes, words translated and storage.
           </p>
         </div>
 
@@ -78,8 +88,8 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToa
             <p className="text-[11px] text-[#64748B]">
               {usage.renewsMonthly === false
                 ? `${minutesLeft} free min left · a one-time allowance that does not refresh`
-                : usage.resetsAt
-                  ? `Refreshes on ${new Date(usage.resetsAt).toLocaleDateString('en-IN', { day: 'numeric', month: 'long' })} · ${minutesLeft} min left this month`
+                : refreshDate
+                  ? `Refreshes on ${refreshDate} · ${minutesLeft} min left this month`
                   : 'Resets automatically on the 1st of every month'}
             </p>
             <p className="text-[11px] text-[#94A3B8]">Dubs use their video's length; Studio voiceovers and line previews use the length of the voice.</p>
@@ -98,7 +108,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToa
           </div>
         </div>
 
-        {/* Neural Voices Quota */}
+        {/* Words Localized */}
         <div className="p-6 rounded-3xl glass-panel space-y-4">
           <div className="flex items-center justify-between">
             <span className="text-[10px] font-bold uppercase tracking-wider text-[#64748B]">
@@ -117,11 +127,6 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToa
             <p className="text-[11px] text-[#64748B]">
               Dubbed into {languagesDubbed} {languagesDubbed === 1 ? 'language' : 'languages'} across {projects.length} {projects.length === 1 ? 'project' : 'projects'}
             </p>
-          </div>
-
-          <div className="flex items-center gap-1.5 pt-4 text-xs text-emerald-600 font-semibold">
-            <ShieldCheck className="w-4 h-4" />
-            <span>Studio Neural Quality Enabled</span>
           </div>
         </div>
 
@@ -142,7 +147,7 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToa
               <span className="text-sm text-[#94A3B8] font-mono">/ {usage.storageLimitMb} MB</span>
             </div>
             <p className="text-[11px] text-[#64748B]">
-              High-speed NVMe video cache & master renders
+              Your uploaded videos and finished dubs
             </p>
           </div>
 
@@ -164,51 +169,32 @@ export const UsageView: React.FC<UsageViewProps> = ({ usage, projects, onShowToa
       <div className="rounded-3xl glass-panel p-7 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[#E2E8F0]">
           <div>
-            <h3 className="text-base font-bold text-[#0F172A]">Current Subscription</h3>
+            <h3 className="text-base font-bold text-[#0F172A]">Current Plan</h3>
             <p className="text-xs text-[#64748B] mt-0.5">
               You are currently on the <strong className="text-[#D94B2E]">{usage.activePlan}</strong> plan
             </p>
             <p className="text-xs text-[#64748B] mt-1">
               {usage.renewsMonthly !== false ? `${usage.minutesLimit} dubbing minutes a month` : `${usage.minutesLimit} free dubbing minutes in total`} ·{' '}
-              {usage.paidExtrasAllowed ? 'Paid extras included' : 'No paid extras'} · {usage.teamInvites ? 'Invite your team' : 'Just you, no teammates'}
+              {usage.paidExtrasAllowed ? 'Paid extras available, each uses more minutes' : 'No paid extras'} · {usage.teamInvites ? 'Invite your team' : 'Just you, no teammates'}
             </p>
           </div>
 
           <div className="flex items-center gap-2">
             <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#F05637]/20 text-[#D94B2E] border border-[#F05637]/40">
-              {usage.renewsMonthly !== false ? 'Active Billing Cycle' : 'Free Plan'}
+              {usage.renewsMonthly === false ? 'One-Time Allowance' : refreshDate ? `Refreshes ${refreshDate}` : 'Monthly Allowance'}
             </span>
           </div>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
-            <span className="text-[10px] text-[#94A3B8] uppercase tracking-wider block font-bold">
-              Resolution Cap
-            </span>
-            <span className="text-sm font-bold text-[#0F172A]">1080p & 4K UHD</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
-            <span className="text-[10px] text-[#94A3B8] uppercase tracking-wider block font-bold">
-              Language Support
-            </span>
-            <span className="text-sm font-bold text-[#0F172A]">{LANGUAGES.length} Languages</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
-            <span className="text-[10px] text-[#94A3B8] uppercase tracking-wider block font-bold">
-              Audio Sync
-            </span>
-            <span className="text-sm font-bold text-[#0F172A]">Segment-Timed Dubbing</span>
-          </div>
-
-          <div className="p-4 rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] space-y-1">
-            <span className="text-[10px] text-[#94A3B8] uppercase tracking-wider block font-bold">
-              Watermark
-            </span>
-            <span className="text-sm font-bold text-emerald-600">None (Clean Output)</span>
-          </div>
+          <PlanFact label="Video Limit" value={`${usage.maxUploadMb} MB · ${usage.maxVideoMinutes} min`} note="Per video. A dub keeps your video's resolution." />
+          <PlanFact label="Language Support" value={`${languagesOffered} Languages`} note="Some dialects use a related language's voice." />
+          <PlanFact label="Audio Sync" value="Segment-Timed Dubbing" note="Each line is placed at its own time." />
+          <PlanFact
+            label="AI Label"
+            value={usage.visibleWatermark ? 'Visible on Dubbed Videos' : 'Not Visible'}
+            note={usage.visibleWatermark ? '"Dubbed by Dubly Studio", plus an AI tag in the file.' : 'An AI tag stays in the file.'}
+          />
         </div>
       </div>
     </div>

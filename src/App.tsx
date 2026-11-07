@@ -88,6 +88,9 @@ const EMPTY_USAGE: UserUsageStats = {
   extraRates: { aiReview: 0, premiumVoices: 0, paceRetakes: 0 },
   teamInvites: false,
   voiceEngines: DEFAULT_VOICE_ENGINES,
+  visibleWatermark: true,
+  maxUploadMb: 500,
+  maxVideoMinutes: 60,
 };
 
 // Why the server refuses this account a workspace: removed by an admin (`NO_WORKSPACE`), invited and not yet joined (`AWAITING_INVITE`),

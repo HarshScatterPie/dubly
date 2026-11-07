@@ -283,7 +283,7 @@ export const StepLocalize: React.FC<StepLocalizeProps> = ({
                   : 'text-[#64748B] hover:text-[#0F172A]'
               }`}
             >
-              All ({LANGUAGES.length})
+              All ({LANGUAGES.filter((l) => languageVoiced(l.code, voiceEngines)).length})
             </button>
           </div>
 

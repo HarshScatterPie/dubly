@@ -112,8 +112,7 @@ function resolveSpeakers(
 export const projectsRouter = Router();
 
 const uploadDir = path.join(tmpDir, 'uploads');
-// The one size boundary for source video, whether uploaded or fetched as a sample.
-export const MAX_SOURCE_VIDEO_BYTES = 500 * 1024 * 1024;
+export const MAX_SOURCE_VIDEO_BYTES = limits.maxSourceVideoBytes;
 const SAMPLE_DOWNLOAD_TIMEOUT_MS = 2 * 60 * 1000;
 // Hosts the built-in samples are served from; the server fetches nothing else.
 const SAMPLE_HOSTS = Array.from(new Set(SAMPLE_VIDEOS.map((s) => new URL(s.videoUrl).hostname.toLowerCase())));

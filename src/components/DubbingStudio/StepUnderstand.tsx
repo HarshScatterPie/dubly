@@ -199,10 +199,6 @@ export const StepUnderstand: React.FC<StepUnderstandProps> = ({
             <Languages className="w-4 h-4 text-[#F05637]" />
             <span>{detectedLanguage} · <strong className="text-[#0F172A]">{wordsCount} words</strong></span>
           </div>
-          <span className="text-[#E2E8F0] hidden sm:inline">•</span>
-          <span className="hidden sm:inline-block px-2.5 py-0.5 rounded-full bg-emerald-50/60 text-emerald-600 text-[10px] font-semibold border border-emerald-200/60">
-            Confidence 99.2%
-          </span>
         </div>
       </div>
 

@@ -57,9 +57,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <div className="w-12 h-12 rounded-xl bg-[#F05637]/20 border border-[#F05637]/30 flex items-center justify-center text-[#D94B2E] mb-5">
               <Video className="w-6 h-6" />
             </div>
-            <span className="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-[#F05637]/15 text-[#D94B2E] border border-[#F05637]/40">
-              Most Popular
-            </span>
           </div>
 
           <h3 className="text-xl font-bold text-[#0F172A] mb-2 tracking-tight">VIDEO DUBBING</h3>

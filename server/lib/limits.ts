@@ -31,6 +31,8 @@ export const limits = {
   totalProcesses,
   // Longest source video accepted, in seconds (MAX_VIDEO_MINUTES).
   maxVideoSeconds: num('MAX_VIDEO_MINUTES', 60) * 60,
+  // The one size boundary for source video, whether uploaded or fetched as a sample.
+  maxSourceVideoBytes: 500 * 1024 * 1024,
   // Dubs rendering at once per workspace; further dubs wait in the queue (MAX_DUBS_PER_WORKSPACE).
   maxDubsPerWorkspace: num('MAX_DUBS_PER_WORKSPACE', 2),
   // Dubs rendering at once in this process; MAX_ACTIVE_DUBS is the machine's total, by default half its cores.

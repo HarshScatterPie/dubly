@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { col, createUser, resetEmulators, startApi, usageOf as storedUsage, type TestApi, type TestUser } from '../test/helpers';
 import { env } from '../lib/env';
+import { limits } from '../lib/limits';
 import { clearPlanCaches, setWorkspacePlan } from '../lib/plans';
 import { setMailSenderForTests, type MailMessage } from '../lib/mailer';
 import { startDubJob } from '../lib/jobs';
@@ -116,5 +117,20 @@ describe('quota increase requests', () => {
     const limited = await request(user, valid);
     expect(limited.status).toBe(429);
     expect(await col('quotaRequests').countDocuments()).toBe(5);
+  });
+});
+
+describe('what the Usage page says about a plan', () => {
+  it('reports the plan\'s real AI label and the real video limits, and keeps them out of the ledger', async () => {
+    const user = await createUser('facts@plan.test');
+    const workspaceId = await workspaceIdOf(user);
+
+    expect(await usageOf(user)).toMatchObject({ planId: 'starter', visibleWatermark: true, maxUploadMb: 500, maxVideoMinutes: limits.maxVideoSeconds / 60 });
+
+    await setWorkspacePlan(workspaceId, 'enterprise');
+    expect(await usageOf(user)).toMatchObject({ planId: 'enterprise', visibleWatermark: false });
+
+    const stored = await storedUsage(workspaceId);
+    for (const field of ['visibleWatermark', 'maxUploadMb', 'maxVideoMinutes']) expect(stored).not.toHaveProperty(field);
   });
 });

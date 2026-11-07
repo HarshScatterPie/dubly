@@ -4,7 +4,7 @@
  */
 
 import { SpeakerProfile, TranscriptSegment } from '../types';
-import { projectService } from './projectService';
+import { projectService, type JobView } from './projectService';
 
 export interface TranscriptionResult {
   language: string;
@@ -28,13 +28,13 @@ export class SpeechToTextService {
    * uploaded/imported to `projectId`. Speaker count/voice-map come from a best-effort
    * Gemini diarization pass run server-side right after transcription.
    */
-  public async transcribe(projectId: string): Promise<TranscriptionResult> {
-    return this.toResult(await projectService.transcribe(projectId));
+  public async transcribe(projectId: string, signal?: AbortSignal, onUpdate?: (job: JobView) => void): Promise<TranscriptionResult> {
+    return this.toResult(await projectService.transcribe(projectId, signal, onUpdate));
   }
 
   /** Follows a transcription that is already running, e.g. one started before the page was reloaded. */
-  public async resume(projectId: string, jobId: string): Promise<TranscriptionResult> {
-    return this.toResult(await projectService.awaitTranscription(projectId, jobId));
+  public async resume(projectId: string, jobId: string, signal?: AbortSignal, onUpdate?: (job: JobView) => void): Promise<TranscriptionResult> {
+    return this.toResult(await projectService.awaitTranscription(projectId, jobId, signal, onUpdate));
   }
 
   private toResult(raw: Awaited<ReturnType<typeof projectService.transcribe>>): TranscriptionResult {

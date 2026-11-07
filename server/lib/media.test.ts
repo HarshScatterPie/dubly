@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { execFile } from 'node:child_process';
 import http from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { ffmpegPath } from './mediaTools';
@@ -20,10 +20,12 @@ import {
 import { stitchDubbedAudio } from './dubMix';
 import { sniffContainer, validateMedia } from './mediaValidation';
 import { buildKaraokeAss } from './captions';
-import { detectSpeechRegions } from './forcedAlign';
+import { detectSpeechRegions, speechBetweenSilences, type SilenceEvent } from './forcedAlign';
 import { limits } from './limits';
 import { createUser, readProject, resetEmulators, startApi, type TestApi } from '../test/helpers';
-import { findStoredFile } from './mediaStore';
+import { fileExists, findStoredFile } from './mediaStore';
+import { col } from './mongo';
+import { sweepExpiredRecords } from './recordSweeper';
 
 let dir: string;
 const f = (name: string) => path.join(dir, name);
@@ -198,6 +200,13 @@ describe('every media step works on the bundled ffmpeg', () => {
     await burnSubtitles(f('dubbed.mp4'), f('captions.ass'), f('captioned.mp4'));
     expect((await probeMedia(f('captioned.mp4'))).hasVideo).toBe(true);
 
+    // A quote in the folder name (a Windows account called O'Connor, say) must not end the filter's quoted path.
+    const quoted = f("O'Connor dir");
+    await mkdir(quoted);
+    await writeFile(path.join(quoted, 'captions.ass'), ass, 'utf8');
+    await burnSubtitles(f('dubbed.mp4'), path.join(quoted, 'captions.ass'), f('captioned-quoted.mp4'));
+    expect((await probeMedia(f('captioned-quoted.mp4'))).hasVideo).toBe(true);
+
     await extractAudioOnly(f('dubbed.mp4'), f('dubbed.mp3'));
     expect((await probeMedia(f('dubbed.mp3'))).hasAudio).toBe(true);
   }, 60_000);
@@ -233,6 +242,106 @@ describe('POST /api/projects/:id/upload', () => {
     return { res, body: await res.json(), user, projectId: project.body.id as string };
   }
 
+  describe('in chunks', () => {
+    const savedChunkBytes = limits.uploadChunkBytes;
+    afterAll(() => {
+      limits.uploadChunkBytes = savedChunkBytes;
+    });
+
+    // A file split in three, and an open upload for it.
+    async function openUpload(file = 'video.webm', name = 'big.webm') {
+      const bytes = await readFile(f(file));
+      limits.uploadChunkBytes = Math.ceil(bytes.length / 3);
+      const user = await createUser('chunks@team.test');
+      const project = await api.call('POST', '/api/projects', { token: user.token, body: { title: 'up' } });
+      const projectId = project.body.id as string;
+      const opened = await api.call('POST', `/api/projects/${projectId}/uploads`, { token: user.token, body: { fileName: name, size: bytes.length, contentType: 'video/webm' } });
+      expect(opened.status).toBe(201);
+      const uploadId = opened.body.uploadId as string;
+      const chunkBytes = opened.body.chunkBytes as number;
+      const put = (index: number, body: Buffer = bytes.subarray(index * chunkBytes, (index + 1) * chunkBytes), token = user.token) =>
+        fetch(`${api.baseUrl}/api/projects/${projectId}/uploads/${uploadId}/chunks/${index}`, {
+          method: 'PUT',
+          headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream' },
+          body: new Uint8Array(body),
+        });
+      const complete = () => api.call('POST', `/api/projects/${projectId}/uploads/${uploadId}/complete`, { token: user.token });
+      return { bytes, user, projectId, uploadId, put, complete };
+    }
+
+    it('makes the same project as one upload, whatever order the chunks arrive in', async () => {
+      const { bytes, user, projectId, uploadId, put, complete } = await openUpload();
+      for (const index of [2, 0, 1]) expect((await put(index)).status).toBe(204);
+
+      const res = await complete();
+
+      expect(res.status).toBe(200);
+      expect(res.body.videoDuration).toBeGreaterThan(1);
+      const wsId = (await api.call('GET', '/api/workspace', { token: user.token })).body.id;
+      const stored = await readProject(wsId, projectId);
+      expect(stored?.videoStoragePath).toBe(`workspaces/${wsId}/projects/${projectId}/source.webm`);
+      expect((await findStoredFile(stored!.videoStoragePath!))?.length).toBe(bytes.length);
+      // Nothing of the upload is left behind.
+      expect(await fileExists(`uploads/${uploadId}/0`)).toBe(false);
+      expect(await col('uploadSessions').countDocuments({ _id: uploadId as never })).toBe(0);
+    });
+
+    it('takes a chunk again, replacing the first attempt', async () => {
+      const { put, complete } = await openUpload();
+      for (const index of [0, 0, 1, 2, 2]) expect((await put(index)).status).toBe(204);
+      expect((await complete()).status).toBe(200);
+    });
+
+    it('refuses a chunk of the wrong size or number', async () => {
+      const { put } = await openUpload();
+      const short = await put(0, Buffer.from('too short'));
+      expect(short.status).toBe(400);
+      expect((await short.json()).error.code).toBe('BAD_CHUNK');
+      expect((await put(9, Buffer.from('x'))).status).toBe(400);
+    });
+
+    it('says when a chunk is missing, and can still be finished', async () => {
+      const { put, complete } = await openUpload();
+      await put(0);
+      await put(2);
+      const early = await complete();
+      expect(early.status).toBe(400);
+      expect(early.body.error.code).toBe('UPLOAD_INCOMPLETE');
+      await put(1);
+      expect((await complete()).status).toBe(200);
+    });
+
+    it('judges the whole file by its content, and drops an upload that fails', async () => {
+      const { uploadId, put, complete } = await openUpload('playlist.mp4', 'clip.mp4');
+      for (const index of [0, 1, 2]) await put(index);
+      expect((await complete()).status).toBe(400);
+      expect(await col('uploadSessions').countDocuments({ _id: uploadId as never })).toBe(0);
+    });
+
+    it("hides another workspace's upload", async () => {
+      const { put, projectId, uploadId } = await openUpload();
+      const stranger = await createUser('stranger-chunks@team.test');
+      expect((await put(0, undefined, stranger.token)).status).toBe(404);
+      expect((await api.call('POST', `/api/projects/${projectId}/uploads/${uploadId}/complete`, { token: stranger.token })).status).toBe(404);
+    });
+
+    it('refuses to open an upload over the size limit', async () => {
+      const user = await createUser('huge@team.test');
+      const project = await api.call('POST', '/api/projects', { token: user.token, body: { title: 'up' } });
+      const res = await api.call('POST', `/api/projects/${project.body.id}/uploads`, { token: user.token, body: { fileName: 'a.mp4', size: 600 * 1024 * 1024 } });
+      expect(res.status).toBe(413);
+    });
+
+    it('sweeps an upload nobody finished, chunks and all', async () => {
+      const { uploadId, put } = await openUpload();
+      await put(0);
+      expect(await fileExists(`uploads/${uploadId}/0`)).toBe(true);
+      await sweepExpiredRecords(Date.now() + 7 * 60 * 60 * 1000);
+      expect(await fileExists(`uploads/${uploadId}/0`)).toBe(false);
+      expect(await col('uploadSessions').countDocuments({ _id: uploadId as never })).toBe(0);
+    });
+  });
+
   it('stores a real video under a name and type derived from its content', async () => {
     const { res, body, user, projectId } = await upload('video.webm', 'holiday.mp4', 'video/mp4');
     expect(res.status).toBe(200);
@@ -267,5 +376,34 @@ describe('POST /api/projects/:id/upload', () => {
     const { res, body } = await upload('truncated.mp4', 'broken.mp4');
     expect(res.status).toBe(400);
     expect(body.error.code).toBe('MEDIA_UNREADABLE');
+  });
+});
+
+describe('speech between silences', () => {
+  const start = (time: number): SilenceEvent => ({ type: 'start', time });
+  const end = (time: number): SilenceEvent => ({ type: 'end', time });
+
+  it('takes the gaps between paired silences, including at both edges of the clip', () => {
+    const events = [start(0), end(2), start(5), end(7), start(10), end(12)];
+    expect(speechBetweenSilences(events, 12)).toEqual([
+      { start: 2, end: 5 },
+      { start: 7, end: 10 },
+    ]);
+  });
+
+  it('reads an end with no start as a clip that opened in silence, without shifting what follows', () => {
+    expect(speechBetweenSilences([end(2), start(5), end(7)], 10)).toEqual([
+      { start: 2, end: 5 },
+      { start: 7, end: 10 },
+    ]);
+  });
+
+  it('reads a start with no end as a clip that closed in silence, not as speech', () => {
+    expect(speechBetweenSilences([start(5)], 10)).toEqual([{ start: 0, end: 5 }]);
+  });
+
+  it('treats a clip with no silence as all speech, and one that is all silence as none', () => {
+    expect(speechBetweenSilences([], 10)).toEqual([{ start: 0, end: 10 }]);
+    expect(speechBetweenSilences([start(0), end(10)], 10)).toEqual([]);
   });
 });

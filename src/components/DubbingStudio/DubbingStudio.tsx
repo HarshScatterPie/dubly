@@ -34,7 +34,7 @@ import { StepExport } from './StepExport';
 import { speechToTextService, type TranscriptionResult } from '../../services/speechToTextService';
 import { translationService } from '../../services/translationService';
 import { videoService } from '../../services/videoService';
-import { projectService } from '../../services/projectService';
+import { projectService, type JobView } from '../../services/projectService';
 import { DEFAULT_PREFERENCES } from '../../data/preferences';
 import { VOICE_ENGINES, voiceAllowed, voiceForPlan } from '../../lib/voiceEngines';
 import { notifyWorkDone } from '../../lib/devicePrefs';
@@ -103,6 +103,8 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // every subsequent step so the server always has the source of truth.
   const [projectId, setProjectId] = useState<string | null>(null);
   const isMountedRef = useRef(true);
+  // Stops following an analysis or dub once the studio is left; the job carries on, and coming back to the project picks it up again.
+  const followAbortRef = useRef<AbortController | null>(null);
   // Which picked video is current: an upload that finishes after the video was replaced or reset changes nothing.
   const selectionRef = useRef(0);
   // Tracks the furthest step index actually reached (via the step's own action button,
@@ -118,6 +120,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
+      followAbortRef.current?.abort();
     };
   }, []);
 
@@ -333,7 +336,7 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         }
         if (job.type === 'transcribe') {
           goTo('understand');
-          void runAnalysis(id, () => speechToTextService.resume(id, jobId));
+          void runAnalysis(id, (signal, onUpdate) => speechToTextService.resume(id, jobId, signal, onUpdate));
         } else {
           goTo('export');
           setIsGeneratingDub(true);
@@ -519,11 +522,13 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
   // STEP 1 -> STEP 2: Analyze Video (real STT)
   const handleAnalyzeVideo = async () => {
     if (!videoPreviewUrl || !projectId) return;
-    await runAnalysis(projectId, () => speechToTextService.transcribe(projectId));
+    await runAnalysis(projectId, (signal, onUpdate) => speechToTextService.transcribe(projectId, signal, onUpdate));
   };
 
   // Shows analysis progress and applies the transcript; `start` begins a transcription or follows one already running.
-  const runAnalysis = async (id: string, start: () => Promise<TranscriptionResult>) => {
+  const runAnalysis = async (id: string, start: (signal: AbortSignal, onUpdate: (job: JobView) => void) => Promise<TranscriptionResult>) => {
+    const abort = new AbortController();
+    followAbortRef.current = abort;
     setIsAnalyzing(true);
     setCurrentStep('understand');
     setAnalysisProgress(0);
@@ -531,28 +536,16 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
     setAnalysisElapsedSeconds(0);
 
     const startedAt = Date.now();
-    let polling = true;
-    const poll = async () => {
-      while (polling && isMountedRef.current) {
-        try {
-          const proj = await projectService.progress(id);
-          if (!polling || !isMountedRef.current) break;
-          if (proj.currentProcessingMessage) {
-            setAnalysisMessage(proj.currentProcessingMessage);
-            setAnalysisProgress((prev) => Math.max(prev, proj.progressPercent || 0));
-          }
-        } catch {
-          // a missed poll just means the display lags a second
-        }
-        setAnalysisElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-      }
+    const clock = setInterval(() => setAnalysisElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    const showProgress = (job: JobView) => {
+      if (job.settled || !job.progressMessage) return;
+      setAnalysisMessage(job.progressMessage);
+      setAnalysisProgress((prev) => Math.max(prev, job.progressPercent || 0));
     };
-    void poll();
 
     try {
-      const res = await start();
-      polling = false;
+      const res = await start(abort.signal, showProgress);
+      clearInterval(clock);
       setAnalysisProgress(100);
       setTranscriptSegments(res.segments);
       setDetectedLanguage(res.language);
@@ -586,10 +579,11 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
         onShowToast('Part of the Speech Is Missing', `We could not transcribe ${spans}. Analyze the video again, or add those lines by hand.`, 'error');
       }
     } catch (err) {
+      if (abort.signal.aborted) return;
       onShowToast('Analysis Failed', (err as Error).message, 'error');
       setCurrentStep('upload');
     } finally {
-      polling = false;
+      clearInterval(clock);
       if (isMountedRef.current) setIsAnalyzing(false);
     }
   };
@@ -738,14 +732,19 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
 
   // Follows a dub on the server until it settles; also picks up a dub that was running before a reload.
   const pollDub = (id: string) => {
-    const poll = async () => {
-      if (!isMountedRef.current) return;
+    const abort = new AbortController();
+    followAbortRef.current = abort;
+    const follow = async () => {
       try {
         // Only the progress while it runs; the whole project is fetched once, when the dub has finished.
-        const progress = await projectService.progress(id);
-        if (!isMountedRef.current) return;
-        setDubProgress(progress.progressPercent);
-        setProcessingMessage(progress.currentProcessingMessage || '');
+        const progress = await projectService.followProgress(
+          id,
+          (update) => {
+            setDubProgress(update.progressPercent);
+            setProcessingMessage(update.currentProcessingMessage || '');
+          },
+          abort.signal
+        );
 
         if (progress.status === 'completed') {
           const proj = await projectService.get(id);
@@ -757,22 +756,18 @@ export const DubbingStudio: React.FC<DubbingStudioProps> = ({
           notifyWorkDone('Your dub is ready', `${proj.title} is ready to watch and download.`);
           return;
         }
-        if (progress.status === 'failed') {
-          setIsGeneratingDub(false);
-          onShowToast('Dubbing Failed', progress.currentProcessingMessage || 'Something went wrong.', 'error');
-          notifyWorkDone('Dubbing failed', progress.currentProcessingMessage || 'Something went wrong.');
-          setCurrentStep('voice');
-          return;
-        }
-        setTimeout(poll, 1500);
+        setIsGeneratingDub(false);
+        onShowToast('Dubbing Failed', progress.currentProcessingMessage || 'Something went wrong.', 'error');
+        notifyWorkDone('Dubbing failed', progress.currentProcessingMessage || 'Something went wrong.');
+        setCurrentStep('voice');
       } catch (err) {
-        if (!isMountedRef.current) return;
+        if (abort.signal.aborted || !isMountedRef.current) return;
         setIsGeneratingDub(false);
         onShowToast('Dubbing Failed', (err as Error).message, 'error');
         setCurrentStep('voice');
       }
     };
-    void poll();
+    void follow();
   };
 
   // Add another language to a finished project, without re-uploading. Languages that are

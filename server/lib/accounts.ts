@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from 'node:crypto';
+import { sharedInvalidator } from './cacheBus';
 import { col, isDuplicateKeyError } from './mongo';
 
 /**
@@ -117,9 +118,9 @@ const decoy = () => (decoyHash ??= hashPassword(randomBytes(16).toString('hex'))
 // --- Session and account cache -----------------------------------------------------------------------------------------------
 //
 // Every request looks up its session and account (the UI polls once a second while a dub runs), so both are kept in memory for a
-// short while. Everything that ends a session or changes an account goes through this module on this one process and clears the
-// entry at once, so a sign-out, password change, removal or disabling still takes effect on the very next request. Only edits made
-// straight in the database (Compass) wait for the entry to age out.
+// short while. Everything that ends a session or changes an account goes through this module, which clears the entry at once here
+// and, through the cache bus, in every other process, so a sign-out, password change, removal or disabling takes effect on the next
+// request here and within moments everywhere else. Only edits made straight in the database (Compass) wait for the entry to age out.
 export const SESSION_CACHE_MS = 30_000;
 const CACHE_LIMIT = 10_000;
 const sessionCache = new Map<string, { session: SessionDoc; at: number }>();
@@ -131,12 +132,18 @@ export function clearSessionCaches(): void {
   accountCache.clear();
 }
 
-function forgetAccount(uid: string): void {
-  accountCache.delete(uid);
-}
+const forgetAccount = sharedInvalidator('account', (uid) => (uid === null ? accountCache.clear() : void accountCache.delete(uid)));
 
-function forgetSessionsOf(uid: string, keepSessionId?: string): void {
+const forgetSession = sharedInvalidator('session', (id) => (id === null ? sessionCache.clear() : void sessionCache.delete(id)));
+
+const forgetSessionsMatching = sharedInvalidator('sessions-of', (key) => {
+  if (key === null) return sessionCache.clear();
+  const [uid, keepSessionId] = key.split(' ');
   for (const [id, entry] of sessionCache) if (entry.session.uid === uid && id !== keepSessionId) sessionCache.delete(id);
+});
+
+function forgetSessionsOf(uid: string, keepSessionId = ''): void {
+  forgetSessionsMatching(`${uid} ${keepSessionId}`);
 }
 
 function remember<V>(cache: Map<string, { at: number } & V>, key: string, value: V): void {
@@ -318,8 +325,9 @@ export async function resolveSession(token: string): Promise<ResolvedSession | n
 
 export async function revokeSession(token: string): Promise<void> {
   if (!token) return;
-  sessionCache.delete(sha256(token));
   await sessions().deleteOne({ _id: sha256(token) });
+  // After the delete, so no process can read the session back in between.
+  forgetSession(sha256(token));
 }
 
 // Every session of the account; `keepSessionId` spares the one making the request (e.g. after changing the password).

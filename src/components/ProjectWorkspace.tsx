@@ -194,34 +194,27 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       return;
     }
 
-    const poll = async () => {
-      try {
-        // Only the progress while it runs; the whole project is fetched once, when the dub has finished.
-        const progress = await projectService.progress(project.id);
-        setRedubProgress(progress.progressPercent);
-        setRedubMessage(progress.currentProcessingMessage || '');
-
-        if (progress.status === 'completed') {
-          const fresh = await projectService.get(project.id);
-          setIsRedubbing(false);
-          setPendingVoiceId(null);
-          onUpdateProject(fresh);
-          onShowToast('Re-dub Complete', `${langName} now uses ${voice?.name}.`, 'success');
-          notifyWorkDone('Re-dub complete', `${project.title}: ${langName} now uses ${voice?.name}.`);
-          return;
-        }
-        if (progress.status === 'failed') {
-          setIsRedubbing(false);
-          onShowToast('Re-dub Failed', progress.currentProcessingMessage || 'Something went wrong.', 'error');
-          return;
-        }
-        setTimeout(poll, 1500);
-      } catch (err) {
+    try {
+      // Only the progress while it runs; the whole project is fetched once, when the dub has finished.
+      const progress = await projectService.followProgress(project.id, (update) => {
+        setRedubProgress(update.progressPercent);
+        setRedubMessage(update.currentProcessingMessage || '');
+      });
+      if (progress.status === 'completed') {
+        const fresh = await projectService.get(project.id);
         setIsRedubbing(false);
-        onShowToast('Re-dub Failed', (err as Error).message, 'error');
+        setPendingVoiceId(null);
+        onUpdateProject(fresh);
+        onShowToast('Re-dub Complete', `${langName} now uses ${voice?.name}.`, 'success');
+        notifyWorkDone('Re-dub complete', `${project.title}: ${langName} now uses ${voice?.name}.`);
+        return;
       }
-    };
-    void poll();
+      setIsRedubbing(false);
+      onShowToast('Re-dub Failed', progress.currentProcessingMessage || 'Something went wrong.', 'error');
+    } catch (err) {
+      setIsRedubbing(false);
+      onShowToast('Re-dub Failed', (err as Error).message, 'error');
+    }
   };
 
   const pendingRetake = project.retakeInfo?.[translationLang.code];
@@ -251,28 +244,22 @@ export const ProjectWorkspace: React.FC<ProjectWorkspaceProps> = ({
       onShowToast('Update Failed to Start', (err as Error).message, 'error');
       return;
     }
-    const poll = async () => {
-      try {
-        // Only the progress while it runs; the whole project is fetched once, when the update has finished.
-        const progress = await projectService.progress(project.id);
-        if (progress.status === 'completed' || progress.status === 'failed') {
-          const fresh = await projectService.get(project.id);
-          setRetake(null);
-          onProjectRefreshed(fresh);
-          if (progress.status === 'completed') {
-            onShowToast('Dub Updated', `${langName} now has your edited lines.`, 'success');
-            notifyWorkDone('Dub updated', `${project.title}: ${langName} now has your edited lines.`);
-          } else onShowToast('Update Failed', fresh.currentProcessingMessage || 'Something went wrong.', 'error');
-          return;
-        }
-        setRetake({ language, progress: progress.progressPercent, message: progress.currentProcessingMessage || 'Rendering...' });
-        setTimeout(poll, 1500);
-      } catch (err) {
-        setRetake(null);
-        onShowToast('Update Failed', (err as Error).message, 'error');
-      }
-    };
-    void poll();
+    try {
+      // Only the progress while it runs; the whole project is fetched once, when the update has finished.
+      const progress = await projectService.followProgress(project.id, (update) => {
+        setRetake({ language, progress: update.progressPercent, message: update.currentProcessingMessage || 'Rendering...' });
+      });
+      const fresh = await projectService.get(project.id);
+      setRetake(null);
+      onProjectRefreshed(fresh);
+      if (progress.status === 'completed') {
+        onShowToast('Dub Updated', `${langName} now has your edited lines.`, 'success');
+        notifyWorkDone('Dub updated', `${project.title}: ${langName} now has your edited lines.`);
+      } else onShowToast('Update Failed', fresh.currentProcessingMessage || 'Something went wrong.', 'error');
+    } catch (err) {
+      setRetake(null);
+      onShowToast('Update Failed', (err as Error).message, 'error');
+    }
   };
 
   /** Speaks a voice's sample line in the language being configured, so it can be judged before committing to a render. */

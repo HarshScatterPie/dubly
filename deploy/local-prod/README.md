@@ -1,6 +1,6 @@
 # Running production on this PC
 
-Dubly runs as one process on `127.0.0.1:8787` (built frontend + API, `NODE_ENV=production`, sign-up closed), next to the local MongoDB. Nothing listens on the network; people reach it through a tunnel. Everything lives in `%USERPROFILE%\dubly-prod`: `log\` (launcher, app, tunnel, backup), `CURRENT_URL.txt` (the address in use).
+Dubly runs on `127.0.0.1:8787`, as one process per two cores sharing that port (built frontend + API, `NODE_ENV=production`, sign-up closed), next to the local MongoDB. Nothing listens on the network; people reach it through a tunnel. Everything lives in `%USERPROFILE%\dubly-prod`: `work\` (scratch files and the voice cache, kept out of the OneDrive folder), `log\` (launcher, app, tunnel, backup), `CURRENT_URL.txt` (the address in use).
 
 | Script | What it does |
 |---|---|

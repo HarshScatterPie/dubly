@@ -35,20 +35,23 @@ async function computeWaveformPeaks(dataUri: string, sampleCount = 64): Promise<
     const arrayBuffer = await res.arrayBuffer();
     const AudioContextClass = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
     const ctx = new AudioContextClass();
-    const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
-    const channel = audioBuffer.getChannelData(0);
-    const blockSize = Math.max(1, Math.floor(channel.length / sampleCount));
-    const peaks: number[] = [];
-    for (let i = 0; i < sampleCount; i++) {
-      let sum = 0;
-      const start = i * blockSize;
-      for (let j = 0; j < blockSize && start + j < channel.length; j++) {
-        sum += Math.abs(channel[start + j]);
+    try {
+      const audioBuffer = await ctx.decodeAudioData(arrayBuffer.slice(0));
+      const channel = audioBuffer.getChannelData(0);
+      const blockSize = Math.max(1, Math.floor(channel.length / sampleCount));
+      const peaks: number[] = [];
+      for (let i = 0; i < sampleCount; i++) {
+        let sum = 0;
+        const start = i * blockSize;
+        for (let j = 0; j < blockSize && start + j < channel.length; j++) {
+          sum += Math.abs(channel[start + j]);
+        }
+        peaks.push(Math.min(1, (sum / blockSize) * 3.5));
       }
-      peaks.push(Math.min(1, (sum / blockSize) * 3.5));
+      return peaks;
+    } finally {
+      void ctx.close().catch(() => undefined);
     }
-    ctx.close();
-    return peaks;
   } catch {
     return new Array(sampleCount).fill(0.3);
   }

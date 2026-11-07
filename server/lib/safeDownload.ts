@@ -1,8 +1,11 @@
 import { lookup as dnsLookup } from 'node:dns/promises';
-import { isIP } from 'node:net';
+import http, { type IncomingMessage } from 'node:http';
+import https from 'node:https';
+import { isIP, type LookupFunction } from 'node:net';
 import { createWriteStream } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import path from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { HttpError } from './httpError';
 
 export type Resolver = (hostname: string) => Promise<{ address: string; family: number }[]>;
@@ -70,6 +73,30 @@ export async function assertSafeDownloadUrl(rawUrl: string, allowedHosts: readon
   return url;
 }
 
+// The connection's own lookup. assertSafeDownloadUrl's check is a separate DNS answer, so a name re-pointed inward just after it is caught here.
+const publicOnlyLookup: LookupFunction = (hostname, options, callback) => {
+  defaultResolver(hostname).then(
+    (addresses) => {
+      if (addresses.length === 0 || !addresses.every((a) => isPublicAddress(a.address))) {
+        callback(new Error(`${hostname} does not resolve to public addresses`), '', 0);
+      } else if (options.all) {
+        callback(null, addresses);
+      } else {
+        callback(null, addresses[0].address, addresses[0].family);
+      }
+    },
+    (err: NodeJS.ErrnoException) => callback(err, '', 0)
+  );
+};
+
+// A response of any status is returned, redirects included: nothing here follows one.
+function request(url: URL, signal: AbortSignal): Promise<IncomingMessage> {
+  return new Promise((resolve, reject) => {
+    // agent: false so a pooled connection, which would skip the lookup, is never reused.
+    (url.protocol === 'https:' ? https : http).get(url, { agent: false, lookup: publicOnlyLookup, signal }, resolve).on('error', reject);
+  });
+}
+
 // Streams a download to disk with a byte cap and deadline, refusing redirects; a partial file is removed on failure.
 export async function streamToFile(
   url: URL | string,
@@ -79,38 +106,41 @@ export async function streamToFile(
   await mkdir(path.dirname(destPath), { recursive: true });
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), limits.timeoutMs);
+  const failed = () => new HttpError(502, 'DOWNLOAD_FAILED', controller.signal.aborted ? 'The download timed out.' : 'The file could not be downloaded.');
   try {
-    let res: Response;
+    let res: IncomingMessage;
     try {
-      res = await fetch(url, { redirect: 'error', signal: controller.signal });
+      res = await request(new URL(url), controller.signal);
     } catch {
-      throw new HttpError(502, 'DOWNLOAD_FAILED', controller.signal.aborted ? 'The download timed out.' : 'The file could not be downloaded.');
+      throw failed();
     }
-    if (!res.ok || !res.body) throw new HttpError(502, 'DOWNLOAD_FAILED', `The file could not be downloaded (HTTP ${res.status}).`);
-    const declared = Number(res.headers.get('content-length'));
+    const status = res.statusCode ?? 0;
+    if (status < 200 || status >= 300) {
+      res.destroy();
+      throw new HttpError(502, 'DOWNLOAD_FAILED', `The file could not be downloaded (HTTP ${status}).`);
+    }
+    const declared = Number(res.headers['content-length']);
     if (Number.isFinite(declared) && declared > limits.maxBytes) {
+      res.destroy();
       throw new HttpError(413, 'FILE_TOO_LARGE', 'That file is too large.');
     }
 
-    const out = createWriteStream(destPath);
     let bytes = 0;
     try {
-      const reader = res.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        bytes += value.byteLength;
-        if (bytes > limits.maxBytes) {
-          await reader.cancel().catch(() => undefined);
-          throw new HttpError(413, 'FILE_TOO_LARGE', 'That file is too large.');
-        }
-        if (!out.write(value)) await new Promise<void>((r) => out.once('drain', () => r()));
-      }
+      await pipeline(
+        res,
+        async function* (source: AsyncIterable<Buffer>) {
+          for await (const chunk of source) {
+            bytes += chunk.length;
+            if (bytes > limits.maxBytes) throw new HttpError(413, 'FILE_TOO_LARGE', 'That file is too large.');
+            yield chunk;
+          }
+        },
+        createWriteStream(destPath)
+      );
     } catch (err) {
       if (err instanceof HttpError) throw err;
-      throw new HttpError(502, 'DOWNLOAD_FAILED', controller.signal.aborted ? 'The download timed out.' : 'The file could not be downloaded.');
-    } finally {
-      await new Promise<void>((r) => out.end(() => r()));
+      throw failed();
     }
     return { bytes };
   } catch (err) {

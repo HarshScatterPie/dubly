@@ -4,14 +4,15 @@
 
 ```
 Browser (React SPA)
-  │  session cookie (httpOnly) on every /api call; polls project/job state during long work
+  │  session cookie (httpOnly) on every /api call; long-polls project/job state during long work
   ▼
-Dubly server: one Node process (server/index.ts → server/app.ts)
+Dubly server: N Node processes on each machine (server/index.ts → primary.ts → worker.ts → app.ts)
   ├─ Request pipeline: request id + access log → security headers → CORS → JSON (2 MB)
   │                    → requireAuth (token, revocation, per-user rate) → requireWorkspace (tenant)
   │                    → route (rate limits, zod validation) → error normalizer
   ├─ Jobs: dubs and transcriptions run in-process as persisted jobs (server/lib/jobs.ts)
-  │     admission: dub queue (2 per workspace, 4 per server) + heavy-work slots (3) for transcription/captions
+  │     admission: dubs wait in MongoDB, any process with room takes the oldest (2 per workspace across all processes);
+  │     heavy-work slots per process for transcription/captions; budgets follow the machine's cores
   ├─ MongoDB (replica set)  users, sessions, workspaces, projects (+ projectSegments), jobs, invites, shares …
   ├─ GridFS (same database) workspaces/{ws}/projects/{id}/…  (media, served by /api/media from short-lived signed URLs, with Range)
   ├─ Vertex AI Gemini        speech-to-text, translation, line condensing
@@ -20,7 +21,7 @@ Dubly server: one Node process (server/index.ts → server/app.ts)
   └─ Optional Python helpers (server/lipsync venv): CTC alignment, lip-sync, separation, local cloning
 ```
 
-The whole deployment is **one process**. It keeps some state only in memory: membership, account and signed-URL caches, rate-limit counters, the dub queue and heavy-work slots. Running two instances side by side isn't supported (see "Scaling" below). This follows from the current deployment; nothing in the code prevents moving on later.
+Any process can take any request. What must hold across all of them lives in MongoDB, and what stays in memory is either a cache that is cleared everywhere when its record changes, or a limit on this machine's own CPU (see "Scaling" below).
 
 ## Tenancy
 
@@ -90,10 +91,11 @@ A project is one metadata document in `projects` plus a transcript document and 
 
 | Path | Responsibility |
 |---|---|
-| `server/index.ts` | Process lifecycle: listen, reconciliation, sweepers, signals, crash handlers |
+| `server/index.ts`, `primary.ts`, `worker.ts` | Entry point; the supervisor of a machine's processes; each process's lifecycle: listen, reconciliation, sweepers, shutdown, crash handlers |
 | `server/app.ts` | Express app: middleware order, error format, security headers, route mounting |
 | `server/routes/*.ts` | HTTP routes (projects, dub, jobs, share, workspace, tts, usage, settings, profile, health) |
 | `server/lib/jobs.ts`, `dubQueue.ts`, `heavyWork.ts`, `semaphore.ts`, `lifecycle.ts` | Jobs, admission, shutdown |
+| `server/lib/leases.ts`, `cacheBus.ts`, `rateLimit.ts`, `changeWait.ts`, `uploadSessions.ts` | What processes share: capped claims, cache clearing, limits, long polling, chunked uploads |
 | `server/lib/mongo.ts`, `mediaStore.ts`, `routes/media.ts` | The MongoDB connection, transactions, indexes; GridFS files and signed, range-served media URLs |
 | `server/lib/projectRepo.ts`, `projectStorage.ts` | Project persistence and usage/quota |
 | `server/lib/accounts.ts`, `auth.ts`, `authEmail.ts`, `routes/auth.ts` | Accounts, passwords, sessions, email links, sign-in routes |
@@ -117,8 +119,22 @@ The deployment is a single small VM, so capacity is bought back in code rather t
 - **Checksums**: uploads and downloads use MD5 (native) instead of the storage client's JavaScript CRC32C, and files under 32 MB upload in one request.
 - **HTTP**: responses are gzip-compressed, and the hashed files under `/assets` are cached for a year (`index.html` is always revalidated).
 
-## Scaling beyond one instance (not done; what it would take)
-This would add running cost (a load balancer, workers, a shared store) and is not needed while one machine keeps up. A direct-to-storage upload was also considered and left out: `ffprobe` and `ffmpeg` may only read local files (a crafted upload must not make them fetch URLs), so the server would download the object again to validate it and save nothing.
-- Move rate-limit counters and the membership/account caches to a shared store, or accept per-instance limits.
-- Replace the in-memory dub queue and heavy slots with leases in MongoDB. Jobs already persist their state and heartbeat, so ownership would carry over.
-- Give each instance an ID in the job heartbeat and reconcile only other instances' stale jobs (the heartbeat-based rule already allows this).
+## Scaling
+
+More cores or more machines need no code change: a bigger machine raises its own budgets, and more machines only need the same `MONGODB_URI`, a load balancer and `INSTANCE_COUNT`. No sticky sessions are needed. The shared state is all in MongoDB, so nothing new has to be run.
+
+| State | Where it lives | How it holds across processes |
+|---|---|---|
+| Waiting dubs | `jobs` | Any process with room claims the oldest in a transaction; the per-workspace cap is safe because two claims collide on `dubAdmission` |
+| Running jobs | `jobs` | Heartbeat every 15 s; any process settles a job whose heartbeat stopped, exactly once. Cancel requests are read at the next progress write |
+| Limits on money, accounts and email | `rateLimits` | Counted atomically, exactly |
+| Flood ceilings (`RateRule.hot`) | Memory | They run on every request, so each process counts twice its even share. Traffic is spread by connection, not request |
+| Caption renders, voice clips in flight | `leases` | Capped claims that lapse by themselves if a process dies |
+| Session, account, membership, plan, settings, profile and media caches | Memory | Cleared at once where the change happens and, through a change stream on `cacheEvents`, in the other processes |
+| Large uploads | GridFS (`uploads/…`) | Each chunk may land on a different process |
+| Scratch files, voice cache | Local disk | Per machine. A voice cached on one machine is bought again on another; a sweep keeps every folder of an unsettled job, wherever it runs |
+| Transcription and caption CPU slots | Memory | A limit on this machine's own CPU, so it is meant to be local |
+
+The Gemini voice circuit breakers (`geminiPausedUntil`) are per process: each learns of a quota limit by itself, at the cost of one failed call.
+
+A direct-to-storage upload was considered and left out: `ffprobe` and `ffmpeg` may only read local files.

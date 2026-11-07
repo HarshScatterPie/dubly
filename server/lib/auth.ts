@@ -49,8 +49,9 @@ export function readCookie(req: Request, name: string): string | null {
   return null;
 }
 
+// A proxy that ends TLS hides HTTPS from req.secure unless TRUST_PROXY is set, so a site whose public address is https is always Secure.
 export function cookieIsSecure(req: Request): boolean {
-  return env.cookieSecure === 'always' || (env.cookieSecure === 'auto' && req.secure);
+  return env.cookieSecure === 'always' || (env.cookieSecure === 'auto' && (req.secure || env.webOrigin.startsWith('https://')));
 }
 
 // httpOnly (no script can read it), SameSite=Strict (no other site's page can send it), Secure over HTTPS.

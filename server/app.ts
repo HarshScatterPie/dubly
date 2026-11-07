@@ -12,7 +12,7 @@ import { requireAuth, requireWorkspace } from './lib/auth';
 import { pingMongo } from './lib/mongo';
 import { clientIp, rateLimit } from './lib/rateLimit';
 import { rateLimit as ipRateLimit, ipKeyGenerator } from 'express-rate-limit';
-import { rateRules } from './lib/limits';
+import { processShare, rateRules } from './lib/limits';
 import { repoRoot } from './lib/paths';
 import { healthRouter } from './routes/health';
 import { settingsRouter } from './routes/settings';
@@ -148,7 +148,7 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   app.use(
     ipRateLimit({
       windowMs: rateRules.allPerIp.windowMs,
-      limit: rateRules.allPerIp.max,
+      limit: processShare(rateRules.allPerIp.max),
       standardHeaders: 'draft-8',
       legacyHeaders: false,
       keyGenerator: (req) => ipKeyGenerator(clientIp(req) ?? 'unknown'),

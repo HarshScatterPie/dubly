@@ -38,7 +38,7 @@ export const env = {
   mongodbDb: process.env.MONGODB_DB || 'dubly',
   // Where people open Dubly; links in emails (invitations, password resets, email checks) point here.
   webOrigin: process.env.WEB_ORIGIN || 'http://localhost:3000',
-  // Session cookies carry the Secure flag on HTTPS requests; set COOKIE_SECURE=true to require it everywhere (behind TLS), false never.
+  // Session cookies carry the Secure flag on HTTPS requests and whenever WEB_ORIGIN is https; COOKIE_SECURE=true requires it everywhere, false never.
   cookieSecure: (process.env.COOKIE_SECURE === 'true' ? 'always' : process.env.COOKIE_SECURE === 'false' ? 'never' : 'auto') as 'always' | 'never' | 'auto',
   // Self sign-up from the login screen. Off: accounts come only from invitations and server/scripts/create_user.ts.
   allowSignup: process.env.ALLOW_SIGNUP !== 'false',

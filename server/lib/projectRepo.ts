@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { ClientSession } from 'mongodb';
 import type { DubbingProject, LanguageOutput, Plan, SegmentCounts, UserPreferences, UserUsageStats } from '../../src/types';
 import { DEFAULT_VOICE_ID, withPreferenceDefaults } from '../../src/data/preferences';
+import { sharedInvalidator } from './cacheBus';
 import { col, mergeUpdate, withTransaction } from './mongo';
 import { getSignedDownloadUrl } from './mediaStore';
 import { getUser, updateUserProfile } from './accounts';
@@ -538,12 +539,14 @@ function toUserSettings(data: (Partial<ProviderSettings> & { preferences?: Parti
   return { ...DEFAULT_PROVIDER_SETTINGS, ...providers, preferences: withPreferenceDefaults(preferences) };
 }
 
-// Settings are read by every dub, analysis, preview and page load but change only through setSettings on this one process, so a short cache is exact.
+// Settings are read by every dub, analysis, preview and page load but change only through setSettings, which tells every process, so a short cache is exact.
 const SETTINGS_CACHE_MS = 60_000;
 const settingsCache = new Map<string, { settings: UserSettings; at: number }>();
-// Profiles change only through setUserProfile on this one process, which clears the entry; the cache saves a read on every page load.
+// Profiles change only through setUserProfile, which clears the entry in every process; the cache saves a read on every page load.
 const PROFILE_CACHE_MS = 5 * 60_000;
 const profileCache = new Map<string, { profile: UserProfile | null; at: number }>();
+const forgetSettings = sharedInvalidator('settings', (uid) => (uid === null ? settingsCache.clear() : void settingsCache.delete(uid)));
+const forgetProfile = sharedInvalidator('profile', (uid) => (uid === null ? profileCache.clear() : void profileCache.delete(uid)));
 
 // Test seam: forgets cached settings and profiles when the database is wiped.
 export function clearUserCaches(): void {
@@ -569,6 +572,7 @@ export async function setSettings(
   if (update.$set || update.$unset) await settingsCol().updateOne({ _id: uid }, update, { upsert: true });
   const stored = await settingsCol().findOne({ _id: uid }, { projection: { _id: 0 } });
   const saved = toUserSettings((stored ?? undefined) as Parameters<typeof toUserSettings>[0]);
+  forgetSettings(uid);
   settingsCache.set(uid, { settings: saved, at: Date.now() });
   return saved;
 }
@@ -597,6 +601,6 @@ export async function getUserProfile(uid: string): Promise<UserProfile | null> {
 // Saves the name and/or picture (null clears it) the person chose in Settings, and returns the profile as it now reads.
 export async function setUserProfile(uid: string, patch: { name?: string; avatar?: string | null }): Promise<UserProfile> {
   await updateUserProfile(uid, { displayName: patch.name, avatar: patch.avatar });
-  profileCache.delete(uid);
+  forgetProfile(uid);
   return (await getUserProfile(uid))!;
 }

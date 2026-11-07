@@ -93,6 +93,15 @@ function Start-App([string]$url) {
   $env:HOST = '127.0.0.1'
   $env:PORT = "$Port"
   $env:TRUST_PROXY = '1'
+  # Scratch files are users' videos: never inside the OneDrive folder, where they would be synced to the cloud and use up the uplink.
+  $env:DUBLY_TMP_DIR = Join-Path $Prod 'work\tmp'
+  $env:DUBLY_CACHE_DIR = Join-Path $Prod 'work\cache'
+  $oldCache = Join-Path $Repo 'server\cache'
+  # The voice cache is paid-for audio, so it comes along the first time rather than being bought again.
+  if ((Test-Path $oldCache) -and -not (Test-Path $env:DUBLY_CACHE_DIR)) {
+    New-Item -ItemType Directory -Force (Split-Path $env:DUBLY_CACHE_DIR) | Out-Null
+    Copy-Item -Recurse $oldCache $env:DUBLY_CACHE_DIR
+  }
   $env:COOKIE_SECURE = if ($url.StartsWith('https://')) { 'true' } else { '' }
   $env:ALLOW_SIGNUP = 'false'
   $env:WEB_ORIGIN = $url

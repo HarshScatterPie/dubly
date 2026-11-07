@@ -15,6 +15,9 @@ import { loadDevicePrefs } from '../../lib/devicePrefs';
 import { dubbedLanguagesOf, formatClock, LanguageTabs, QualityPanel, StatTile, SyncedScript } from '../DubResult';
 import { ExportPanel } from '../ExportPanel';
 
+// On the page itself: the library's default runs in a blob worker, which the site's Content Security Policy refuses.
+const celebrate = confetti.create(undefined, { resize: true, useWorker: false });
+
 interface StepExportProps {
   project: DubbingProject;
   onDubAnotherLanguage: (targetLangCode: string) => void;
@@ -58,7 +61,7 @@ export const StepExport: React.FC<StepExportProps> = ({
     // Only on screen and only if the user wants it: the studio also finishes, or is restored, while hidden behind another screen.
     if (!loadDevicePrefs().celebrate || rootRef.current?.offsetParent === null) return;
     try {
-      confetti({ particleCount: 80, spread: 70, origin: { y: 0.6 }, colors: ['#F05637', '#D94B2E', '#818CF8', '#C084FC', '#38BDF8'] });
+      void celebrate({ particleCount: 80, spread: 70, origin: { y: 0.6 }, colors: ['#F05637', '#D94B2E', '#818CF8', '#C084FC', '#38BDF8'] });
     } catch {
       // ignore
     }

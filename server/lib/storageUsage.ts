@@ -1,3 +1,4 @@
+import { sharedInvalidator } from './cacheBus';
 import { storedBytesUnder } from './mediaStore';
 import { HttpError } from './httpError';
 import { limits } from './limits';
@@ -6,9 +7,7 @@ import { limits } from './limits';
 const CACHE_MS = 10 * 60 * 1000;
 const cache = new Map<string, { bytes: number; at: number }>();
 
-export function invalidateStorageUsage(workspaceId: string): void {
-  cache.delete(workspaceId);
-}
+export const invalidateStorageUsage = sharedInvalidator('storage', (workspaceId) => (workspaceId === null ? cache.clear() : void cache.delete(workspaceId)));
 
 export async function workspaceStorageBytes(workspaceId: string): Promise<number> {
   const hit = cache.get(workspaceId);

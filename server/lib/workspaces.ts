@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import type { ClientSession } from 'mongodb';
+import { sharedInvalidator } from './cacheBus';
 import { col, isDuplicateKeyError, withTransaction } from './mongo';
 import { AccountError, createUser, deleteUser, getUser, getUserByEmail, isEmail, revokeAllSessions } from './accounts';
 import { log } from './log';
@@ -77,9 +78,7 @@ const CACHE_MS = 15_000;
 const cache = new Map<string, { value: Membership; at: number }>();
 const pendingCreates = new Map<string, Promise<Membership>>();
 
-export function invalidateMembership(uid: string): void {
-  cache.delete(uid);
-}
+export const invalidateMembership = sharedInvalidator('membership', (uid) => (uid === null ? cache.clear() : void cache.delete(uid)));
 
 export function clearMembershipCache(): void {
   cache.clear();

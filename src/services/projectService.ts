@@ -4,7 +4,7 @@
  */
 
 import { DubbingProject, FaceScan, LocalizedSegment, SpeakerProfile, TranscriptSegment, TranslationStyle, VoiceEmotion } from '../types';
-import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiUpload } from '../lib/apiClient';
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiPutBytes, apiUpload } from '../lib/apiClient';
 import { randomId } from '../lib/randomId';
 
 export class ProjectService {
@@ -28,10 +28,6 @@ export class ProjectService {
   }
 
   /** Status, percentage and message only: what a progress bar polls, instead of the whole project (transcript, every language, signed URLs). */
-  public progress(projectId: string): Promise<ProjectProgress> {
-    return apiGet<ProjectProgress>(`/api/projects/${projectId}/progress`);
-  }
-
   public patch(projectId: string, patch: Partial<DubbingProject>): Promise<DubbingProject> {
     return apiPatch<DubbingProject>(`/api/projects/${projectId}`, patch);
   }
@@ -40,8 +36,31 @@ export class ProjectService {
     return apiDelete(`/api/projects/${projectId}`);
   }
 
-  public uploadVideo(projectId: string, file: File): Promise<DubbingProject> {
-    return apiUpload<DubbingProject>(`/api/projects/${projectId}/upload`, file);
+  /** One request for a small file; a large one goes in chunks, so no request is too big for the front door and a dropped connection costs one chunk. */
+  public async uploadVideo(projectId: string, file: File): Promise<DubbingProject> {
+    if (file.size <= SINGLE_REQUEST_UPLOAD_BYTES) return apiUpload<DubbingProject>(`/api/projects/${projectId}/upload`, file);
+
+    const base = `/api/projects/${projectId}/uploads`;
+    const { uploadId, chunkBytes } = await apiPost<{ uploadId: string; chunkBytes: number }>(base, { fileName: file.name, size: file.size, contentType: file.type });
+    const count = Math.ceil(file.size / chunkBytes);
+    let next = 0;
+    const sendChunks = async () => {
+      while (next < count) {
+        const index = next++;
+        const chunk = file.slice(index * chunkBytes, (index + 1) * chunkBytes);
+        for (let attempt = 1; ; attempt++) {
+          try {
+            await apiPutBytes(`${base}/${uploadId}/chunks/${index}`, chunk);
+            break;
+          } catch (err) {
+            if (attempt >= CHUNK_ATTEMPTS) throw err;
+            await pause(1000 * attempt);
+          }
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: PARALLEL_CHUNKS }, sendChunks));
+    return apiPost<DubbingProject>(`${base}/${uploadId}/complete`);
   }
 
   // Samples are named by id; the server looks up the URL itself and fetches nothing else.
@@ -57,23 +76,46 @@ export class ProjectService {
     return apiPost<JobView>(`/api/projects/${projectId}/jobs/${encodeURIComponent(jobId)}/cancel`);
   }
 
-  /** Polls a job until it settles. A few failed polls in a row (a network blip) are tolerated before giving up. */
-  private async waitForJob(projectId: string, jobId: string): Promise<JobView> {
+  /**
+   * Asks over and over until `done`: each request waits on the server until there is something new, so this costs a few requests a
+   * minute however long the work runs. A few failures in a row (a network blip, a restart) are tolerated before giving up;
+   * `signal` stops following, while the work itself carries on.
+   */
+  private async follow<T extends { revision?: string }>(path: string, done: (value: T) => boolean, onUpdate: (value: T) => void, signal?: AbortSignal): Promise<T> {
+    let since = '';
     let failures = 0;
     for (;;) {
+      signal?.throwIfAborted();
       try {
-        const job = await this.getJob(projectId, jobId);
+        const value = await apiGet<T>(since ? `${path}?since=${since}` : path, signal);
         failures = 0;
-        if (job.settled) return job;
+        since = value.revision ?? '';
+        onUpdate(value);
+        if (done(value)) return value;
+        // A server from before long polling answers at once, so the pause is here.
+        if (!value.revision) await pause(1500);
       } catch (err) {
+        signal?.throwIfAborted();
         if (++failures >= 5) throw err;
+        await pause(1500 * failures);
       }
-      await new Promise((resolve) => setTimeout(resolve, 1500));
     }
   }
 
+  /** Follows a job until it settles. */
+  private waitForJob(projectId: string, jobId: string, signal?: AbortSignal, onUpdate: (job: JobView) => void = () => undefined): Promise<JobView> {
+    return this.follow<JobView>(`/api/projects/${projectId}/jobs/${encodeURIComponent(jobId)}`, (job) => job.settled, onUpdate, signal);
+  }
+
+  /** Follows a project's dub until it has completed or failed, reporting each change along the way. */
+  public followProgress(projectId: string, onUpdate: (progress: ProjectProgress) => void, signal?: AbortSignal): Promise<ProjectProgress> {
+    return this.follow<ProjectProgress>(`/api/projects/${projectId}/progress`, (p) => p.status === 'completed' || p.status === 'failed', onUpdate, signal);
+  }
+
   public async transcribe(
-    projectId: string
+    projectId: string,
+    signal?: AbortSignal,
+    onUpdate?: (job: JobView) => void
   ): Promise<{
     transcriptSegments: TranscriptSegment[];
     wordsCount: number;
@@ -88,12 +130,17 @@ export class ProjectService {
   }> {
     // Runs as a background job on the server; this waits for it by polling instead of holding one request open for minutes.
     const { jobId } = await apiPost<{ jobId: string }>(`/api/projects/${projectId}/transcribe`, undefined, { Prefer: 'respond-async' });
-    return this.awaitTranscription(projectId, jobId);
+    return this.awaitTranscription(projectId, jobId, signal, onUpdate);
   }
 
   /** Waits for a transcription job that is already running (one started before a page reload, say) and returns its result. */
-  public async awaitTranscription(projectId: string, jobId: string): Promise<Awaited<ReturnType<ProjectService['transcribe']>>> {
-    const job = await this.waitForJob(projectId, jobId);
+  public async awaitTranscription(
+    projectId: string,
+    jobId: string,
+    signal?: AbortSignal,
+    onUpdate?: (job: JobView) => void
+  ): Promise<Awaited<ReturnType<ProjectService['transcribe']>>> {
+    const job = await this.waitForJob(projectId, jobId, signal, onUpdate);
     if (job.status !== 'completed') throw new Error(job.message || 'Analysis failed. Please try again.');
     const project = await this.get(projectId);
     const result = {
@@ -230,7 +277,7 @@ export class ProjectService {
   }
 }
 
-export type ProjectProgress = Pick<DubbingProject, 'status' | 'progressPercent' | 'currentProcessingMessage' | 'updatedAt'>;
+export type ProjectProgress = Pick<DubbingProject, 'status' | 'progressPercent' | 'currentProcessingMessage' | 'updatedAt'> & { revision?: string };
 
 /** A server job (dub or transcription) as the API reports it. */
 export interface JobView {
@@ -242,6 +289,18 @@ export interface JobView {
   message: string | null;
   errorCode: string | null;
   result: Record<string, unknown> | null;
+  /** What the project shows the user while the job runs. */
+  progressPercent?: number;
+  progressMessage?: string | null;
+  /** Sent back to wait for the next change. */
+  revision?: string;
 }
+
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Above this a file goes in chunks. Two at a time keep the connection busy while one is being stored.
+const SINGLE_REQUEST_UPLOAD_BYTES = 64 * 1024 * 1024;
+const PARALLEL_CHUNKS = 2;
+const CHUNK_ATTEMPTS = 4;
 
 export const projectService = new ProjectService();

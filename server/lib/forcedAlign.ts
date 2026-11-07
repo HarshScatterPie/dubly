@@ -48,10 +48,33 @@ export async function detectSpeechRegions(audioPath: string, totalDuration: numb
   return detectSpeechRegionsByAmplitude(audioPath, totalDuration);
 }
 
+export interface SilenceEvent {
+  type: 'start' | 'end';
+  time: number;
+}
+
+/**
+ * Speech is the inverse of the silences, read in the order ffmpeg printed them. ffmpeg 6 pairs them even at the clip's edges, but
+ * production may run the OS's build, so nothing here relies on that: an end with no start is a clip that opened in silence, and a
+ * start with no end is one that closed in it.
+ */
+export function speechBetweenSilences(events: SilenceEvent[], totalDuration: number): SpeechRegion[] {
+  const regions: SpeechRegion[] = [];
+  let cursor = 0;
+  let inSilence = false;
+  for (const event of events) {
+    const time = Math.max(0, event.time);
+    if (event.type === 'start' && !inSilence && time > cursor + 0.05) regions.push({ start: cursor, end: time });
+    cursor = time;
+    inSilence = event.type === 'start';
+  }
+  if (!inSilence && cursor < totalDuration - 0.05) regions.push({ start: cursor, end: totalDuration });
+  return regions;
+}
+
 function detectSpeechRegionsByAmplitude(audioPath: string, totalDuration: number): Promise<SpeechRegion[]> {
   return new Promise((resolve, reject) => {
-    const silenceStarts: number[] = [];
-    const silenceEnds: number[] = [];
+    const events: SilenceEvent[] = [];
 
     const cmd = ffmpeg({ timeout: 10 * 60 })
       .input(audioPath)
@@ -62,23 +85,13 @@ function detectSpeechRegionsByAmplitude(audioPath: string, totalDuration: number
 
     cmd.on('stderr', (line: string) => {
       const s = /silence_start:\s*(-?[\d.]+)/.exec(line);
-      if (s) silenceStarts.push(parseFloat(s[1]));
+      if (s) events.push({ type: 'start', time: parseFloat(s[1]) });
       const e = /silence_end:\s*(-?[\d.]+)/.exec(line);
-      if (e) silenceEnds.push(parseFloat(e[1]));
+      if (e) events.push({ type: 'end', time: parseFloat(e[1]) });
     });
     cmd.on('error', reject);
     cmd.on('end', () => {
-      // Speech is the inverse of the detected silences.
-      const regions: SpeechRegion[] = [];
-      let cursor = 0;
-      for (let i = 0; i < silenceStarts.length; i++) {
-        const sStart = Math.max(0, silenceStarts[i]);
-        if (sStart > cursor + 0.05) regions.push({ start: cursor, end: sStart });
-        cursor = silenceEnds[i] !== undefined ? silenceEnds[i] : sStart;
-      }
-      if (cursor < totalDuration - 0.05) regions.push({ start: cursor, end: totalDuration });
-
-      const kept = regions.filter((r) => r.end - r.start > 0.12);
+      const kept = speechBetweenSilences(events, totalDuration).filter((r) => r.end - r.start > 0.12);
       // Widen each region to recover the soft onset/decay, without letting neighbours
       // overlap or running past the clip's bounds.
       resolve(

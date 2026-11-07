@@ -311,7 +311,8 @@ describe('dub jobs: crash recovery', () => {
   // A job whose process died: created and charged, never heartbeating again.
   async function orphanedJob(f: Fixture): Promise<DubJob> {
     const { job } = await startDubJob({ workspaceId: f.workspaceId, projectId: f.projectId, userId: f.user.uid, languages: ['hi', 'ta'], minutes: 4 });
-    await patchJob(job.id, { heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
+    // Died while rendering: a job still waiting in the queue has no process to lose.
+    await patchJob(job.id, { status: 'running', heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
     return job;
   }
 

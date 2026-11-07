@@ -1,6 +1,7 @@
 import type { PaidExtra, Plan, PlanId, VoiceEngine } from '../../src/types';
 import { PAID_EXTRAS } from '../../src/lib/planMath';
 import { CLOUD_ENGINES, GEMINI_API_ENGINES, isVoiceEngine } from '../../src/lib/voiceEngines';
+import { sharedInvalidator } from './cacheBus';
 import { col } from './mongo';
 import { env } from './env';
 
@@ -60,6 +61,7 @@ const workspacesCol = () => col<{ _id: string; plan?: string; planUpdatedAt?: st
 const CACHE_MS = 60_000;
 const planCache = new Map<PlanId, { plan: Plan; at: number }>();
 const workspacePlanCache = new Map<string, { id: PlanId; at: number }>();
+const forgetWorkspacePlan = sharedInvalidator('workspace-plan', (id) => (id === null ? workspacePlanCache.clear() : void workspacePlanCache.delete(id)));
 
 export function isPlanId(value: unknown): value is PlanId {
   return typeof value === 'string' && (PLAN_IDS as string[]).includes(value);
@@ -140,7 +142,7 @@ export async function planForWorkspace(workspaceId: string): Promise<Plan> {
 export async function setWorkspacePlan(workspaceId: string, id: PlanId): Promise<void> {
   const result = await workspacesCol().updateOne({ _id: workspaceId }, { $set: { plan: id, planUpdatedAt: new Date().toISOString() } });
   if (!result.matchedCount) throw new Error(`No workspace ${workspaceId}`);
-  workspacePlanCache.delete(workspaceId);
+  forgetWorkspacePlan(workspaceId);
 }
 
 // Test seam: forgets cached plans so a test sees the documents it just wrote.

@@ -99,8 +99,9 @@ export async function getJob(jobId: string): Promise<DubJob | null> {
   return (await jobsCol().findOne({ _id: jobId }, { projection: { _id: 0 } })) as DubJob | null;
 }
 
-export function isStale(job: Pick<DubJob, 'heartbeatAt'>, now = Date.now()): boolean {
-  return now - new Date(job.heartbeatAt).getTime() > STALE_AFTER_MS;
+// Whether the process running a job is gone. A queued job has no process behind it: it waits in the database, however long that takes.
+export function isStale(job: Pick<DubJob, 'heartbeatAt' | 'status'>, now = Date.now()): boolean {
+  return job.status !== 'queued' && now - new Date(job.heartbeatAt).getTime() > STALE_AFTER_MS;
 }
 
 export interface StartDubJobInput {
@@ -168,7 +169,7 @@ async function startDubJobOnce(input: StartDubJobInput): Promise<{ job: DubJob; 
       projectId: input.projectId,
       workspaceId: input.workspaceId,
       userId: input.userId,
-      // Admission (server/lib/dubQueue.ts) moves it to running once a slot is free.
+      // Admission (claimNextDubJob) moves it to running once a slot is free.
       status: 'queued',
       stage: 'queued',
       progress: 5,
@@ -302,19 +303,62 @@ export function toClientJob(job: DubJob) {
   };
 }
 
-// Marks an admitted job running; false if it was settled, cancelled or lost the project while waiting, so it must not run.
-export async function markJobStarted(job: Pick<DubJob, 'id' | 'workspaceId' | 'projectId'>): Promise<boolean> {
+type Admission = { outcome: 'started'; job: DubJob } | { outcome: 'workspace-full' | 'taken' | 'orphaned' };
+
+// One waiting job, moved to running if its workspace has room. Every process admits through here, so the cap has to hold between them.
+async function admitQueuedJob(jobId: string, perWorkspace: number): Promise<Admission> {
+  return withTransaction(async (session): Promise<Admission> => {
+    const stored = await getJobIn(jobId, session);
+    // Started by another process, or cancelled while it waited (the cancel request settles it).
+    if (!stored || stored.settled || stored.status !== 'queued' || stored.cancelRequested) return { outcome: 'taken' };
+    // Two processes admitting for one workspace collide on this write, and the loser's retry sees the winner's job in the count below.
+    await col<{ _id: string; admissions: number }>('dubAdmission').updateOne({ _id: stored.workspaceId }, { $inc: { admissions: 1 } }, { upsert: true, session });
+    const project = await loadProjectMeta(stored.workspaceId, stored.projectId, session);
+    if (!project || project.activeJobId !== jobId) return { outcome: 'orphaned' };
+    const runningInWorkspace = await jobsCol().countDocuments({ workspaceId: stored.workspaceId, type: 'dub', status: 'running', settled: false }, { session });
+    if (runningInWorkspace >= perWorkspace) return { outcome: 'workspace-full' };
+    const now = new Date().toISOString();
+    const started = { status: 'running', stage: 'starting', startedAt: now, heartbeatAt: now } as const;
+    await jobsCol().updateOne({ _id: jobId }, { $set: started }, { session });
+    await projectsCol().updateOne(
+      { _id: stored.projectId, workspaceId: stored.workspaceId },
+      { $set: { currentProcessingMessage: 'Preparing dubbing pipeline...', updatedAt: now } },
+      { session }
+    );
+    return { outcome: 'started', job: { ...stored, ...started } };
+  });
+}
+
+// How far down the queue one pass looks for a workspace with room; the oldest are always tried first.
+const QUEUE_SCAN_LIMIT = 100;
+
+// Takes the oldest waiting dub whose workspace has room, moving it to running for this process; null when none can start.
+export async function claimNextDubJob(perWorkspace: number): Promise<DubJob | null> {
+  const waiting = await jobsCol()
+    .find({ type: 'dub', status: 'queued', settled: false }, { projection: { workspaceId: 1 } })
+    .sort({ createdAt: 1 })
+    .limit(QUEUE_SCAN_LIMIT)
+    .toArray();
+  const full = new Set<string>();
+  for (const { _id: jobId, workspaceId } of waiting) {
+    if (full.has(workspaceId)) continue;
+    const admission = await admitQueuedJob(jobId, perWorkspace);
+    if (admission.outcome === 'started') return admission.job;
+    if (admission.outcome === 'workspace-full') full.add(workspaceId);
+    // Its project was deleted or taken over while it waited: it can never run, so the reserved minutes go back.
+    if (admission.outcome === 'orphaned') await settleInterruptedJob(jobId);
+  }
+  return null;
+}
+
+// Says on the project that its job is waiting, unless a process has picked the job up in the meantime; false in that case.
+export async function noteJobQueued(job: Pick<DubJob, 'id' | 'workspaceId' | 'projectId'>, message: string): Promise<boolean> {
   return withTransaction(async (session) => {
     const stored = await getJobIn(job.id, session);
-    const project = await loadProjectMeta(job.workspaceId, job.projectId, session);
-    if (!stored || stored.settled || !project || project.activeJobId !== job.id) return false;
-    // Cancelled while it waited: it never starts (the cancel request settles it).
-    if (stored.cancelRequested) return false;
-    const now = new Date().toISOString();
-    await jobsCol().updateOne({ _id: job.id }, { $set: { status: 'running', stage: 'starting', startedAt: now, heartbeatAt: now } }, { session });
+    if (!stored || stored.settled || stored.status !== 'queued') return false;
     await projectsCol().updateOne(
-      { _id: job.projectId, workspaceId: job.workspaceId },
-      { $set: { currentProcessingMessage: 'Preparing dubbing pipeline...', updatedAt: now } },
+      { _id: job.projectId, workspaceId: job.workspaceId, activeJobId: job.id },
+      { $set: { currentProcessingMessage: message, updatedAt: new Date().toISOString() } },
       { session }
     );
     return true;
@@ -420,34 +464,20 @@ export async function settleInterruptedJob(jobId: string): Promise<boolean> {
   return settled;
 }
 
-// Settles jobs whose heartbeat stopped as interrupted, or re-queues ones that never started when requeue is given; exclude lists live local jobs.
-export async function reconcileStaleJobs(
-  exclude: ReadonlySet<string> = new Set(),
-  now = Date.now(),
-  requeue?: (job: DubJob) => void
-): Promise<string[]> {
-  const unsettled = (await jobsCol().find({ settled: false }, { projection: { _id: 0 } }).toArray()) as DubJob[];
+// Settles running jobs whose heartbeat stopped as interrupted; exclude lists live local jobs. Safe in every process: a job settles once.
+export async function reconcileStaleJobs(exclude: ReadonlySet<string> = new Set(), now = Date.now()): Promise<string[]> {
+  const unsettled = (await jobsCol().find({ settled: false, status: { $ne: 'queued' } }, { projection: { _id: 0 } }).toArray()) as DubJob[];
   const stale = unsettled.filter((job) => !exclude.has(job.id) && isStale(job, now)).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
   const recovered: string[] = [];
   for (const job of stale) {
-    if (requeue && job.status === 'queued') {
-      const claimed = await claimQueuedJob(job.id, now);
-      if (claimed) requeue(claimed);
-      continue;
-    }
     if (await settleInterruptedJob(job.id)) recovered.push(job.id);
   }
   return recovered;
 }
 
-// Takes over a stale queued job for this process (fresh heartbeat), unless someone else already did: one conditional write.
-async function claimQueuedJob(jobId: string, now: number): Promise<DubJob | null> {
-  const staleBefore = new Date(now - STALE_AFTER_MS).toISOString();
-  return (await jobsCol().findOneAndUpdate(
-    { _id: jobId, settled: false, status: 'queued', heartbeatAt: { $lt: staleBefore } },
-    { $set: { heartbeatAt: new Date().toISOString() } },
-    { returnDocument: 'after', projection: { _id: 0 } }
-  )) as DubJob | null;
+// Every job not yet settled, on any process: its scratch folder may be in use, wherever it is running.
+export async function unsettledJobIds(): Promise<string[]> {
+  return (await jobsCol().find({ settled: false }, { projection: { _id: 1 } }).toArray()).map((job) => job._id);
 }
 
 // Provider usage of a run, kept on the job for cost reporting; best-effort, never fails the job.

@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, rename, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { cacheDir, serverRoot } from './paths';
@@ -43,7 +43,10 @@ ${systemConfig}${dirs.map((dir) => `  <dir>${xml(dir)}</dir>`).join('\n')}
   <cachedir>${xml(fontCacheDir)}</cachedir>
 </fontconfig>
 `;
-    await writeFile(configPath, body, 'utf8');
+    // Moved into place whole: another process may be starting a render against this file right now.
+    const partial = `${configPath}.${process.pid}.part`;
+    await writeFile(partial, body, 'utf8');
+    await rename(partial, configPath);
     return configPath;
   })().catch((err) => {
     written = null;

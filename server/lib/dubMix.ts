@@ -138,9 +138,9 @@ async function shapeTake(audio: Buffer, tempo: number, pitch: number): Promise<F
       clearTimeout(timer);
       if (code !== 0) return reject(new Error(`shaping a take failed: ${stderr}`));
       const bytes = Buffer.concat(chunks);
-      const samples = new Float32Array(Math.floor(bytes.length / 4));
-      for (let i = 0; i < samples.length; i++) samples[i] = bytes.readFloatLE(i * 4);
-      resolve(samples);
+      // Copied out rather than viewed in place: a Buffer can sit anywhere in Node's shared pool, and a Float32Array needs a 4-byte-aligned start.
+      const whole = bytes.length - (bytes.length % 4);
+      resolve(new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + whole)));
     });
     proc.stdin.end(audio);
   });

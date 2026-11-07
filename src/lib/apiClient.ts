@@ -87,8 +87,8 @@ export async function authFetch<T>(path: string, opts: { method?: string; body?:
   return (await res.json().catch(() => undefined)) as T;
 }
 
-export async function apiGet<T>(path: string): Promise<T> {
-  return handle<T>(await send(path, {}));
+export async function apiGet<T>(path: string, signal?: AbortSignal): Promise<T> {
+  return handle<T>(await send(path, { signal }));
 }
 
 export async function apiPost<T>(path: string, body?: unknown, extraHeaders: Record<string, string> = {}): Promise<T> {
@@ -121,6 +121,11 @@ export async function apiPut<T>(path: string, body: unknown): Promise<T> {
 
 export async function apiDelete(path: string): Promise<void> {
   await handle<void>(await send(path, { method: 'DELETE' }));
+}
+
+/** Sends raw bytes (one piece of a large upload). */
+export async function apiPutBytes(path: string, body: Blob): Promise<void> {
+  await handle<void>(await send(path, { method: 'PUT', headers: { 'Content-Type': 'application/octet-stream' }, body }));
 }
 
 export async function apiUpload<T>(path: string, file: File): Promise<T> {

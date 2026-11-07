@@ -4,6 +4,7 @@ import { stat } from 'node:fs/promises';
 import { Readable, Transform, type TransformCallback } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { GridFSBucket, type GridFSFile, type ObjectId } from 'mongodb';
+import { sharedInvalidator } from './cacheBus';
 import { col, mongoDb } from './mongo';
 
 /**
@@ -99,8 +100,21 @@ export async function uploadBufferToStorage(storagePath: string, buffer: Buffer,
   await writeFrom(storagePath, Readable.from([buffer]), contentType, buffer.length);
 }
 
+/** Stores a stream that must be exactly `expectedBytes` long, stopping as soon as it runs over rather than taking whatever is sent. */
+export async function uploadStreamToStorage(storagePath: string, source: Readable, contentType: string, expectedBytes: number): Promise<void> {
+  async function* capped(): AsyncGenerator<Buffer> {
+    let bytes = 0;
+    for await (const chunk of source as AsyncIterable<Buffer>) {
+      bytes += chunk.length;
+      if (bytes > expectedBytes) throw new Error(`Upload of ${storagePath} ran past ${expectedBytes} bytes`);
+      yield chunk;
+    }
+  }
+  await writeFrom(storagePath, Readable.from(capped(), { objectMode: false }), contentType, expectedBytes);
+}
+
 // A player seeking through a video sends many range requests for the same file; its record is kept briefly instead of read for each.
-// Every write and delete in this process clears the entry (invalidateSignedUrlCache), so a re-render is never served stale.
+// Every write and delete clears the entry in every process (invalidateSignedUrlCache), so a re-render is not served stale.
 const FILE_CACHE_MS = 30_000;
 const fileCache = new Map<string, { file: MediaFile; at: number }>();
 // Bumped by every invalidation: a lookup that was already reading when a path changed does not cache what it read.
@@ -141,6 +155,25 @@ export async function downloadFileFromStorage(storagePath: string, destination: 
   if (hasher.bytes !== file.length || (expected && hasher.hash.digest('hex') !== expected)) {
     throw new Error(`Stored file ${storagePath} failed its integrity check`);
   }
+}
+
+/** Joins stored files, in order, into one local file, verifying each one's checksum on the way. */
+export async function assembleStoredFiles(storagePaths: string[], destination: string): Promise<void> {
+  async function* pieces() {
+    for (const storagePath of storagePaths) {
+      const file = await findStoredFile(storagePath);
+      if (!file) throw new StoredFileMissingError(storagePath);
+      const hash = createHash('sha256');
+      let bytes = 0;
+      for await (const chunk of bucket().openDownloadStream(file._id) as AsyncIterable<Buffer>) {
+        hash.update(chunk);
+        bytes += chunk.length;
+        yield chunk;
+      }
+      if (bytes !== file.length || hash.digest('hex') !== file.metadata?.sha256) throw new Error(`Stored file ${storagePath} failed its integrity check`);
+    }
+  }
+  await pipeline(pieces, createWriteStream(destination));
 }
 
 /** A stream of a stored file's bytes; `end` is inclusive, like an HTTP Range. */
@@ -208,6 +241,7 @@ const sealKey = (k: Buffer) => createHmac('sha256', k).update('media-path-seal')
 
 // The path in a media URL is sealed, so a link says nothing about workspaces, projects or accounts. Its IV comes from the path, so
 // a path always seals to the same text: the URL stays stable for the browser's cache, and nothing but "same file" can be learned.
+// Repeating an IV only harms GCM with different plaintext, and here different paths get different IVs short of a 96-bit HMAC collision.
 function sealPath(k: Buffer, storagePath: string): string {
   const iv = createHmac('sha256', k).update(`iv\n${storagePath}`).digest().subarray(0, 12);
   const cipher = createCipheriv('aes-256-gcm', sealKey(k), iv);
@@ -290,10 +324,16 @@ export async function signReadUrl(storagePath: string, expiresAtMs: number, down
 }
 
 /** Call after overwriting or deleting a path, so the next read mints a fresh URL and finds the new version (its id, and so its ETag, change). */
-export function invalidateSignedUrlCache(storagePath: string): void {
+export const invalidateSignedUrlCache = sharedInvalidator('media', (storagePath) => {
+  if (storagePath === null) {
+    signedUrlCache.clear();
+    fileCache.clear();
+    fileCacheEpoch++;
+    return;
+  }
   signedUrlCache.delete(storagePath);
   forgetStoredFile(storagePath);
-}
+});
 
 /** Drops only the remembered file record (its signed URL stays valid), e.g. when reading the version it named failed. */
 export function forgetStoredFile(storagePath: string): void {

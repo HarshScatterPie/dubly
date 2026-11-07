@@ -60,6 +60,12 @@ export const COLLECTIONS = [
   'shares',
   'quotaRequests',
   'system',
+  'rateLimits',
+  'leases',
+  'cacheEvents',
+  'dubAdmission',
+  'uploadSessions',
+  'captionFailures',
 ] as const;
 export type CollectionName = (typeof COLLECTIONS)[number];
 
@@ -95,6 +101,9 @@ const INDEXES: Partial<Record<CollectionName, IndexDescription[]>> = {
   jobs: [
     { key: { settled: 1 }, name: 'settled' },
     { key: { finishedAt: 1 }, name: 'finished' },
+    // The dub queue: oldest waiting first, and what a workspace has running.
+    { key: { type: 1, status: 1, createdAt: 1 }, name: 'queue' },
+    { key: { workspaceId: 1, type: 1, status: 1 }, name: 'workspace_running' },
   ],
   jobIdempotency: [{ key: { createdAt: 1 }, name: 'created' }],
   invites: [
@@ -107,6 +116,12 @@ const INDEXES: Partial<Record<CollectionName, IndexDescription[]>> = {
     { key: { expiresAt: 1 }, name: 'expires' },
   ],
   quotaRequests: [{ key: { workspaceId: 1, createdAt: -1 }, name: 'workspace_created' }],
+  // Shared counters and claims clean themselves up; nothing here outlives its window by more than TTL's own lag.
+  rateLimits: [{ key: { expireAt: 1 }, expireAfterSeconds: 0, name: 'ttl' }],
+  leases: [{ key: { expireAt: 1 }, expireAfterSeconds: 0, name: 'ttl' }],
+  cacheEvents: [{ key: { at: 1 }, expireAfterSeconds: 60 * 60, name: 'ttl' }],
+  uploadSessions: [{ key: { expiresAt: 1 }, name: 'expires' }],
+  captionFailures: [{ key: { expireAt: 1 }, expireAfterSeconds: 0, name: 'ttl' }],
 };
 
 export async function ensureIndexes(): Promise<void> {

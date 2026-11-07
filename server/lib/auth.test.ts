@@ -1,6 +1,9 @@
+import type { Request } from 'express';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { col, createUser, resetDatabase, signIn, startApi, type TestApi } from '../test/helpers';
 import { createSession, deleteUser, hashPassword, setUserDisabled, sha256, verifyPassword } from './accounts';
+import { cookieIsSecure } from './auth';
+import { env } from './env';
 import { setMailSenderForTests, type MailMessage } from './mailer';
 import { getSignedDownloadUrl, signReadUrl, uploadBufferToStorage } from './mediaStore';
 
@@ -33,6 +36,24 @@ const nextMail = async (subject: RegExp = /./, to?: string): Promise<MailMessage
 };
 const linkToken = (message: MailMessage, param: 'verify' | 'reset') => decodeURIComponent(new RegExp(`[?&]${param}=([^\\s&"]+)`).exec(message.text)![1]);
 const cookieOf = (headers: Headers) => (headers.get('set-cookie') || '').split(';')[0];
+
+describe('the Secure flag on cookies', () => {
+  const plainRequest = { secure: false } as Request;
+
+  it('stays on behind a proxy that hides HTTPS, when the public address is https', () => {
+    const { webOrigin, cookieSecure } = env;
+    try {
+      env.cookieSecure = 'auto';
+      env.webOrigin = 'https://dubly.example.com';
+      expect(cookieIsSecure(plainRequest)).toBe(true);
+      env.webOrigin = 'http://localhost:3000';
+      expect(cookieIsSecure(plainRequest)).toBe(false);
+      expect(cookieIsSecure({ secure: true } as Request)).toBe(true);
+    } finally {
+      Object.assign(env, { webOrigin, cookieSecure });
+    }
+  });
+});
 
 describe('passwords', () => {
   it('hashes with scrypt and a fresh salt, and verifies only the right password', async () => {

@@ -1,4 +1,4 @@
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -16,6 +16,8 @@ export const TIMEOUT = {
   render: minutes('FFMPEG_RENDER_TIMEOUT_MINUTES', 120),
 };
 const PROBE_TIMEOUT_MS = 60_000;
+// An upload waits for its thumbnail, and a thumbnail is only decoration: a stuck one must cost seconds, not the minutes other steps may take.
+const THUMBNAIL_TIMEOUT_MS = 30_000;
 
 function fromFile(input: string, timeoutSeconds = TIMEOUT.render) {
   return ffmpeg({ timeout: timeoutSeconds }).input(input).inputOptions(SAFE_INPUT_OPTIONS);
@@ -416,22 +418,26 @@ export function extractThumbnail(
   // lead-in frame — but never past the clip's own length for short samples.
   const timestamp = Math.max(0, Math.min(atSeconds, Math.max(0, durationSeconds - 0.1)));
   return new Promise((resolve, reject) => {
-    fromFile(videoPath, TIMEOUT.quick)
-      .on('error', reject)
-      .on('end', () => resolve())
-      .screenshots({
-        timestamps: [timestamp],
-        filename: path.basename(outputJpgPath),
-        folder: path.dirname(outputJpgPath),
-        size: '480x?',
-      });
+    // Run directly with nothing to read back: a fifth of the time fluent-ffmpeg takes, and finished the moment the process exits.
+    const proc = spawn(
+      ffmpegPath,
+      [
+        ...['-v', 'error', '-nostdin', ...SAFE_INPUT_OPTIONS, '-ss', timestamp.toFixed(3), '-i', videoPath],
+        ...['-frames:v', '1', '-update', '1', '-vf', 'scale=480:-2', '-y', outputJpgPath],
+      ],
+      { stdio: 'ignore', windowsHide: true, timeout: THUMBNAIL_TIMEOUT_MS }
+    );
+    proc.once('error', reject);
+    proc.once('exit', (code, signal) => (code === 0 ? resolve() : reject(new Error(`thumbnail failed (${signal ?? code})`))));
   });
 }
 
-/** Escapes a filesystem path for use inside an ffmpeg filtergraph argument (colons and backslashes are filtergraph syntax characters — this matters especially on Windows, where drive-letter paths like `C:\...` would otherwise be misparsed). */
+/** Escapes a filesystem path for use inside a single-quoted ffmpeg filtergraph argument (colons, backslashes and quotes are filtergraph syntax characters — this matters especially on Windows, where drive-letter paths like `C:\...` would otherwise be misparsed). */
 function escapeFilterPath(p: string): string {
   // One pass, so no backslash is left unescaped: Windows separators become forward slashes and colons are escaped.
-  return p.replace(/[\\:]/g, (c) => (c === ':' ? '\\:' : '/'));
+  // ffmpeg parses this twice. A quote needs \' for the option parser, and nothing can be escaped inside quotes for the graph parser,
+  // so the quoted string is closed around it: \' stays inside the quotes, \' outside them is the quote itself, and ' reopens them.
+  return p.replace(/[\\:']/g, (c) => (c === ':' ? '\\:' : c === "'" ? "\\'\\''" : '/'));
 }
 
 /**

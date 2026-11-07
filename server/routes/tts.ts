@@ -14,6 +14,7 @@ import { getWavDurationSeconds } from '../lib/audioUtils';
 import { getSettings, QuotaExceededError, reserveVoiceMinutes, settleVoiceMinutes } from '../lib/projectRepo';
 import { planForWorkspace } from '../lib/plans';
 import { tmpDir } from '../lib/paths';
+import { acquireLease, releaseLease } from '../lib/leases';
 import { rateLimit } from '../lib/rateLimit';
 import { limits, rateRules } from '../lib/limits';
 import { log } from '../lib/log';
@@ -35,8 +36,10 @@ export function voiceHoldMinutes(text: string): number {
 // One clip is one request to Google, which takes 5,000 bytes of text: about 5,000 letters of English, 1,600 of an Indian script.
 export const MAX_CLIP_TEXT_BYTES = 5000;
 
-// Charged clips being made per workspace; with the hold, this bounds how far a burst of requests can voice past the allowance.
-const clipsInFlight = new Map<string, number>();
+// Charged clips being made per workspace, across every process; with the hold, this bounds how far a burst of requests can voice past the
+// allowance. Past this long a clip's place frees itself, in case its process died; one request to Google takes seconds.
+const CLIP_LEASE_MS = 2 * 60_000;
+const clipLease = (workspaceId: string) => `voice-clips:${workspaceId}`;
 
 // Test seam: lets the charging run without a voice provider.
 let synthesize = routeSynthesizeSpeech;
@@ -68,7 +71,7 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
   const workspaceId = req.workspaceId!;
 
   const jobDir = path.join(tmpDir, 'tts', randomUUID());
-  let counted = false;
+  let clipToken: string | null = null;
   let hold: { minutes: number; period: string } | null = null;
   // Swaps the hold for the seconds voiced, once; a failure settles it with 0, a full refund. The early answers below hold nothing.
   const settle = async (voicedSeconds: number) => {
@@ -92,13 +95,12 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
     // cached take, where any other text or direction would be a new one.
     const charged = !(SAMPLE_QUOTES.has(text.trim()) && spokenText === text && !delivery);
     if (charged) {
-      if ((clipsInFlight.get(workspaceId) ?? 0) >= limits.voiceClipsInFlightPerWorkspace) {
+      clipToken = await acquireLease(clipLease(workspaceId), CLIP_LEASE_MS, limits.voiceClipsInFlightPerWorkspace);
+      if (!clipToken) {
         res.setHeader('Retry-After', '2');
         res.status(429).json({ error: 'Another voice clip is still being made in this workspace. Try again in a moment.', code: 'VOICE_BUSY', retryAfterSeconds: 2 });
         return;
       }
-      clipsInFlight.set(workspaceId, (clipsInFlight.get(workspaceId) ?? 0) + 1);
-      counted = true;
       const minutes = voiceHoldMinutes(spokenText);
       try {
         hold = { minutes, period: await reserveVoiceMinutes(workspaceId, minutes) };
@@ -134,11 +136,7 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
     await settle(0).catch((refundErr) => log.error('voice_minutes_refund_failed', refundErr, { workspaceId }));
     res.status(500).json({ error: (err as Error).message });
   } finally {
-    if (counted) {
-      const left = (clipsInFlight.get(workspaceId) ?? 1) - 1;
-      if (left > 0) clipsInFlight.set(workspaceId, left);
-      else clipsInFlight.delete(workspaceId);
-    }
+    if (clipToken) await releaseLease(clipLease(workspaceId), clipToken).catch(() => undefined);
     await rm(jobDir, { recursive: true, force: true }).catch(() => undefined);
   }
 });

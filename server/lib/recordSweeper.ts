@@ -1,5 +1,6 @@
 import { col, type CollectionName } from './mongo';
 import { log } from './log';
+import { sweepExpiredUploads } from './uploadSessions';
 
 const DAY = 24 * 60 * 60 * 1000;
 
@@ -32,6 +33,8 @@ export async function sweepExpiredRecords(now = Date.now(), batch = 300): Promis
     const result = await col<{ _id: string }>(rule.collection).deleteMany({ _id: { $in: ids } });
     deleted[rule.collection] = result.deletedCount;
   }
+  const uploads = await sweepExpiredUploads(now, batch);
+  if (uploads) deleted.uploadSessions = uploads;
   if (Object.keys(deleted).length) log.info('records_swept', { deleted });
   return deleted;
 }

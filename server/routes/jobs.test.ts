@@ -276,7 +276,26 @@ describe('GET /api/projects/:id/progress', () => {
       progressPercent: 42,
       currentProcessingMessage: '[1/2] Hindi: generating neural voice audio (4/10)...',
       updatedAt: expect.any(String),
+      revision: expect.any(String),
     });
+  });
+
+  it('waits for news when given the revision it last saw, and answers at once when the dub ends', async () => {
+    const f = await seed();
+    await writeProject(f.workspaceId, f.projectId, { status: 'processing', progressPercent: 42 });
+    const headers = { Authorization: `Bearer ${f.user.token}` };
+    const url = `${api.baseUrl}/api/projects/${f.projectId}/progress`;
+    const { revision } = await (await fetch(url, { headers })).json();
+
+    const started = Date.now();
+    const waiting = fetch(`${url}?since=${revision}`, { headers });
+    await new Promise((r) => setTimeout(r, 300));
+    await writeProject(f.workspaceId, f.projectId, { status: 'completed', progressPercent: 100 });
+
+    const res = await waiting;
+    expect((await res.json()).status).toBe('completed');
+    // Held until the next look, not for the full hold.
+    expect(Date.now() - started).toBeLessThan(4000);
   });
 
   it('tracks the full project through a finished dub', async () => {

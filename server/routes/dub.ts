@@ -21,7 +21,7 @@ import {
   jobDirFor,
   JobConflictError,
   JobSupersededError,
-  markJobStarted,
+  noteJobQueued,
   markRunningHere,
   recordJobUsage,
   settleJob,
@@ -31,7 +31,9 @@ import {
   type DubJob,
 } from '../lib/jobs';
 import { refuseWhenDraining, trackBackgroundWork } from '../lib/lifecycle';
-import { enqueueDub, queueStats } from '../lib/dubQueue';
+import { dubsRunningHere, setDubRunner, wakeDubQueue } from '../lib/dubQueue';
+import { acquireLease, isLeaseHeld, keepLeaseAlive, releaseLease } from '../lib/leases';
+import { col } from '../lib/mongo';
 import { rateLimit } from '../lib/rateLimit';
 import { maxTextCharsFor, rateRules } from '../lib/limits';
 import { acquireHeavySlot } from '../lib/heavyWork';
@@ -201,12 +203,10 @@ dubRouter.post('/:id/dub', refuseWhenDraining, dubLimit, validateBody(schemas.du
     rate
   );
   if (!started) return;
-  res.status(202).json({ status: 'processing', jobId: started.job.id });
-
   // The same request replayed: its job is already running (or finished), so nothing new is started.
-  if (started.replayed) return;
-  // The client polls GET /api/projects/:id for progress; the job starts as soon as the queue admits it.
-  enqueueDubJob(started.job);
+  // Otherwise the client follows the project's progress; the job starts as soon as a process has room for it.
+  if (!started.replayed) await enqueueDubJob(started.job);
+  res.status(202).json({ status: 'processing', jobId: started.job.id });
 });
 
 // The extras a dub started now gets under the workspace plan, and how fast they make it use the allowance.
@@ -322,40 +322,17 @@ dubRouter.post('/:id/languages/:code/retake', refuseWhenDraining, dubLimit, asyn
     rate
   );
   if (!started) return;
+  if (!started.replayed) await enqueueDubJob(started.job);
   res.status(202).json({ status: 'processing', jobId: started.job.id, changedLines: plan.changedLineIds.length, minutes });
-  if (started.replayed) return;
-  enqueueDubJob(started.job);
 });
 
 export const QUEUED_MESSAGE = 'Waiting in the queue: other dubs in this workspace are rendering. Yours starts automatically.';
 
-// Queues a job; this process then owns it (fresh heartbeat, awaited on shutdown) until it finishes or is released.
-export function enqueueDubJob(job: DubJob): void {
-  const stopHeartbeat = startHeartbeat(job.id);
-  const unmark = markRunningHere(job.id);
-  let finished!: () => void;
-  void trackBackgroundWork(new Promise<void>((resolve) => (finished = resolve)));
-  const release = () => {
-    stopHeartbeat();
-    unmark();
-    finished();
-  };
-  const { startedImmediately } = enqueueDub({
-    jobId: job.id,
-    workspaceId: job.workspaceId,
-    start: async () => {
-      try {
-        if (await markJobStarted(job)) await runDubJob(job, pipelineImpl);
-      } finally {
-        release();
-      }
-    },
-    abandon: release,
-  });
-  if (!startedImmediately) {
-    log.info('job_queued', { type: 'dub', jobId: job.id, workspaceId: job.workspaceId, ...queueStats() });
-    void writeProjectForJob(job, { currentProcessingMessage: QUEUED_MESSAGE }).catch(() => undefined);
-  }
+// Offers a new job to the queue. It may start here, on another process, or wait for a place; a job that waits says so on its project.
+async function enqueueDubJob(job: DubJob): Promise<void> {
+  await wakeDubQueue();
+  const waiting = await noteJobQueued(job, QUEUED_MESSAGE).catch(() => false);
+  if (waiting) log.info('job_queued', { type: 'dub', jobId: job.id, workspaceId: job.workspaceId, runningHere: dubsRunningHere() });
 }
 
 // Test seam: lets job tests hold a run open or fail it on cue without real media, providers or ffmpeg.
@@ -363,6 +340,18 @@ let pipelineImpl: (job: DubJob) => Promise<PipelineResult> = (job) => runDubPipe
 export function setDubPipelineForTests(fn: ((job: DubJob) => Promise<PipelineResult>) | null): void {
   pipelineImpl = fn ?? ((job) => runDubPipeline(job));
 }
+
+// From admission until it settles, this process owns the job: it keeps the heartbeat fresh, and shutdown waits for it.
+setDubRunner(async (job) => {
+  const stopHeartbeat = startHeartbeat(job.id);
+  const unmark = markRunningHere(job.id);
+  try {
+    await trackBackgroundWork(runDubJob(job, pipelineImpl));
+  } finally {
+    stopHeartbeat();
+    unmark();
+  }
+});
 
 // Runs a job's pipeline and settles it exactly once: failed languages are refunded, and a pipeline crash refunds everything.
 export function runDubJob(job: DubJob, pipeline: (job: DubJob) => Promise<PipelineResult> = runDubPipeline): Promise<void> {
@@ -1333,8 +1322,12 @@ dubRouter.get('/:id/export-video/captions', async (req, res) => {
 
 type CaptionedState = { status: 'ready'; url: string } | { status: 'rendering' } | { status: 'failed'; error: string };
 
-// Captioned renders in progress (or just failed) on this server, by storage path.
-const captionRenders = new Map<string, { promise: Promise<void>; error?: string; failedAt?: number }>();
+// A render in progress is a lease, so any process can answer the client's polls and a render whose process died frees itself.
+const CAPTION_RENDER_LEASE_MS = 60_000;
+const captionRenderLease = (captionedStoragePath: string) => `caption-render:${captionedStoragePath}`;
+// A failure waits here for the client's next poll, wherever that lands.
+const CAPTION_FAILURE_KEPT_MS = 10 * 60_000;
+const captionFailures = () => col<{ _id: string; error: string; expireAt: Date }>('captionFailures');
 
 /**
  * Where a language's captioned video stands, starting its render when asked to and none is
@@ -1351,29 +1344,32 @@ async function captionedExportState(
   start: boolean
 ): Promise<CaptionedState> {
   const captionedStoragePath = captionedStoragePathFor(workspaceId, projectId, languageCode);
-  const running = captionRenders.get(captionedStoragePath);
-  if (running?.error) {
-    captionRenders.delete(captionedStoragePath);
-    return { status: 'failed', error: running.error };
-  }
-  if (running) return { status: 'rendering' };
+  const lease = captionRenderLease(captionedStoragePath);
+  // Reported once, then forgotten so a retry starts afresh.
+  const failure = await captionFailures().findOneAndDelete({ _id: captionedStoragePath });
+  if (failure) return { status: 'failed', error: failure.error };
+  if (await isLeaseHeld(lease)) return { status: 'rendering' };
   const alreadyRendered = await fileExists(captionedStoragePath);
   if (alreadyRendered) return { status: 'ready', url: await getSignedDownloadUrl(captionedStoragePath) };
   if (!start) return { status: 'failed', error: 'No captioned render is in progress. Start the download again.' };
 
-  const entry: { promise: Promise<void>; error?: string } = { promise: Promise.resolve() };
-  entry.promise = renderCaptionedVideo(videoStoragePath, captionedStoragePath, segments)
-    .then(() => {
-      captionRenders.delete(captionedStoragePath);
-    })
-    .catch((err) => {
-      log.error('captions_render_failed', err, { projectId, languageCode });
-      entry.error = err instanceof HttpError ? err.message : 'Adding captions failed. Please try again.';
-      // A failure is reported to the next poll, then forgotten so a retry starts afresh.
-      setTimeout(() => captionRenders.get(captionedStoragePath) === entry && captionRenders.delete(captionedStoragePath), 10 * 60_000).unref();
-    });
-  captionRenders.set(captionedStoragePath, entry);
-  void trackBackgroundWork(entry.promise);
+  // Two clicks landing on two processes: the one that loses the claim simply reports the render the other started.
+  const token = await acquireLease(lease, CAPTION_RENDER_LEASE_MS);
+  if (!token) return { status: 'rendering' };
+  const stopRenewing = keepLeaseAlive(lease, token, CAPTION_RENDER_LEASE_MS);
+  void trackBackgroundWork(
+    renderCaptionedVideo(videoStoragePath, captionedStoragePath, segments)
+      .catch(async (err) => {
+        log.error('captions_render_failed', err, { projectId, languageCode });
+        const error = err instanceof HttpError ? err.message : 'Adding captions failed. Please try again.';
+        await captionFailures().replaceOne({ _id: captionedStoragePath }, { error, expireAt: new Date(Date.now() + CAPTION_FAILURE_KEPT_MS) }, { upsert: true });
+      })
+      .catch((err) => log.error('captions_failure_not_recorded', err, { projectId, languageCode }))
+      .finally(() => {
+        stopRenewing();
+        return releaseLease(lease, token).catch(() => undefined);
+      })
+  );
   return { status: 'rendering' };
 }
 

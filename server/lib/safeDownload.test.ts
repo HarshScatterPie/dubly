@@ -97,6 +97,18 @@ describe('streamToFile', () => {
 
   const limits = { maxBytes: 5_000, timeoutMs: 2_000 };
 
+  it('refuses a name that resolves inward at connect time, without reaching the server', async () => {
+    let hits = 0;
+    const count = () => hits++;
+    server.on('request', count);
+    const dest = path.join(dir, 'rebound.mp4');
+    // "localhost" stands in for a name re-pointed after the check: only the connection's own lookup can stop it.
+    await expect(streamToFile(`${base.replace('127.0.0.1', 'localhost')}/ok`, dest, limits)).rejects.toMatchObject({ code: 'DOWNLOAD_FAILED' });
+    server.off('request', count);
+    expect(hits).toBe(0);
+    await expect(stat(dest)).rejects.toThrow();
+  });
+
   it('saves a normal download', async () => {
     const dest = path.join(dir, 'ok.mp4');
     await expect(streamToFile(`${base}/ok`, dest, limits)).resolves.toEqual({ bytes: 11 });

@@ -110,6 +110,7 @@ export const schemas = {
   exportVideo: z.object({ languageCode: languageCode.optional(), captions: z.boolean().optional() }),
   share: z.object({ languageCode: languageCode.optional(), captions: z.boolean().optional() }),
   importSample: z.object({ sampleId: z.string().max(100).optional(), sourceUrl: z.string().max(2000).optional(), fileName: z.string().max(300).optional() }),
+  uploadStart: z.object({ fileName: z.string().trim().min(1).max(500), size: z.number().int().positive(), contentType: z.string().max(200).optional() }),
   // No length cap on the text itself (product decision); the 2 MB request limit bounds it.
   tts: z.object({
     text: z.string().trim().min(1),

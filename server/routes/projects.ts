@@ -11,6 +11,7 @@ import {
   createProject,
   deleteStoredProject,
   getProjectProgress,
+  type ProjectProgress,
   getStoredProject,
   listProjectSummaries,
   toClientSummary,
@@ -31,6 +32,9 @@ import { refuseWhenDraining } from '../lib/lifecycle';
 import { rateLimit } from '../lib/rateLimit';
 import { limits, maxTextCharsFor, rateRules } from '../lib/limits';
 import { acquireHeavySlot } from '../lib/heavyWork';
+import { revisionOf, waitForChange } from '../lib/changeWait';
+import { acquireLease, keepLeaseAlive, releaseLease } from '../lib/leases';
+import { assembleUpload, chunkCount, discardUpload, expectedChunkBytes, findUpload, startUpload, storeChunk } from '../lib/uploadSessions';
 import { routeTranscribe, routeTranslateSegments } from '../lib/modelRouter';
 import { alignSegmentsWithinWindows, detectSpeechRegions, retimeWords } from '../lib/forcedAlign';
 import { describeTranscriptHealth, sanitizeTranscript } from '../lib/transcriptSanitizer';
@@ -180,11 +184,22 @@ projectsRouter.get('/:id', async (req, res) => {
 });
 
 // For progress bars: status, percentage and message from one document read, where GET /:id reassembles the whole project.
+// With ?since=<revision> the answer waits until there is something new (see changeWait.ts); the first request, without it, answers at once.
+const progressRevision = (progress: ProjectProgress) => revisionOf(progress.status, progress.progressPercent, progress.currentProcessingMessage);
+
 projectsRouter.get('/:id/progress', async (req, res) => {
-  const progress = await getProjectProgress(req.workspaceId!, req.params.id);
+  const progress = await waitForChange<ProjectProgress>(
+    {
+      read: () => getProjectProgress(req.workspaceId!, req.params.id),
+      revision: progressRevision,
+      isFinal: (p) => p.status === 'completed' || p.status === 'failed',
+      since: typeof req.query.since === 'string' ? req.query.since : '',
+    },
+    (stop) => res.once('close', stop)
+  );
   if (!progress) return res.status(404).json({ error: 'Project not found' });
   res.setHeader('Cache-Control', 'no-store');
-  res.json(progress);
+  res.json({ ...progress, revision: progressRevision(progress) });
 });
 
 const PATCHABLE_FIELDS = [
@@ -355,6 +370,71 @@ projectsRouter.post('/:id/upload', refuseWhenDraining, rateLimit('upload', [['us
     const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, localPath, req.file.originalname, req.file.size);
     res.json(await toClientProject(updated));
   } finally {
+    await rm(localPath, { force: true });
+  }
+});
+
+// A large file arrives in chunks (see uploadSessions.ts): one request opens the upload, one per chunk, one to finish it.
+projectsRouter.post('/:id/uploads', refuseWhenDraining, rateLimit('upload', [['user', rateRules.uploadPerUser]]), validateBody(schemas.uploadStart), async (req, res) => {
+  const { fileName, size, contentType } = req.body as { fileName: string; size: number; contentType?: string };
+  if (!(await requireProject(req.workspaceId!, req.params.id))) return res.status(404).json({ error: 'Project not found' });
+  if (size > MAX_SOURCE_VIDEO_BYTES) return res.status(413).json({ error: 'That file is too large.', code: 'FILE_TOO_LARGE' });
+  // The same first look as a single upload; the content itself is judged once it is whole.
+  if (!/^video\//.test(contentType ?? '') && !/\.(mp4|mov|webm)$/i.test(fileName)) {
+    return res.status(400).json({ error: 'Only video files (mp4/mov/webm) are accepted', code: 'UNSUPPORTED_FILE' });
+  }
+  await assertStorageAvailable(req.workspaceId!, size);
+  const session = await startUpload({ workspaceId: req.workspaceId!, projectId: req.params.id, fileName, size });
+  res.status(201).json({ uploadId: session._id, chunkBytes: session.chunkBytes });
+});
+
+projectsRouter.put('/:id/uploads/:uploadId/chunks/:index', refuseWhenDraining, async (req, res) => {
+  const session = await findUpload(req.workspaceId!, req.params.id, req.params.uploadId);
+  if (!session) return res.status(404).json({ error: 'Upload not found', code: 'UPLOAD_NOT_FOUND' });
+  const index = Number(req.params.index);
+  const badChunk = () => {
+    res.setHeader('Connection', 'close');
+    return res.status(400).json({ error: 'That part of the upload is not the right size.', code: 'BAD_CHUNK' });
+  };
+  if (!Number.isInteger(index) || index < 0 || index >= chunkCount(session)) return badChunk();
+  // Not every proxy passes the length on, so it is only a first check; storeChunk counts what actually arrives.
+  const declared = Number(req.headers['content-length']);
+  if (Number.isFinite(declared) && declared !== expectedChunkBytes(session, index)) return badChunk();
+  try {
+    await storeChunk(session, index, req);
+  } catch {
+    return badChunk();
+  }
+  res.status(204).end();
+});
+
+// Longer than any join and check takes; kept alive while it runs, and it frees itself if the process dies.
+const UPLOAD_FINISH_LEASE_MS = 60_000;
+
+projectsRouter.post('/:id/uploads/:uploadId/complete', refuseWhenDraining, async (req, res) => {
+  const session = await findUpload(req.workspaceId!, req.params.id, req.params.uploadId);
+  if (!session) return res.status(404).json({ error: 'Upload not found', code: 'UPLOAD_NOT_FOUND' });
+  const lease = `upload-finish:${session._id}`;
+  const token = await acquireLease(lease, UPLOAD_FINISH_LEASE_MS);
+  if (!token) return res.status(409).json({ error: 'This upload is already being finished.', code: 'UPLOAD_FINISHING' });
+  const stopRenewing = keepLeaseAlive(lease, token, UPLOAD_FINISH_LEASE_MS);
+
+  await mkdir(uploadDir, { recursive: true });
+  const ext = path.extname(session.fileName).toLowerCase();
+  const localPath = path.join(uploadDir, `${randomUUID()}${/^\.(mp4|mov|webm|m4v|mkv)$/.test(ext) ? ext : ''}`);
+  try {
+    await assembleUpload(session, localPath);
+    await assertStorageAvailable(req.workspaceId!, session.size);
+    const updated = await ingestSourceVideo(req.workspaceId!, req.params.id, localPath, session.fileName, session.size);
+    await discardUpload(session);
+    res.json(await toClientProject(updated));
+  } catch (err) {
+    // A file refused for what it is will be refused again; a missing chunk can still be sent, and anything else can be retried.
+    if (err instanceof HttpError && err.status < 500 && err.code !== 'UPLOAD_INCOMPLETE') await discardUpload(session);
+    throw err;
+  } finally {
+    stopRenewing();
+    await releaseLease(lease, token).catch(() => undefined);
     await rm(localPath, { force: true });
   }
 });

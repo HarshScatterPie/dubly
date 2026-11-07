@@ -33,6 +33,7 @@ export function isFaceScanAvailable(): boolean {
 // A face in at least this share of samples, covering at least this much of the frame (~110 px tall at 1080p).
 const MIN_FACE_SHARE = 0.3;
 const MIN_FACE_AREA = 0.005;
+const MIN_FACE_SOURCE_PIXELS = 40;
 
 export function faceScanVerdict(scan: Omit<FaceScan, 'hasFaces' | 'scannedAt'>): boolean {
   if (!scan.sampledFrames) return false;
@@ -175,12 +176,19 @@ function inputProtocols(video: string): string {
   return SAFE_INPUT_OPTIONS[1];
 }
 
+// Shrinks a frame to the detector's input in ffmpeg, the same bilinear way toInput would, so a 4K frame crosses the pipe as 0.7 MB and not 25 MB.
+const SHRINK_TO_INPUT = `scale='min(${INPUT_SIZE},iw)':'min(${INPUT_SIZE},ih)':force_original_aspect_ratio=decrease:flags=bilinear`;
+
 // One frame at `seconds`, rotation applied, as RGB; null when there is no frame there.
-function grabFrame(video: string, seconds: number): Promise<Frame | null> {
+function grabFrame(video: string, seconds: number, shrink: boolean): Promise<Frame | null> {
   return new Promise((resolve) => {
     execFile(
       ffmpegPath,
-      ['-v', 'error', '-nostdin', '-protocol_whitelist', inputProtocols(video), '-ss', seconds.toFixed(3), '-i', video, '-frames:v', '1', '-f', 'image2pipe', '-c:v', 'ppm', '-'],
+      [
+        ...['-v', 'error', '-nostdin', '-protocol_whitelist', inputProtocols(video), '-ss', seconds.toFixed(3), '-i', video, '-frames:v', '1'],
+        ...(shrink ? ['-vf', SHRINK_TO_INPUT] : []),
+        ...['-f', 'image2pipe', '-c:v', 'ppm', '-'],
+      ],
       { encoding: 'buffer', maxBuffer: 256 * 1024 * 1024, timeout: 60_000, windowsHide: true },
       (err, stdout) => resolve(err ? null : parsePpm(stdout))
     );
@@ -233,17 +241,21 @@ export async function sampleFacesLocal(video: string, durationSeconds: number, d
   let maxFaces = 0;
   const areas: number[] = [];
   let best: { rank: number; time: number; box: Box } | null = null;
+  // Learned from the first frame, taken at full size; the rest come shrunk.
+  let sourceHeight = 0;
 
   for (let i = 0; i < count; i++) {
     if (Date.now() > deadline) return null;
     // Evenly spread, skipping the very start and end where fades and title cards live.
     const time = duration * (0.04 + (0.92 * (i + 0.5)) / count);
-    const frame = await grabFrame(video, time);
+    const frame = await grabFrame(video, time, sourceHeight > 0);
     if (!frame) continue;
     sampled++;
+    sourceHeight ||= frame.height;
     const { width: w, height: h } = frame;
-    // Tiny background faces are not what a viewer watches.
-    const big = (await detectFaces(session, frame)).filter((d) => d.box[3] - d.box[1] >= Math.max(40, 0.05 * h));
+    // Tiny background faces are not what a viewer watches. The floor is in the video's own pixels, whatever size this frame came at.
+    const minFaceHeight = Math.max(MIN_FACE_SOURCE_PIXELS * (h / sourceHeight), 0.05 * h);
+    const big = (await detectFaces(session, frame)).filter((d) => d.box[3] - d.box[1] >= minFaceHeight);
     maxFaces = Math.max(maxFaces, big.length);
     if (!big.length) continue;
     withFace++;

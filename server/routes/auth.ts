@@ -26,7 +26,7 @@ import { authLink, buildMagicLinkEmail, buildResetEmail, buildVerifyEmail, deliv
 import { METHOD_LABELS, noteDevice, type SignInMethod } from '../lib/devices';
 import { LINK_TTL_MS, openMagicLink, startMagicSignIn, verifyMagicCode } from '../lib/magicLink';
 import { clearSessionCookie, requireAuth, requireSameOrigin, sessionTokenOf, setSessionCookie } from '../lib/auth';
-import { clientIp, forget, hit, rateLimit, retryAfter } from '../lib/rateLimit';
+import { clientIp, forget, hitShared, rateLimit, retryAfter } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
 import { schemas, validateBody } from '../lib/validation';
 import { invalidateMembership } from '../lib/workspaces';
@@ -43,8 +43,8 @@ authRouter.use(requireSameOrigin);
 const ipLimit = (name: string, rule: typeof rateRules.loginPerIp) => rateLimit(name, [['ip', rule]]);
 
 // A per-address ceiling, counted whether or not the address has an account; true when it is reached.
-function addressLimited(res: Response, scope: string, email: string, rule: typeof rateRules.authEmailPerAddress): boolean {
-  const wait = hit(`${scope}:email:${normalizeEmail(email)}`, rule);
+async function addressLimited(res: Response, scope: string, email: string, rule: typeof rateRules.authEmailPerAddress): Promise<boolean> {
+  const wait = await hitShared(`${scope}:email:${normalizeEmail(email)}`, rule);
   if (!wait) return false;
   res.setHeader('Retry-After', String(wait));
   res.status(429).json({ error: 'Too many attempts for this email. Wait a few minutes and try again.', code: 'RATE_LIMITED', retryAfterSeconds: wait });
@@ -109,7 +109,7 @@ authRouter.post('/signup', ipLimit('signup', rateRules.signupPerIp), validateBod
     res.status(400).json({ error: problem, code: 'WEAK_PASSWORD' });
     return;
   }
-  if (addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
+  if (await addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
 
   const existing = await getUserByEmail(email);
   if (existing) {
@@ -150,7 +150,7 @@ authRouter.post('/login', ipLimit('login', rateRules.loginPerIp), validateBody(s
   const pairKey = `login-fail:${address}:${clientIp(req) ?? 'unknown'}`;
   const emailKey = `login-fail:${address}`;
   // Checked before the password, counted only when it is wrong: someone guessing locks out themselves, not the account's owner.
-  const wait = Math.max(retryAfter(pairKey, rateRules.loginFailuresPerEmailAndIp), retryAfter(emailKey, rateRules.loginFailuresPerEmail));
+  const wait = Math.max(...(await Promise.all([retryAfter(pairKey, rateRules.loginFailuresPerEmailAndIp), retryAfter(emailKey, rateRules.loginFailuresPerEmail)])));
   if (wait) {
     res.setHeader('Retry-After', String(wait));
     res.status(429).json({ error: 'Too many wrong passwords. Wait a few minutes, or reset it with "Forgot password?".', code: 'RATE_LIMITED', retryAfterSeconds: wait });
@@ -158,12 +158,11 @@ authRouter.post('/login', ipLimit('login', rateRules.loginPerIp), validateBody(s
   }
   const user = await checkCredentials(email, password);
   if (!user) {
-    hit(pairKey, rateRules.loginFailuresPerEmailAndIp);
-    hit(emailKey, rateRules.loginFailuresPerEmail);
+    await Promise.all([hitShared(pairKey, rateRules.loginFailuresPerEmailAndIp), hitShared(emailKey, rateRules.loginFailuresPerEmail)]);
     res.status(401).json({ error: 'That email and password do not match.', code: 'INVALID_CREDENTIALS' });
     return;
   }
-  forget(pairKey);
+  await forget(pairKey);
   // Only said once the password is right, so it reveals nothing to someone guessing.
   if (user.disabled) {
     res.status(403).json({ error: 'This account has been disabled. Contact ScatterPie.', code: 'ACCOUNT_DISABLED' });
@@ -189,14 +188,14 @@ authRouter.post('/resend-verification', requireAuth, async (req, res) => {
     res.status(204).send();
     return;
   }
-  if (addressLimited(res, 'auth-email', req.email!, rateRules.authEmailPerAddress)) return;
+  if (await addressLimited(res, 'auth-email', req.email!, rateRules.authEmailPerAddress)) return;
   const emailed = await sendVerification({ _id: req.uid!, email: req.email! });
   res.status(202).json({ emailed });
 });
 
 authRouter.post('/forgot-password', ipLimit('auth-email', rateRules.authEmailPerIp), validateBody(schemas.emailOnly), async (req, res) => {
   const email = normalizeEmail(req.body.email);
-  if (addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
+  if (await addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
   inBackground(async () => {
     const user = await getUserByEmail(email);
     if (user && !user.disabled) await sendReset(user);
@@ -265,7 +264,7 @@ authRouter.post('/magic/request', ipLimit('auth-email', rateRules.authEmailPerIp
     res.status(400).json({ error: 'Enter a valid email address.', code: 'INVALID_EMAIL' });
     return;
   }
-  if (addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
+  if (await addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
   const { attemptId, expiresInSeconds, send } = await startMagicSignIn(req, res, email);
   if (send) {
     const link = authLink('magic', send.linkToken);

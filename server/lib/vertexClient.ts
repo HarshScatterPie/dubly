@@ -17,6 +17,7 @@ import { mergeSpeakerProfiles } from './speakerProfiles';
 import { readCachedText, ttsCacheKey, writeCachedText } from './ttsCache';
 import { mapWithConcurrency } from './concurrency';
 import { wavFileDurationSeconds } from './audioUtils';
+import { limits } from './limits';
 
 export interface RawSttWord {
   text: string;
@@ -503,11 +504,12 @@ function coversSameSpeech(candidate: RawSttSegment[], reference: RawSttSegment[]
   return candidate.length >= Math.ceil(reference.length * 0.6) && reach(candidate) >= reach(reference) * 0.75 && spoken(candidate) >= spoken(reference) * 0.6;
 }
 
-// Gemini's inline-audio transcription silently truncates to only the first several
-// seconds of long clips instead of erroring (confirmed empirically — a 113s clip came
-// back as a single ~7s segment even with maxOutputTokens raised). Chunking sidesteps
-// whatever the underlying limit is.
-const VERTEX_MAX_CHUNK_SECONDS = 28;
+// Chunked because an earlier model cut long clips short without an error (113 s came back as one ~7 s segment). Measured again on
+// gemini-3.5-flash-lite, 2026-11-07, on 188 s of two Windows voices in English with known words and timing: nothing was cut even in
+// one call, words were heard equally well at every size, and bigger chunks saved only 5 to 9 s. From about 45 s up the model mostly
+// hears one speaker where there are two, which would give both people one voice. Speaker labels were weak at 28 s too (52 to 68% of
+// lines right). Real Indian-language speech was not tested, so try it there before raising this.
+const VERTEX_MAX_CHUNK_SECONDS = limits.sttChunkSeconds;
 
 // Bounds on the voice-reference carry-over between chunks (see vertexTranscribeSingle):
 // enough speakers for the vast majority of real dub sources without letting prompt size

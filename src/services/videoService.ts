@@ -19,7 +19,7 @@ const MAX_VIDEO_BYTES = 500 * 1024 * 1024;
 export class VideoService {
   /** Why a picked file cannot be uploaded, or null when it can. */
   public problemWith(file: File): string | null {
-    if (!file.type.startsWith('video/') && !/.(mp4|mov|webm)$/i.test(file.name)) return 'Choose a video file (MP4, MOV or WebM).';
+    if (!file.type.startsWith('video/') && !/\.(mp4|mov|webm)$/i.test(file.name)) return 'Choose a video file (MP4, MOV or WebM).';
     if (file.size === 0) return 'That file is empty.';
     if (file.size > MAX_VIDEO_BYTES) return 'That file is over the 500 MB limit. Use a shorter or smaller video.';
     return null;

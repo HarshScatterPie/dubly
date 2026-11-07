@@ -1,6 +1,6 @@
 # Deployment
 
-One process runs everything: the API, the built frontend, jobs, and scheduled maintenance. Run **exactly one instance** (see ARCHITECTURE.md → Scaling).
+Each server process runs everything: the API, the built frontend, jobs, and scheduled maintenance. A machine runs several of them by itself (`WEB_CONCURRENCY`), and any number of machines can share one MongoDB behind a load balancer; set `INSTANCE_COUNT` to the number of machines (see ARCHITECTURE.md → Scaling).
 
 ## Current production: the office PC
 
@@ -71,7 +71,7 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `GEMINI_REVIEW_MODEL` | gemini-3.5-flash-lite | Listens to every dubbed take next to the original, for users who turn on **AI review** (Settings → Paid extras) |
 | `MONGODB_URI`, `MONGODB_DB` | localhost / dubly | **Required.** The database (a replica set) holding all records and files; the `dubly_app` login (MONGODB.md) |
 | `ALLOW_SIGNUP` | true | Self sign-up on the login screen; `false` = invitations and `server/scripts/create_user.ts` only |
-| `COOKIE_SECURE` | auto | `true` behind HTTPS to always mark the session cookie Secure; auto marks it on HTTPS requests (needs `TRUST_PROXY` behind a proxy) |
+| `COOKIE_SECURE` | auto | auto marks the session cookie Secure on HTTPS requests and whenever `WEB_ORIGIN` is https; `true` always, `false` never |
 | `MEDIA_URL_SECRET` | random, kept in the database | Key for signed media URLs |
 | `CREDENTIALS_MODE` | keyfile | `adc` = no key files (Google AI only) |
 | `CREDENTIALS_DIR`, `DUBLY_ENV_FILE` | server/credentials, server/.env | Secret locations |
@@ -79,6 +79,9 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `NODE_ENV`, `LOG_FORMAT` | —, json when production | Logging format |
 | `TRUST_PROXY` | unset | Proxy hops |
 | `SHUTDOWN_GRACE_MS` | 25000 | Drain window on SIGTERM |
+| `DUBLY_TMP_DIR`, `DUBLY_CACHE_DIR` | server/tmp, server/cache | Scratch files and the voice cache. Keep both off synced folders: scratch files are users' videos |
+| `STT_CHUNK_SECONDS` | 28 | Longest stretch of audio sent to the speech model in one call. Bigger chunks lose speaker labels; see the note in `vertexClient.ts` first |
+| `UPLOAD_CHUNK_MB` | 32 | Size of each piece of a large upload; stay well under what the front door takes in one request (100 MB on Cloudflare) |
 | `FFMPEG_PATH`, `FFPROBE_PATH` | npm builds (image: /usr/bin/…) | Media binaries |
 | `FFMPEG_QUICK_TIMEOUT_MINUTES`, `FFMPEG_RENDER_TIMEOUT_MINUTES` | 5, 120 | ffmpeg kill timeouts |
 | `TRANSCRIBE_TIMEOUT_MINUTES` | 45 | Transcription job timeout |
@@ -88,9 +91,11 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 |---|---|---|
 | `MAX_VIDEO_MINUTES` | 60 | Longest source video accepted |
 | `MAX_DUBS_PER_WORKSPACE` | 2 | Dubs rendering at once per workspace; more are queued |
-| `MAX_ACTIVE_DUBS` | 4 | Dubs rendering at once on the server |
-| `MAX_HEAVY_REQUESTS` / `HEAVY_WAIT_SECONDS` | 3 / 600 | Concurrent transcriptions and caption renders / how long one waits before `503` |
-| `ONNX_WORKERS` | 2 (or fewer cores) | Worker threads for the face scan and voice-activity detection, started on demand. `0` runs them on the main thread, which freezes the API while they work |
+| `WEB_CONCURRENCY` | `auto` in production (half the cores), else 1 | Server processes on this machine, sharing its port |
+| `INSTANCE_COUNT` | 1 | Machines serving this database. Only divides the in-memory flood ceilings between processes; everything else is shared through MongoDB |
+| `MAX_ACTIVE_DUBS` | half the cores, at least 2 | Dubs rendering at once on this machine, split between its processes |
+| `MAX_HEAVY_REQUESTS` / `HEAVY_WAIT_SECONDS` | 3/8 of the cores, at least 2 / 600 | Concurrent transcriptions and caption renders / how long one waits before `503` |
+| `ONNX_WORKERS` | a quarter of the cores, at least 2 | Worker threads for the face scan and voice-activity detection, started on demand. `0` runs them on the main thread, which freezes the API while they work |
 | `STORAGE_LIMIT_MB` / `ENFORCE_STORAGE_LIMIT` | 2048 / true | Allowance per workspace, shown on the Usage page / refuse uploads past it (`false` only shows it) |
 | `RATE_API_PER_MINUTE` | 600 | Any authenticated request, per user |
 | `RATE_TRANSCRIBE_PER_HOUR` / `_PER_WORKSPACE_HOUR` | 20 / 60 | |

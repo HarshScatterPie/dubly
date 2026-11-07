@@ -1,18 +1,22 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
-import { clearRateLimits, hit, rateLimit } from './rateLimit';
+import { clearRateLimits, forget, hit, hitShared, rateLimit, retryAfter } from './rateLimit';
 import { Semaphore, SemaphoreTimeoutError } from './semaphore';
-import { enqueueDub, freezeQueue, positionInQueue, queueStats, resetQueueForTests } from './dubQueue';
+import { freezeQueue } from './dubQueue';
 import { limits, rateRules } from './limits';
 import { createUser, patchJob, readProject, resetEmulators, seedProject, startApi, type TestApi } from '../test/helpers';
-import { getJob, reconcileStaleJobs, startDubJob, STALE_AFTER_MS, type DubJob } from './jobs';
+import { claimNextDubJob, getJob, JobConflictError, reconcileStaleJobs, startDubJob, STALE_AFTER_MS } from './jobs';
+import { mongoDb } from './mongo';
 import { QUEUED_MESSAGE, setDubPipelineForTests, type PipelineResult } from '../routes/dub';
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe('rate limiter', () => {
-  beforeEach(() => clearRateLimits());
+  beforeEach(async () => {
+    clearRateLimits();
+    await resetEmulators();
+  });
 
   it('allows up to the limit in a window, then reports the wait', () => {
     const rule = { max: 2, windowMs: 1000 };
@@ -48,6 +52,30 @@ describe('rate limiter', () => {
       server.close();
     }
   });
+
+  it('counts a shared limit exactly when many callers arrive at once', async () => {
+    const rule = { max: 5, windowMs: 60_000 };
+    const waits = await Promise.all(Array.from({ length: 25 }, () => hitShared('burst', rule)));
+    expect(waits.filter((wait) => wait === 0)).toHaveLength(5);
+    expect(Math.min(...waits.filter((wait) => wait > 0))).toBeGreaterThan(0);
+  });
+
+  it('starts a new shared window once the old one has ended', async () => {
+    const rule = { max: 1, windowMs: 1000 };
+    expect(await hitShared('w', rule, 10_000)).toBe(0);
+    expect(await hitShared('w', rule, 10_500)).toBe(1);
+    expect(await hitShared('w', rule, 11_000)).toBe(0);
+  });
+
+  it('looks at a shared limit without counting, and forgets on request', async () => {
+    const rule = { max: 1, windowMs: 60_000 };
+    expect(await retryAfter('l', rule)).toBe(0);
+    expect(await retryAfter('l', rule)).toBe(0);
+    expect(await hitShared('l', rule)).toBe(0);
+    expect(await retryAfter('l', rule)).toBeGreaterThan(0);
+    await forget('l');
+    expect(await retryAfter('l', rule)).toBe(0);
+  });
 });
 
 describe('semaphore', () => {
@@ -80,68 +108,6 @@ describe('semaphore', () => {
     expect(sem.waiting).toBe(0);
     release();
     expect(sem.inUse).toBe(0);
-  });
-});
-
-describe('dub admission queue', () => {
-  beforeEach(() => resetQueueForTests());
-  afterEach(() => resetQueueForTests());
-
-  function gatedEntry(jobId: string, workspaceId: string) {
-    let finish!: () => void;
-    const started = { value: false };
-    const entry = {
-      jobId,
-      workspaceId,
-      start: () =>
-        new Promise<void>((r) => {
-          started.value = true;
-          finish = r;
-        }),
-      abandon: () => undefined,
-    };
-    return { entry, started, finish: () => finish() };
-  }
-
-  it(`runs at most ${limits.maxDubsPerWorkspace} per workspace and queues the rest in order`, async () => {
-    const a = gatedEntry('a', 'ws-1');
-    const b = gatedEntry('b', 'ws-1');
-    const c = gatedEntry('c', 'ws-1');
-    const d = gatedEntry('d', 'ws-1');
-    expect(enqueueDub(a.entry).startedImmediately).toBe(true);
-    expect(enqueueDub(b.entry).startedImmediately).toBe(true);
-    expect(enqueueDub(c.entry).startedImmediately).toBe(false);
-    expect(enqueueDub(d.entry).startedImmediately).toBe(false);
-    expect(positionInQueue('c')).toBe(0);
-    expect(positionInQueue('d')).toBe(1);
-
-    // Another workspace is not held up by this one's queue.
-    const other = gatedEntry('x', 'ws-2');
-    expect(enqueueDub(other.entry).startedImmediately).toBe(true);
-
-    a.finish();
-    await tick();
-    await tick();
-    expect(c.started.value).toBe(true);
-    expect(d.started.value).toBe(false);
-    expect(queueStats()).toEqual({ running: 3, waiting: 1 });
-  });
-
-  it(`never runs more than ${limits.maxActiveDubs} in total`, async () => {
-    const entries = Array.from({ length: limits.maxActiveDubs + 1 }, (_, i) => gatedEntry(`j${i}`, `ws-${i}`));
-    const started = entries.map((e) => enqueueDub(e.entry).startedImmediately);
-    expect(started.filter(Boolean)).toHaveLength(limits.maxActiveDubs);
-    entries[0].finish();
-    await tick();
-    await tick();
-    expect(entries[limits.maxActiveDubs].started.value).toBe(true);
-  });
-
-  it('releases waiting jobs untouched when frozen for shutdown', () => {
-    const abandoned: string[] = [];
-    for (const id of ['a', 'b', 'c']) enqueueDub({ ...gatedEntry(id, 'ws-1').entry, abandon: () => abandoned.push(id) });
-    expect(freezeQueue()).toBe(1);
-    expect(abandoned).toEqual(['c']);
   });
 });
 
@@ -215,20 +181,101 @@ describe('queued dubs end to end', () => {
     await waitUntil(async () => Boolean((await job(2))?.settled));
   });
 
-  it('puts a job that was still waiting when its process died back in the queue instead of failing it', async () => {
-    const { user, workspaceId, ids } = await seed(1);
-    const { job } = await startDubJob({ workspaceId, projectId: ids[0], userId: user.uid, languages: ['hi'], minutes: 1 });
-    await patchJob(job.id, { heartbeatAt: new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString() });
+  const queueDub = (workspaceId: string, userId: string, projectId: string) =>
+    startDubJob({ workspaceId, projectId, userId, languages: ['hi'], minutes: 1 }).then((started) => started.job);
+  const staleHeartbeat = () => new Date(Date.now() - STALE_AFTER_MS - 1000).toISOString();
 
-    const requeued: DubJob[] = [];
-    expect(await reconcileStaleJobs(new Set(), Date.now(), (j) => requeued.push(j))).toEqual([]);
-    expect(requeued.map((j) => j.id)).toEqual([job.id]);
+  it('keeps a waiting dub however long it waits, for any process with room to take', async () => {
+    const { user, workspaceId, ids } = await seed(1);
+    const job = await queueDub(workspaceId, user.uid, ids[0]);
+    await patchJob(job.id, { heartbeatAt: staleHeartbeat() });
+
+    expect(await reconcileStaleJobs()).toEqual([]);
+    expect((await getJob(job.id))?.status).toBe('queued');
+
+    expect((await claimNextDubJob(2))?.id).toBe(job.id);
+    expect((await getJob(job.id))?.status).toBe('running');
+    expect(await claimNextDubJob(2)).toBeNull();
+  });
+
+  it('holds the workspace cap when several processes admit at the same moment', async () => {
+    const { user, workspaceId, ids } = await seed(6);
+    for (const id of ids) await queueDub(workspaceId, user.uid, id);
+
+    const claims = await Promise.all(ids.map(() => claimNextDubJob(2)));
+
+    const started = claims.filter((job) => job !== null);
+    expect(started).toHaveLength(2);
+    expect(new Set(started.map((job) => job.id)).size).toBe(2);
+    expect(await mongoDb().collection('jobs').countDocuments({ workspaceId, status: 'running' })).toBe(2);
+  });
+
+  it('takes the oldest first, skipping a full workspace without holding up another', async () => {
+    const busy = await seed(3);
+    const first = await queueDub(busy.workspaceId, busy.user.uid, busy.ids[0]);
+    await queueDub(busy.workspaceId, busy.user.uid, busy.ids[1]);
+    const otherUser = await createUser('other-queue@team.test');
+    const otherWorkspace = (await api.call('GET', '/api/workspace', { token: otherUser.token })).body.id as string;
+    await seedProject(otherWorkspace, { id: 'proj-other', ownerUid: otherUser.uid, title: 'O', status: 'draft', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() } as never);
+    const other = await queueDub(otherWorkspace, otherUser.uid, 'proj-other');
+
+    expect((await claimNextDubJob(1))?.id).toBe(first.id);
+    expect((await claimNextDubJob(1))?.id).toBe(other.id);
+    expect(await claimNextDubJob(1)).toBeNull();
+  });
+
+  it('never mistakes a waiting dub for a dead one when a second dub is asked for', async () => {
+    const { user, workspaceId, ids } = await seed(1);
+    const job = await queueDub(workspaceId, user.uid, ids[0]);
+    await patchJob(job.id, { heartbeatAt: staleHeartbeat() });
+
+    await expect(queueDub(workspaceId, user.uid, ids[0])).rejects.toBeInstanceOf(JobConflictError);
+    expect((await getJob(job.id))?.settled).toBe(false);
+  });
+
+  it('refunds a waiting dub whose project has gone, rather than scanning past it for ever', async () => {
+    const { user, workspaceId, ids } = await seed(1);
+    const job = await queueDub(workspaceId, user.uid, ids[0]);
+    await mongoDb().collection('projects').deleteOne({ _id: ids[0] as never });
+
+    expect(await claimNextDubJob(2)).toBeNull();
     const after = await getJob(job.id);
-    expect(after?.settled).toBe(false);
+    expect(after?.settled).toBe(true);
+    expect(after?.minutesRefunded).toBe(1);
+  });
+
+  it(`runs at most its share of dubs in this process, starting the next when one ends`, async () => {
+    const { user, ids } = await seed(2);
+    const saved = limits.maxActiveDubs;
+    limits.maxActiveDubs = 1;
+    const gates = new Map<string, (r: PipelineResult) => void>();
+    setDubPipelineForTests((job) => new Promise((resolve) => gates.set(job.projectId, resolve)));
+    try {
+      const jobIds: string[] = [];
+      for (const id of ids) jobIds.push((await api.call('POST', `/api/projects/${id}/dub`, { token: user.token, body: {} })).body.jobId);
+      expect((await getJob(jobIds[0]))?.status).toBe('running');
+      expect((await getJob(jobIds[1]))?.status).toBe('queued');
+
+      for (let i = 0; i < 100 && !gates.has(ids[0]); i++) await new Promise((r) => setTimeout(r, 20));
+      gates.get(ids[0])!({ completed: ['hi'], wordsCount: 1, fileSizeMb: 1, projectPatch: { status: 'completed' } });
+      for (let i = 0; i < 200 && (await getJob(jobIds[1]))?.status !== 'running'; i++) await new Promise((r) => setTimeout(r, 20));
+      expect((await getJob(jobIds[1]))?.status).toBe('running');
+      for (let i = 0; i < 100 && !gates.has(ids[1]); i++) await new Promise((r) => setTimeout(r, 20));
+      gates.get(ids[1])!({ completed: ['hi'], wordsCount: 1, fileSizeMb: 1, projectPatch: { status: 'completed' } });
+      for (let i = 0; i < 200 && !(await getJob(jobIds[1]))?.settled; i++) await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      limits.maxActiveDubs = saved;
+    }
+  });
+
+  it('admits nothing once frozen for shutdown; the dub stays waiting for another process', async () => {
+    const { user, ids } = await seed(1);
+    freezeQueue();
+    const res = await api.call('POST', `/api/projects/${ids[0]}/dub`, { token: user.token, body: {} });
+    expect(res.status).toBe(202);
+    const after = await getJob(res.body.jobId);
     expect(after?.status).toBe('queued');
-    // Claimed with a fresh heartbeat, so a second reconciliation pass leaves it alone.
-    expect(await reconcileStaleJobs(new Set(), Date.now(), (j) => requeued.push(j))).toEqual([]);
-    expect(requeued).toHaveLength(1);
+    expect(after?.settled).toBe(false);
   });
 
   it('rate-limits transcription per user with a 429', async () => {

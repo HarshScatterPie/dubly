@@ -1,5 +1,5 @@
-import { availableParallelism } from 'node:os';
 import { Worker } from 'node:worker_threads';
+import { limits } from './limits';
 import { log } from './log';
 
 /**
@@ -10,7 +10,7 @@ import { log } from './log';
  *
  * Workers start on demand (a second only when the first is busy), and exit after a quiet spell to give their memory back.
  * If a worker cannot start or dies, the task runs in-process as it always did, so this can only make things better.
- * ONNX_WORKERS caps the pool (default: 2, or fewer cores); ONNX_WORKERS=0 turns it off.
+ * ONNX_WORKERS caps the pool across the machine (default: a quarter of its cores, at least 2); ONNX_WORKERS=0 turns it off.
  */
 export type OffThreadTask = 'faceScan' | 'vad';
 
@@ -32,7 +32,7 @@ interface Slot {
 }
 
 const configured = process.env.ONNX_WORKERS;
-const maxWorkers = Math.max(1, Number(configured) || Math.min(2, availableParallelism()));
+const maxWorkers = limits.onnxWorkers;
 // Tests run the tasks in-process: the worker needs the TypeScript loader that only the server's own start-up provides.
 let disabled = configured === '0' || Boolean(process.env.VITEST);
 let consecutiveCrashes = 0;

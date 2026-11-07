@@ -69,7 +69,7 @@ export async function isLeaseHeld(name: string, now = Date.now()): Promise<boole
 
 /** Keeps a held place alive for as long as the work takes, so a lapse means its process died; the returned function stops renewing. */
 export function keepLeaseAlive(name: string, token: string, ttlMs: number): () => void {
-  const timer = setInterval(() => void renewLease(name, token, ttlMs).catch((err) => console.error(`[leases] could not renew ${name}`, err)), ttlMs / 3);
+  const timer = setInterval(() => void renewLease(name, token, ttlMs).catch((err) => console.error('[leases] could not renew', name, err)), ttlMs / 3);
   timer.unref();
   return () => clearInterval(timer);
 }

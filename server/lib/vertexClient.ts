@@ -18,6 +18,7 @@ import { readCachedText, ttsCacheKey, writeCachedText } from './ttsCache';
 import { mapWithConcurrency } from './concurrency';
 import { wavFileDurationSeconds } from './audioUtils';
 import { limits } from './limits';
+import { isQuotaError, reportQuotaHit, takeTurn } from './aiPacing';
 
 export interface RawSttWord {
   text: string;
@@ -97,20 +98,36 @@ function isTransientError(err: unknown): boolean {
 
 const RETRY_BACKOFF_MS = [1000, 3000, 8000];
 
-async function withRetry<T>(label: string, fn: () => Promise<T>): Promise<T> {
+/**
+ * One call to `model`, in its turn (aiPacing.ts): it waits while the model is at its quota, instead of failing. A quota error the
+ * provider still sends pauses the model for every process, and the call waits that out and goes again, for as long as a job may wait
+ * (AI_QUEUE_MAX_WAIT_MINUTES); other passing errors get a few quick retries.
+ */
+async function withRetry<T>(label: string, model: string, fn: () => Promise<T>): Promise<T> {
   const started = Date.now();
+  const deadline = started + limits.aiQueueMaxWaitMs;
+  let transientFailures = 0;
   for (let attempt = 0; ; attempt++) {
+    await takeTurn(model, {
+      maxWaitMs: Math.max(0, deadline - Date.now()),
+      onWait: (waitMs) => log.info('ai_call_queued', { provider: 'vertex', operation: label, model, waitMs }),
+    });
     try {
       const result = await fn();
       log.info('provider_call', { provider: 'vertex', operation: label, attempts: attempt + 1, durationMs: Date.now() - started });
       return result;
     } catch (err) {
-      if (attempt >= RETRY_BACKOFF_MS.length || !isTransientError(err)) {
+      if (isQuotaError(err) && Date.now() < deadline) {
+        // The next turn waits for the pause this sets, along with every other call to this model.
+        await reportQuotaHit(model);
+        continue;
+      }
+      if (transientFailures >= RETRY_BACKOFF_MS.length || !isTransientError(err)) {
         log.error('provider_error', err, { provider: 'vertex', operation: label, attempts: attempt + 1, durationMs: Date.now() - started });
         throw err;
       }
-      const waitMs = RETRY_BACKOFF_MS[attempt];
-      log.warn('provider_retry', { provider: 'vertex', operation: label, attempt: attempt + 1, waitMs }, `[vertexClient] ${label} failed (attempt ${attempt + 1}/${RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms: ${(err as Error)?.message}`);
+      const waitMs = RETRY_BACKOFF_MS[transientFailures++];
+      log.warn('provider_retry', { provider: 'vertex', operation: label, attempt: attempt + 1, waitMs }, `[vertexClient] ${label} failed (attempt ${attempt + 1}), retrying in ${waitMs}ms: ${(err as Error)?.message}`);
       await new Promise((resolve) => setTimeout(resolve, waitMs));
     }
   }
@@ -151,7 +168,7 @@ async function requestTranslations(
   const ai = getClient();
   const prompt = buildTranslationPrompt(segments, targetLanguageName, style, adaptExpressions, scriptInstruction, glossaryText, context);
 
-  const response = await withRetry('translation', () =>
+  const response = await withRetry('translation', env.geminiTranslateModel, () =>
     ai.models.generateContent({
       model: env.geminiTranslateModel,
       contents: prompt,
@@ -234,7 +251,7 @@ Return ONLY {"translations": [{"id": "<same id>", "translatedText": "<converted 
 
 Lines:
 ${JSON.stringify(lines)}`;
-  const response = await withRetry('hinglish-speech-script', () =>
+  const response = await withRetry('hinglish-speech-script', env.geminiTranslateModel, () =>
     ai.models.generateContent({
       model: env.geminiTranslateModel,
       contents: prompt,
@@ -329,7 +346,7 @@ Keep these terms exactly as written: ${mustKeep.map((t) => JSON.stringify(t)).jo
 Return ONLY {"text": "<shortened line>"}.
 
 Line: ${JSON.stringify(text)}`;
-  const response = await withRetry('condense', () =>
+  const response = await withRetry('condense', env.geminiTranslateModel, () =>
     ai.models.generateContent({
       model: env.geminiTranslateModel,
       contents: prompt,
@@ -353,7 +370,7 @@ export type VertexPart = { text: string } | { inlineData: { mimeType: string; da
 // One multimodal request answered as JSON text, with the shared retries and cost logging; callers own the prompt and the parsing.
 export async function vertexGenerateJson(model: string, parts: VertexPart[], operation: string, maxOutputTokens = 4096): Promise<string> {
   const ai = getClient();
-  const response = await withRetry(operation, () =>
+  const response = await withRetry(operation, model, () =>
     ai.models.generateContent({
       model,
       contents: [{ role: 'user', parts }],
@@ -430,7 +447,7 @@ No commentary, no markdown fences. If there is no speech, return {"language": "u
   }
   parts.push({ inlineData: { mimeType: 'audio/wav', data: audioBuffer.toString('base64') } });
 
-  const response = await withRetry('transcription', () =>
+  const response = await withRetry('transcription', env.geminiSttModel, () =>
     ai.models.generateContent({
       model: env.geminiSttModel,
       contents: [{ role: 'user', parts }],

@@ -8,39 +8,55 @@ const num = (name: string, fallback: number) => {
 
 const cores = availableParallelism();
 
-// Server processes on this machine (WEB_CONCURRENCY, a number or "auto"). Rendering runs in ffmpeg and worker threads, so half the
-// cores is enough to serve requests, with the rest left for that work. Development and tests stay in one process.
-function processesOnThisMachine(): number {
+/**
+ * Server processes on this machine. WEB_CONCURRENCY as a number fixes how many; "auto", the default in production, has the supervisor
+ * (primary.ts) start MIN_PROCESSES and add one at a time, up to MAX_PROCESSES, while the ones running are busy and memory allows, then
+ * retire idle ones again. Rendering runs in ffmpeg and worker threads, outside these processes. Development and tests stay in one.
+ */
+function processRange(): { min: number; max: number } {
   const configured = process.env.WEB_CONCURRENCY ?? (process.env.NODE_ENV === 'production' ? 'auto' : '1');
-  return configured === 'auto' ? Math.max(1, Math.floor(cores / 2)) : Math.max(1, Math.floor(Number(configured)) || 1);
+  if (configured !== 'auto') {
+    const fixed = Math.max(1, Math.floor(Number(configured)) || 1);
+    return { min: fixed, max: fixed };
+  }
+  const max = Math.max(1, Math.floor(num('MAX_PROCESSES', Math.max(1, cores - 1))));
+  return { min: Math.min(max, Math.max(1, Math.floor(num('MIN_PROCESSES', Math.min(2, max))))), max };
 }
-const processCount = processesOnThisMachine();
-// Machines serving this database (INSTANCE_COUNT); together with processCount, how many processes share the traffic.
-const totalProcesses = processCount * Math.max(1, Math.floor(num('INSTANCE_COUNT', 1)));
-
-// CPU budgets are set per machine and follow its size unless overridden; each process takes its share.
-const perProcess = (machineBudget: number) => Math.max(1, Math.ceil(machineBudget / processCount));
-
-// This process's part of a ceiling the whole deployment shares, for limits checked in memory because they run on every request. Traffic
-// is spread by connection, not by request, and a proxy holds few connections, so one process can see far more than its even part. Twice
-// that keeps a real person clear of a false refusal; these ceilings only stop floods, so a flood getting twice as far does not matter.
-export const processShare = (max: number) => Math.min(max, Math.max(1, Math.ceil((2 * max) / totalProcesses)));
+const range = processRange();
+// The processes on this machine when this one started: the supervisor passes it to each process it starts (DUBLY_PROCESS_COUNT).
+const processCount = Math.max(1, Math.floor(num('DUBLY_PROCESS_COUNT', range.min)));
 
 export const limits = {
+  minProcesses: range.min,
+  maxProcesses: range.max,
   processCount,
-  totalProcesses,
+  // Processes serving this database on every machine and container. A first guess (INSTANCE_COUNT machines like this one) until the
+  // instance heartbeats (instances.ts) count the live ones, so it stays right however they are started or scaled.
+  totalProcesses: processCount * Math.max(1, Math.floor(num('INSTANCE_COUNT', 1))),
+  // Free memory this machine keeps: new dubs, transcriptions and caption renders wait while it has less (MIN_FREE_MEMORY_MB), and no
+  // process is added unless this much plus one process's worth (PROCESS_MEMORY_MB) is free.
+  minFreeMemoryMb: num('MIN_FREE_MEMORY_MB', 1024),
+  processMemoryMb: num('PROCESS_MEMORY_MB', 300),
+  // How long a call waits for its AI model's turn (aiPacing.ts) before giving up: in a background job (AI_QUEUE_MAX_WAIT_MINUTES), and
+  // while someone waits on the screen, e.g. a voice preview (AI_INTERACTIVE_WAIT_SECONDS).
+  aiQueueMaxWaitMs: num('AI_QUEUE_MAX_WAIT_MINUTES', 30) * 60_000,
+  aiInteractiveWaitMs: num('AI_INTERACTIVE_WAIT_SECONDS', 45) * 1000,
+  // How long a model stays paused, for every process, after the provider says it is out of quota (AI_QUOTA_PAUSE_SECONDS).
+  aiQuotaPauseMs: num('AI_QUOTA_PAUSE_SECONDS', 60) * 1000,
   // Longest source video accepted, in seconds (MAX_VIDEO_MINUTES).
   maxVideoSeconds: num('MAX_VIDEO_MINUTES', 60) * 60,
   // The one size boundary for source video, whether uploaded or fetched as a sample.
   maxSourceVideoBytes: 500 * 1024 * 1024,
   // Dubs rendering at once per workspace; further dubs wait in the queue (MAX_DUBS_PER_WORKSPACE).
   maxDubsPerWorkspace: num('MAX_DUBS_PER_WORKSPACE', 2),
-  // Dubs rendering at once in this process; MAX_ACTIVE_DUBS is the machine's total, by default half its cores.
-  maxActiveDubs: perProcess(num('MAX_ACTIVE_DUBS', Math.max(2, Math.floor(cores / 2)))),
-  // Transcriptions and caption renders running at once in this process; more wait their turn. MAX_HEAVY_REQUESTS is the machine's total.
-  maxHeavyRequests: perProcess(num('MAX_HEAVY_REQUESTS', Math.max(2, Math.floor((cores * 3) / 8)))),
-  // ONNX worker threads in this process; ONNX_WORKERS is the machine's total (0 turns them off, see onnxPool.ts).
-  onnxWorkers: perProcess(num('ONNX_WORKERS', Math.max(2, Math.floor(cores / 4)))),
+  // Dubs rendering at once on this machine (MAX_ACTIVE_DUBS), by default half its cores, however many processes share them: the
+  // supervisor hands out the slots (machineSlots.ts), so the total holds exactly as processes come and go.
+  maxActiveDubs: num('MAX_ACTIVE_DUBS', Math.max(2, Math.floor(cores / 2))),
+  // Transcriptions and caption renders running at once on this machine (MAX_HEAVY_REQUESTS); more wait their turn. Shared the same way.
+  maxHeavyRequests: num('MAX_HEAVY_REQUESTS', Math.max(2, Math.floor((cores * 3) / 8))),
+  // ONNX worker threads in this process, its share of ONNX_WORKERS for the machine (0 turns them off, see onnxPool.ts). They start on
+  // demand and stop when idle, so a share worked out when the process starts is close enough while the count changes.
+  onnxWorkers: Math.max(1, Math.ceil(num('ONNX_WORKERS', Math.max(2, Math.floor(cores / 4))) / processCount)),
   // Longest stretch of audio sent to the speech model in one call (STT_CHUNK_SECONDS); read the note in vertexClient.ts before raising it.
   sttChunkSeconds: num('STT_CHUNK_SECONDS', 28),
   // How long a transcription/caption request waits for a free slot before giving up, in ms (HEAVY_WAIT_SECONDS).
@@ -53,6 +69,12 @@ export const limits = {
   // Size of one piece of a large upload (UPLOAD_CHUNK_MB); well under the 100 MB a Cloudflare front door lets through in one request.
   uploadChunkBytes: num('UPLOAD_CHUNK_MB', 32) * 1024 * 1024,
 };
+
+// This process's part of a ceiling the whole deployment shares, for limits checked in memory because they run on every request. Traffic
+// is spread by connection, not by request, and a proxy holds few connections, so one process can see far more than its even part. Twice
+// that keeps a real person clear of a false refusal; these ceilings only stop floods, so a flood getting twice as far does not matter.
+// Worked out on each call, since the number of live processes changes as they scale.
+export const processShare = (max: number) => Math.min(max, Math.max(1, Math.ceil((2 * max) / Math.max(1, limits.totalProcesses))));
 
 // The most text one language may carry per second of video: several times real speech (~15-20 characters a second), with a floor for
 // short clips. Model calls are billed by text while minutes are charged by video length, so a short video cannot carry hours of text.

@@ -22,6 +22,9 @@ export const env = {
   // `cloud` (the default for now): Gemini 2.5 Flash and Chirp 3 HD voices, both on Google Cloud TTS, with no Gemini API key.
   // `chirp`: Chirp 3 HD voices only. `gemini`: the plan-tiered Gemini 3.8 voices, which need a paid GEMINI_API_KEY.
   ttsEngine: (process.env.TTS_ENGINE === 'gemini' || process.env.TTS_ENGINE === 'chirp' ? process.env.TTS_ENGINE : 'cloud') as 'cloud' | 'gemini' | 'chirp',
+  // A Gemini voice at its quota: `wait` (the default) holds the line for the model's next free turn (aiPacing.ts), and only past the
+  // wait allowed does Chirp 3 HD voice it; `chirp` hands it to Chirp 3 HD at once, which is faster but dearer.
+  ttsOnQuota: (process.env.TTS_ON_QUOTA === 'chirp' ? 'chirp' : 'wait') as 'wait' | 'chirp',
   // The model behind the Gemini 2.5 Flash voices, served by Cloud TTS on the service account.
   geminiTtsCloudModel: process.env.GEMINI_TTS_CLOUD_MODEL || 'gemini-2.5-flash-tts',
   // The models behind the Gemini 3.8 Flash-Lite and Gemini 3.8 Flash voices, served by the Gemini API's Interactions endpoint.

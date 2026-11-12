@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({ synthesize: vi.fn(), listVoices: vi.fn(), gemini: vi.fn() }));
 
@@ -12,6 +12,8 @@ vi.mock('./env', async (importOriginal) => {
       geminiTtsLiteModel: 'gemini-3.8-flash-lite-tts',
       geminiTtsFlashModel: 'gemini-3.8-flash-tts',
       geminiTtsPremiumModel: 'gemini-3.1-flash-tts-preview',
+      // Most of these tests are about which engine voices a line; waiting out a quota has its own tests below.
+      ttsOnQuota: 'chirp',
     },
   };
 });
@@ -27,6 +29,9 @@ vi.mock('@google-cloud/text-to-speech', () => ({
 
 import type { VoiceEngine } from '../../src/types';
 import { googleSynthesizeSpeech, resetGeminiTtsStateForTests, ttsRouteFor } from './googleTtsClient';
+import { env } from './env';
+import { limits } from './limits';
+import { col } from './mongo';
 
 const LITE = 'gemini-3.8-flash-lite-tts';
 const FLASH = 'gemini-3.8-flash-tts';
@@ -39,7 +44,15 @@ const CLOUD_ENTERPRISE: VoiceEngine[] = ['gemini-2.5-flash', 'chirp'];
 const httpError = (status: number, name: string) => Object.assign(new Error(`${status} ${name}: nope`), { status });
 const cloudModelOf = (request: { voice: { modelName?: string } }) => request.voice.modelName;
 
-beforeEach(() => {
+const quotaPause = limits.aiQuotaPauseMs;
+afterEach(() => {
+  limits.aiQuotaPauseMs = quotaPause;
+  env.ttsOnQuota = 'chirp';
+});
+
+beforeEach(async () => {
+  // Pauses and turns are shared through the database; each test starts with none.
+  await col('aiPace').deleteMany({});
   resetGeminiTtsStateForTests();
   mocks.synthesize.mockReset();
   mocks.gemini.mockReset();
@@ -96,12 +109,13 @@ describe('Gemini 2.5 Flash on Cloud TTS', () => {
     expect(mocks.synthesize.mock.calls.map(([request]) => request.voice.languageCode)).toEqual(['ur-PK', 'ar-EG']);
   });
 
-  it('hands a line in a language with no Cloud TTS voice back to the caller when out of quota, instead of failing on Chirp', async () => {
+  it('hands a line in a language with no Cloud TTS voice back to the caller when out of quota past its wait, instead of failing on Chirp', async () => {
+    limits.aiQuotaPauseMs = 100;
     mocks.synthesize.mockRejectedValue(Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded'), { code: 8 }));
-    await expect(googleSynthesizeSpeech('ନମସ୍କାର', 'or-IN', 'Kore', 'female', '', route())).rejects.toThrow(/RESOURCE_EXHAUSTED/);
-    // The caller's retry still reaches Gemini, though the model is paused for languages Chirp can take.
+    await expect(googleSynthesizeSpeech('ନମସ୍କାର', 'or-IN', 'Kore', 'female', '', route(), undefined, { maxWaitMs: 0 })).rejects.toThrow(/RESOURCE_EXHAUSTED/);
+    // The caller's retry waits for the model's pause to end, and reaches Gemini.
     mocks.synthesize.mockImplementation(async (request: any) => [{ audioContent: Buffer.from(cloudModelOf(request) ?? 'chirp') }]);
-    expect((await googleSynthesizeSpeech('ନମସ୍କାର', 'or-IN', 'Kore', 'female', '', route())).model).toBe(CLOUD);
+    expect((await googleSynthesizeSpeech('ନମସ୍କାର', 'or-IN', 'Kore', 'female', '', route(), undefined, { maxWaitMs: 5000 })).model).toBe(CLOUD);
   });
 });
 
@@ -167,6 +181,30 @@ describe('googleSynthesizeSpeech', () => {
     expect(result.engine).toBe('chirp');
     expect(mocks.gemini.mock.calls[0][1]).toBe('[laughing] वाह!');
     expect(mocks.synthesize.mock.calls[0][0].input.text).toBe('वाह!');
+  });
+
+  it('holds a line for its Gemini model at quota (the default), instead of handing it to the dearer Chirp 3 HD', async () => {
+    env.ttsOnQuota = 'wait';
+    limits.aiQuotaPauseMs = 150;
+    mocks.gemini.mockRejectedValueOnce(httpError(429, 'RESOURCE_EXHAUSTED'));
+    const route = ttsRouteFor('gemini-flash-lite', { engines: STARTER });
+    const started = Date.now();
+    const result = await googleSynthesizeSpeech('एक', 'hi-IN', 'Kore', 'female', '', route);
+    expect(result).toMatchObject({ engine: 'gemini', model: LITE });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(140);
+    expect(mocks.synthesize).not.toHaveBeenCalled();
+    expect(mocks.gemini).toHaveBeenCalledTimes(2);
+  });
+
+  it('voices the line with Chirp 3 HD only once it has waited as long as it may', async () => {
+    env.ttsOnQuota = 'wait';
+    limits.aiQuotaPauseMs = 100;
+    mocks.gemini.mockRejectedValue(httpError(429, 'RESOURCE_EXHAUSTED'));
+    const started = Date.now();
+    const result = await googleSynthesizeSpeech('दो', 'hi-IN', 'Kore', 'female', '', ttsRouteFor('gemini-flash-lite', { engines: STARTER }), undefined, { maxWaitMs: 350 });
+    expect(result.engine).toBe('chirp');
+    expect(Date.now() - started).toBeLessThan(1500);
+    expect(mocks.gemini.mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
   it('gives Chirp3-HD a beat of silence for a line that is only a laugh, instead of an empty request', async () => {

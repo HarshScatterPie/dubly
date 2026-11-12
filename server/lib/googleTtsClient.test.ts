@@ -12,6 +12,8 @@ vi.mock('./env', async (importOriginal) => {
       geminiTtsLiteModel: 'gemini-3.8-flash-lite-tts',
       geminiTtsFlashModel: 'gemini-3.8-flash-tts',
       geminiTtsPremiumModel: 'gemini-3.1-flash-tts-preview',
+      // These tests are about which engine voices a line when Gemini cannot; waiting out a quota is tested in googleTtsChain.test.ts.
+      ttsOnQuota: 'chirp',
     },
   };
 });
@@ -27,13 +29,16 @@ vi.mock('@google-cloud/text-to-speech', () => ({
 
 import type { VoiceEngine } from '../../src/types';
 import { googleSynthesizeSpeech, resetGeminiTtsStateForTests, ttsRouteFor } from './googleTtsClient';
+import { col } from './mongo';
 
 const ENTERPRISE: VoiceEngine[] = ['gemini-flash-lite', 'gemini-flash', 'chirp'];
 const liteRoute = () => ttsRouteFor('gemini-flash-lite', { engines: ENTERPRISE });
 
 const httpError = (status: number, name: string) => Object.assign(new Error(`${status} ${name}: nope`), { status });
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Quota pauses and model turns are shared through the database; each test starts with none.
+  await col('aiPace').deleteMany({});
   resetGeminiTtsStateForTests();
   mocks.synthesize.mockReset();
   mocks.gemini.mockReset();

@@ -7,6 +7,8 @@ import { log } from './log';
 import { stripPerformanceTags } from './performance';
 import { silenceWav } from './audioUtils';
 import { geminiSpeechSynthesize } from './geminiSpeech';
+import { AiBusyError, isQuotaError, reportQuotaHit, takeTurn } from './aiPacing';
+import { limits } from './limits';
 
 /**
  * Speech synthesis for the voice engines a built-in voice can have:
@@ -160,8 +162,10 @@ export function ttsRouteFor(engine: VoiceEngine, opts: { premium?: boolean; engi
 // Cloud TTS Gemini request limits: 4,000 bytes of text, 8,000 of text and prompt together.
 const CLOUD_GEMINI_MAX_TEXT_BYTES = 4000;
 const CLOUD_GEMINI_MAX_TOTAL_BYTES = 8000;
-// Out of quota: hand lines to the next model for a while instead of waiting out a retry on every line of a long dub.
-const GEMINI_QUOTA_PAUSE_MS = 90_000;
+// With TTS_ON_QUOTA=chirp, the longest a line waits for a Gemini model's turn before Chirp 3 HD voices it instead.
+const CHIRP_POLICY_WAIT_MS = 15_000;
+// The pacing name of Chirp 3 HD on Cloud TTS (aiPacing.ts).
+export const CHIRP_PACE = 'chirp-3-hd';
 // Model not enabled or not permitted for this project: an operator has to act, so stop trying for longer.
 const GEMINI_UNAVAILABLE_PAUSE_MS = 30 * 60_000;
 // A language refused this many times in a row is treated as unsupported; one refusal may just be that line's text.
@@ -227,9 +231,6 @@ function httpStatus(err: unknown): number | undefined {
 }
 
 // gRPC status codes (Cloud TTS) or HTTP statuses (Gemini API), matched by number or by the name in the message.
-function isQuotaError(err: unknown): boolean {
-  return grpcCode(err) === 8 || httpStatus(err) === 429 || /RESOURCE_EXHAUSTED|quota/i.test(String((err as Error)?.message ?? err));
-}
 function isRefusal(err: unknown): boolean {
   return grpcCode(err) === 3 || httpStatus(err) === 400 || /INVALID_ARGUMENT/i.test(String((err as Error)?.message ?? err));
 }
@@ -275,9 +276,12 @@ async function chirpSynthesize(text: string, bcp47: string, preferredVoiceName: 
 }
 
 /**
- * Voices a line along its route. Gemini models are tried best first (emotion and delivery
- * follow `style`); one out of quota, withdrawn, or refusing the language hands the line to
- * the next, and Chirp3-HD voices whatever none of them could.
+ * Voices a line along its route. Gemini models are tried best first (emotion and delivery follow `style`), each in its turn
+ * (aiPacing.ts); one withdrawn or refusing the language hands the line to the next, and Chirp3-HD voices whatever none of them could.
+ *
+ * At its quota, a Gemini model holds the line for its next free turn rather than handing it to Chirp 3 HD (TTS_ON_QUOTA=wait, the
+ * default): the dub takes longer but sounds the same and costs less. Only once the wait allowed (`maxWaitMs`) is used up does Chirp
+ * 3 HD voice it, so a dub never fails just for quota. With TTS_ON_QUOTA=chirp a model at its quota is skipped straight away.
  *
  * `chirpFallbackBcp47` is the related language whose Chirp3-HD voices read this one's script
  * (Hindi for Bhojpuri, Bengali for Assamese...), for languages Chirp3-HD does not speak itself.
@@ -289,44 +293,73 @@ export async function googleSynthesizeSpeech(
   gender: string,
   style: string,
   route: TtsRoute,
-  chirpFallbackBcp47?: string
+  chirpFallbackBcp47?: string,
+  opts: { maxWaitMs?: number } = {}
 ): Promise<{ audio: Buffer; engine: TtsEngine; model?: string }> {
+  const startedAt = Date.now();
+  const deadline = startedAt + (opts.maxWaitMs ?? limits.aiQueueMaxWaitMs);
+  const remaining = () => Math.max(0, deadline - Date.now());
   const chirp = async () => {
     const locale = !chirpFallbackBcp47 || (await hasChirpVoice(bcp47)) ? bcp47 : chirpFallbackBcp47;
-    return { audio: await chirpSynthesize(text, locale, preferredVoiceName, gender), engine: 'chirp' as const };
+    await takeTurn(CHIRP_PACE, { maxWaitMs: remaining() });
+    try {
+      return { audio: await chirpSynthesize(text, locale, preferredVoiceName, gender), engine: 'chirp' as const };
+    } catch (err) {
+      // Every process holds back from Chirp for a moment; the caller's retry then waits that out.
+      if (isQuotaError(err)) await reportQuotaHit(CHIRP_PACE);
+      throw err;
+    }
   };
   // A Chirp 3 HD voice speaks its own languages itself; Gemini stands in for the rest, where it sounds native.
   if (route.gemini.length === 0 || (route.chirp === 'first' && (await hasChirpVoice(bcp47)))) return chirp();
 
-  // With no Cloud TTS voice to fall back on (Odia), a paused model is still tried, and running out of quota goes back to the caller, whose retry waits for it to refill.
+  // With no Cloud TTS voice to fall back on (Odia), running out of quota goes back to the caller once the wait allowed is up.
   const onlyGemini = !(await hasAnyVoice(bcp47)) && !(chirpFallbackBcp47 && (await hasAnyVoice(chirpFallbackBcp47)));
-  let quotaError: unknown = null;
-  for (const model of onlyGemini ? route.gemini : usableGeminiTtsModels(route, bcp47)) {
-    const cloud = servedByCloudTts(model);
-    const locale = cloud ? cloudGeminiLocale(bcp47, chirpFallbackBcp47) : bcp47;
-    if (!locale || (cloud && !fitsCloudGemini(text, style))) continue;
-    try {
-      const audio = cloud
-        ? await cloudGeminiSynthesize(model, text, locale, preferredVoiceName, style)
-        : await geminiSpeechSynthesize(model, text, preferredVoiceName, style);
-      geminiRefusals.delete(`${model}|${bcp47}`);
-      return { audio, engine: 'gemini', model };
-    } catch (err) {
-      if (isQuotaError(err)) {
+  const waitForQuota = env.ttsOnQuota === 'wait' || onlyGemini;
+  for (;;) {
+    let quotaError: unknown = null;
+    for (const model of onlyGemini ? route.gemini : usableGeminiTtsModels(route, bcp47)) {
+      const cloud = servedByCloudTts(model);
+      const locale = cloud ? cloudGeminiLocale(bcp47, chirpFallbackBcp47) : bcp47;
+      if (!locale || (cloud && !fitsCloudGemini(text, style))) continue;
+      try {
+        await takeTurn(model, {
+          maxWaitMs: waitForQuota ? remaining() : Math.min(remaining(), CHIRP_POLICY_WAIT_MS),
+          onWait: (waitMs) => log.info('ai_call_queued', { provider: 'google-tts', model, waitMs }),
+        });
+      } catch (err) {
+        // Its queue is longer than this line may wait: the next model, or Chirp 3 HD, takes it.
+        if (!(err instanceof AiBusyError)) throw err;
         quotaError = err;
-        geminiPausedUntil.set(model, Date.now() + GEMINI_QUOTA_PAUSE_MS);
-        log.warn('tts_engine_fallback', { engine: 'gemini', model, reason: 'quota', pauseMs: GEMINI_QUOTA_PAUSE_MS }, `[tts] ${model} out of quota; skipping it for ${GEMINI_QUOTA_PAUSE_MS / 1000}s`);
-      } else if (isRefusal(err)) {
-        geminiRefusals.set(`${model}|${bcp47}`, (geminiRefusals.get(`${model}|${bcp47}`) ?? 0) + 1);
-        log.warn('tts_engine_fallback', { engine: 'gemini', model, reason: 'refused', languageCode: bcp47 }, `[tts] ${model} refused a ${bcp47} line: ${(err as Error)?.message}`);
-      } else if (isUnavailableModel(err)) {
-        geminiPausedUntil.set(model, Date.now() + GEMINI_UNAVAILABLE_PAUSE_MS);
-        log.error('tts_engine_unavailable', err, { engine: 'gemini', model });
-      } else {
-        throw err;
+        continue;
+      }
+      try {
+        const audio = cloud
+          ? await cloudGeminiSynthesize(model, text, locale, preferredVoiceName, style)
+          : await geminiSpeechSynthesize(model, text, preferredVoiceName, style);
+        geminiRefusals.delete(`${model}|${bcp47}`);
+        return { audio, engine: 'gemini', model };
+      } catch (err) {
+        if (isQuotaError(err)) {
+          quotaError = err;
+          // Paused for every process: the next turn of this model waits for the quota to refill.
+          await reportQuotaHit(model);
+        } else if (isRefusal(err)) {
+          geminiRefusals.set(`${model}|${bcp47}`, (geminiRefusals.get(`${model}|${bcp47}`) ?? 0) + 1);
+          log.warn('tts_engine_fallback', { engine: 'gemini', model, reason: 'refused', languageCode: bcp47 }, `[tts] ${model} refused a ${bcp47} line: ${(err as Error)?.message}`);
+        } else if (isUnavailableModel(err)) {
+          geminiPausedUntil.set(model, Date.now() + GEMINI_UNAVAILABLE_PAUSE_MS);
+          log.error('tts_engine_unavailable', err, { engine: 'gemini', model });
+        } else {
+          throw err;
+        }
       }
     }
+    if (!quotaError) return chirp();
+    // At quota with time left to wait: round again, where each model's turn waits for its quota to come back.
+    if (waitForQuota && remaining() > 0 && !(quotaError instanceof AiBusyError)) continue;
+    if (onlyGemini) throw quotaError;
+    log.warn('tts_engine_fallback', { engine: 'gemini', reason: 'quota', waitedMs: Date.now() - startedAt }, '[tts] Gemini voices stayed at their quota for longer than this line may wait; Chirp 3 HD voices it');
+    return chirp();
   }
-  if (onlyGemini && quotaError) throw quotaError;
-  return chirp();
 }

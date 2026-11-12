@@ -33,6 +33,8 @@ process.env.ALLOW_SIGNUP = 'true';
 process.env.MEDIA_URL_SECRET = 'test-media-url-secret';
 // The global per-address ceiling is tested on its own; the rest of the suite sends every request from 127.0.0.1.
 process.env.RATE_ALL_PER_IP_MINUTE = process.env.RATE_ALL_PER_IP_MINUTE || '1000000';
+// No AI model is paced to its quota here (a voice line every 6 s would slow every test down); aiPacing.test.ts paces its own.
+process.env.AI_MODEL_RPM = '';
 
 const { connectMongo, closeMongo } = await import('../lib/mongo');
 const { ensureMediaIndexes } = await import('../lib/mediaStore');

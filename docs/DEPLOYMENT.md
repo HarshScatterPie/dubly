@@ -91,10 +91,16 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 |---|---|---|
 | `MAX_VIDEO_MINUTES` | 60 | Longest source video accepted |
 | `MAX_DUBS_PER_WORKSPACE` | 2 | Dubs rendering at once per workspace; more are queued |
-| `WEB_CONCURRENCY` | `auto` in production (half the cores), else 1 | Server processes on this machine, sharing its port |
-| `INSTANCE_COUNT` | 1 | Machines serving this database. Only divides the in-memory flood ceilings between processes; everything else is shared through MongoDB |
-| `MAX_ACTIVE_DUBS` | half the cores, at least 2 | Dubs rendering at once on this machine, split between its processes |
-| `MAX_HEAVY_REQUESTS` / `HEAVY_WAIT_SECONDS` | 3/8 of the cores, at least 2 / 600 | Concurrent transcriptions and caption renders / how long one waits before `503` |
+| `WEB_CONCURRENCY` | `auto` in production, else 1 | Server processes on this machine, sharing its port. A number fixes it; `auto` scales between `MIN_PROCESSES` and `MAX_PROCESSES` with the load |
+| `MIN_PROCESSES` / `MAX_PROCESSES` | 2 / cores − 1 | With `auto`: processes always running / the most it adds. One is added at a time while the event loops are busy (on average 60% or more, or one answering 200 ms late) and memory allows; an idle one is retired after three quiet minutes or when memory runs short. A retired process finishes its work first |
+| `INSTANCE_COUNT` | 1 | Only a first guess: every process heartbeats in `instances`, and the live count (all machines and containers) divides the in-memory flood ceilings |
+| `MAX_ACTIVE_DUBS` | half the cores, at least 2 | Dubs rendering at once on this machine, however many processes it runs (the supervisor hands out the slots) |
+| `MAX_HEAVY_REQUESTS` / `HEAVY_WAIT_SECONDS` | 3/8 of the cores, at least 2 / 600 | Concurrent transcriptions and caption renders on this machine / how long one waits before `503` |
+| `MIN_FREE_MEMORY_MB` / `PROCESS_MEMORY_MB` | 1024 / 300 | New dubs, transcriptions and caption renders wait while less memory than this is free (a quarter of it when nothing runs, so work still goes one at a time); a process is added only with this plus one process's worth free |
+| `AI_MODEL_RPM` | `gemini-2.5-flash-tts=10` | Requests a minute each AI model may get, as `model=rpm,model=rpm`; calls past it wait their turn, in order, across every process and machine. Unlisted models are not paced, only paused when the provider says it is out of quota. Empty: pace none |
+| `AI_QUEUE_MAX_WAIT_MINUTES` / `AI_INTERACTIVE_WAIT_SECONDS` | 30 / 45 | How long a call waits for its model's turn in a background job / while someone waits on the screen (voice previews: then Chirp 3 HD, or `503 VOICES_BUSY`) |
+| `AI_QUOTA_PAUSE_SECONDS` | 60 | How long a model is paused for everyone after the provider answers "out of quota" |
+| `TTS_ON_QUOTA` | `wait` | A Gemini voice at its quota: `wait` holds the line for the model's turn (slower, same voice, cheaper), and only past the wait allowed does Chirp 3 HD voice it; `chirp` hands it to Chirp 3 HD at once |
 | `ONNX_WORKERS` | a quarter of the cores, at least 2 | Worker threads for the face scan and voice-activity detection, started on demand. `0` runs them on the main thread, which freezes the API while they work |
 | `STORAGE_LIMIT_MB` / `ENFORCE_STORAGE_LIMIT` | 2048 / true | Allowance per workspace, shown on the Usage page / refuse uploads past it (`false` only shows it) |
 | `RATE_API_PER_MINUTE` | 600 | Any authenticated request, per user |

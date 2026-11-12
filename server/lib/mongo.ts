@@ -66,6 +66,9 @@ export const COLLECTIONS = [
   'dubAdmission',
   'uploadSessions',
   'captionFailures',
+  // Each AI model's queue of turns and quota pause (aiPacing.ts), and each server process's heartbeat (instances.ts).
+  'aiPace',
+  'instances',
 ] as const;
 export type CollectionName = (typeof COLLECTIONS)[number];
 
@@ -122,6 +125,8 @@ const INDEXES: Partial<Record<CollectionName, IndexDescription[]>> = {
   cacheEvents: [{ key: { at: 1 }, expireAfterSeconds: 60 * 60, name: 'ttl' }],
   uploadSessions: [{ key: { expiresAt: 1 }, name: 'expires' }],
   captionFailures: [{ key: { expireAt: 1 }, expireAfterSeconds: 0, name: 'ttl' }],
+  // A server process's heartbeat (instances.ts); one that stopped without saying so expires by itself.
+  instances: [{ key: { expireAt: 1 }, expireAfterSeconds: 0, name: 'ttl' }],
 };
 
 export async function ensureIndexes(): Promise<void> {

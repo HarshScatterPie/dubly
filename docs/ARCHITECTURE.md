@@ -121,11 +121,20 @@ The deployment is a single small VM, so capacity is bought back in code rather t
 
 ## Scaling
 
-More cores or more machines need no code change: a bigger machine raises its own budgets, and more machines only need the same `MONGODB_URI`, a load balancer and `INSTANCE_COUNT`. No sticky sessions are needed. The shared state is all in MongoDB, so nothing new has to be run.
+More cores or more machines need no code change: a bigger machine raises its own budgets, and more machines or containers only need the same `MONGODB_URI` and a load balancer. No sticky sessions are needed, and nothing has to be told how many there are: each process heartbeats in `instances`. The shared state is all in MongoDB, so nothing new has to be run.
+
+**On one machine** the supervisor (`primary.ts`) scales the server processes itself (`WEB_CONCURRENCY=auto`): it starts `MIN_PROCESSES`, adds one at a time up to `MAX_PROCESSES` while their event loops are busy and memory allows, and retires an idle one after three quiet minutes or when memory runs short (`autoscale.ts`, a pure function of the processes' 5-second load reports). A retiring process stops taking connections and dubs and finishes its work first, so nothing is cut short. The supervisor also hands out the machine's dub and heavy-work slots over IPC (`machineSlots.ts`), so `MAX_ACTIVE_DUBS` and `MAX_HEAVY_REQUESTS` hold exactly however many processes there are, and a slot is only given while `MIN_FREE_MEMORY_MB` is free.
+
+**Across machines or containers**, a platform's autoscaler (Kubernetes, Cloud Run, a managed instance group) adds and removes them; each one counts the live processes from the heartbeats, takes queued dubs from the shared queue, and paces AI calls through the shared queue below.
+
+**AI quotas** (`aiPacing.ts`): every model call takes the next turn for its model, one atomic write in `aiPace`. A model with a known quota (`AI_MODEL_RPM`) gets one call per interval, so calls past it wait in order rather than fail, from every process and machine together. A quota answer from the provider pauses the model for everyone (`AI_QUOTA_PAUSE_SECONDS`). A job waits up to `AI_QUEUE_MAX_WAIT_MINUTES`, a preview `AI_INTERACTIVE_WAIT_SECONDS`, then gets `AiBusyError` (a Gemini voice line then goes to Chirp 3 HD, so a dub does not fail for quota).
 
 | State | Where it lives | How it holds across processes |
 |---|---|---|
-| Waiting dubs | `jobs` | Any process with room claims the oldest in a transaction; the per-workspace cap is safe because two claims collide on `dubAdmission` |
+| Waiting dubs | `jobs` | Any process with a free machine slot claims the oldest in a transaction; the per-workspace cap is safe because two claims collide on `dubAdmission` |
+| Dub and heavy-work slots, memory headroom | Supervisor memory | Handed out over IPC by the machine's supervisor; a process that stops gives its slots back |
+| AI model turns and quota pauses | `aiPace` | One atomic write per call; the pause is a `$max` on one field |
+| Live processes | `instances` | Heartbeat every 15 s, counted if under 45 s old; a stopped process expires by TTL |
 | Running jobs | `jobs` | Heartbeat every 15 s; any process settles a job whose heartbeat stopped, exactly once. Cancel requests are read at the next progress write |
 | Limits on money, accounts and email | `rateLimits` | Counted atomically, exactly |
 | Flood ceilings (`RateRule.hot`) | Memory | They run on every request, so each process counts twice its even share. Traffic is spread by connection, not request |
@@ -133,8 +142,7 @@ More cores or more machines need no code change: a bigger machine raises its own
 | Session, account, membership, plan, settings, profile and media caches | Memory | Cleared at once where the change happens and, through a change stream on `cacheEvents`, in the other processes |
 | Large uploads | GridFS (`uploads/…`) | Each chunk may land on a different process |
 | Scratch files, voice cache | Local disk | Per machine. A voice cached on one machine is bought again on another; a sweep keeps every folder of an unsettled job, wherever it runs |
-| Transcription and caption CPU slots | Memory | A limit on this machine's own CPU, so it is meant to be local |
 
-The Gemini voice circuit breakers (`geminiPausedUntil`) are per process: each learns of a quota limit by itself, at the cost of one failed call.
+A Gemini voice model that is withdrawn or not permitted (`geminiPausedUntil`) is still learnt per process, at the cost of one failed call; quota is shared, as above.
 
 A direct-to-storage upload was considered and left out: `ffprobe` and `ffmpeg` may only read local files.

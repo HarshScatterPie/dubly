@@ -10,6 +10,8 @@ import { trimSilence } from './audioUtils';
 import { voiceForPlan } from '../../src/lib/voiceEngines';
 import { VOICES } from '../../src/data/mockData';
 import { log } from './log';
+import { AiBusyError } from './aiPacing';
+import { limits } from './limits';
 
 // Every provider here is Google's own (Vertex AI / Gemini for STT + translation, Google
 // Cloud TTS for synthesis). 'auto' and 'vertex' are equivalent today — the type keeps the
@@ -138,9 +140,11 @@ export async function routeSynthesizeSpeech(
     take?: number;
     // The user turned on premium voices (paid extra); without it a premium take is neither made nor served from cache.
     premium?: boolean;
+    // How long the line may wait for its voice model's turn (aiPacing.ts): short for a preview someone is watching, long in a dub.
+    maxWaitMs?: number;
   }
 ): Promise<{ provider: 'vertex'; engine: TtsEngine; model?: string; audio: Buffer; fromCache: boolean }> {
-  const { engines, expressive = true, take = 0, premium = false } = opts;
+  const { engines, expressive = true, take = 0, premium = false, maxWaitMs } = opts;
   const style = expressive ? opts.style ?? '' : '';
   const spokenText = normalizeTextForSpeech(rawText) || rawText.trim();
   // Tags are only performed by expressive Gemini voices; Chirp3-HD strips them itself.
@@ -180,16 +184,20 @@ export async function routeSynthesizeSpeech(
     if (cachedChirp) return { provider: 'vertex', engine: 'chirp', audio: trimSilence(cachedChirp), fromCache: true };
   }
 
+  // One allowance for the whole line, retries included, so a retry does not start the wait for a model's turn all over again.
+  const deadline = Date.now() + (maxWaitMs ?? limits.aiQueueMaxWaitMs);
   for (let retry = 0; ; retry++) {
     try {
-      const result = await googleSynthesizeSpeech(text, bcp47, voice.providerVoice.vertex, voice.gender, style, route, chirpFallbackBcp47);
+      const result = await googleSynthesizeSpeech(text, bcp47, voice.providerVoice.vertex, voice.gender, style, route, chirpFallbackBcp47, {
+        maxWaitMs: Math.max(0, deadline - Date.now()),
+      });
       const audio = trimSilence(result.audio);
       await writeTtsCache(result.engine === 'gemini' && result.model ? geminiKeyFor(result.model) : chirpKey, audio);
       return { provider: 'vertex', engine: result.engine, model: result.model, audio, fromCache: false };
     } catch (err) {
       // A dub synthesizes one clip per segment back-to-back, which is exactly the shape
       // that trips per-minute quotas. Wait transient failures out rather than failing the whole render.
-      if (isTransientTtsError(err) && retry < TTS_RETRY_BACKOFF_MS.length) {
+      if (isTransientTtsError(err) && retry < TTS_RETRY_BACKOFF_MS.length && !(err instanceof AiBusyError) && Date.now() < deadline) {
         const waitMs = TTS_RETRY_BACKOFF_MS[retry];
         log.warn('provider_retry', { provider: 'google-tts', operation: 'synthesize', attempt: retry + 1, waitMs }, `[modelRouter] TTS failed (attempt ${retry + 1}/${TTS_RETRY_BACKOFF_MS.length + 1}), retrying in ${waitMs}ms: ${(err as Error)?.message}`);
         await new Promise((resolve) => setTimeout(resolve, waitMs));

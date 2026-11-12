@@ -1,10 +1,12 @@
 import { limits } from './limits';
 import { claimNextDubJob, type DubJob } from './jobs';
+import { acquireSlot, resetSlotsForTests } from './machineSlots';
 
 /**
  * Dub admission. Waiting dubs live in the database, not in a process, so whichever process has room takes the oldest one: a burst that
- * lands on one process spreads over all of them, and a restart loses nothing. maxActiveDubs is this process's share of the machine;
- * the per-workspace cap holds across every process (claimNextDubJob).
+ * lands on one process spreads over all of them, and a restart loses nothing. A dub starts only with one of the machine's dub slots
+ * (machineSlots.ts: MAX_ACTIVE_DUBS on the machine, and memory to spare), whichever of its processes asks; the per-workspace cap holds
+ * across every process and machine (claimNextDubJob). A dub that cannot start waits in the queue, however long that takes.
  */
 const DISPATCH_EVERY_MS = 3_000;
 
@@ -23,14 +25,28 @@ async function pump(): Promise<void> {
   do {
     again = false;
     try {
-      while (!frozen && runner && running < limits.maxActiveDubs) {
-        const job = await claimNextDubJob(limits.maxDubsPerWorkspace);
-        if (!job) break;
+      while (!frozen && runner) {
+        // The slot first: a dub claimed without one could not be handed back to the queue.
+        const release = await acquireSlot('dub');
+        if (!release) break;
+        let job: DubJob | null;
+        try {
+          job = await claimNextDubJob(limits.maxDubsPerWorkspace);
+        } catch (err) {
+          release();
+          throw err;
+        }
+        if (!job) {
+          release();
+          break;
+        }
+        const claimed = job;
         running++;
-        void runner(job)
-          .catch((err) => console.error(`[queue] dub ${job.id} crashed outside its own error handling`, err))
+        void runner(claimed)
+          .catch((err) => console.error(`[queue] dub ${claimed.id} crashed outside its own error handling`, err))
           .finally(() => {
             running = Math.max(0, running - 1);
+            release();
             void wakeDubQueue();
           });
       }
@@ -75,4 +91,5 @@ export function resetQueueForTests(): void {
   running = 0;
   again = false;
   clearInterval(dispatcher);
+  resetSlotsForTests();
 }

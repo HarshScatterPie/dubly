@@ -6,6 +6,7 @@ import { VOICES, LANGUAGES } from '../../src/data/mockData';
 import { effectiveExtras } from '../../src/lib/planMath';
 import { languageVoiced } from '../../src/lib/voiceEngines';
 import { routeSynthesizeSpeech } from '../lib/modelRouter';
+import { AiBusyError } from '../lib/aiPacing';
 import { buildStylePrompt } from '../lib/speechStyle';
 import { applySpokenForms } from '../lib/glossary';
 import { getGlossary } from '../lib/glossaryStore';
@@ -120,6 +121,8 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
       style: buildStylePrompt(emotion, delivery),
       expressive: settings.preferences.expressiveVoices,
       premium: effectiveExtras(plan.paidExtras, settings.preferences, plan.voiceEngines).premiumVoices,
+      // Someone is waiting on the screen: a short wait for the voice's turn, then Chirp 3 HD or a "busy" answer.
+      maxWaitMs: limits.aiInteractiveWaitMs,
     });
     const shaped = await applyPitchSpeed(audio, pitch ?? 1, speed ?? 1, jobDir);
     // Charged by the length the voice spoke, before pitch and speed reshape it: that is what the voice cost. A cached take cost nothing.
@@ -134,6 +137,12 @@ ttsRouter.post('/generate', rateLimit('tts', [['user', rateRules.ttsPerUser]]), 
   } catch (err) {
     // Refunded before answering, so a client that reloads its usage on the error already sees the minutes back.
     await settle(0).catch((refundErr) => log.error('voice_minutes_refund_failed', refundErr, { workspaceId }));
+    if (err instanceof AiBusyError) {
+      // Every voice is at its quota for longer than a preview should keep someone waiting.
+      res.setHeader('Retry-After', '30');
+      res.status(503).json({ error: 'The voices are busy with other dubs right now. Try again in a minute.', code: 'VOICES_BUSY', retryAfterSeconds: 30 });
+      return;
+    }
     res.status(500).json({ error: (err as Error).message });
   } finally {
     if (clipToken) await releaseLease(clipLease(workspaceId), clipToken).catch(() => undefined);

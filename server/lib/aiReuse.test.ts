@@ -6,7 +6,8 @@ const mocks = vi.hoisted(() => ({ generate: vi.fn(), synthesize: vi.fn(), listVo
 vi.mock('./credentials', () => ({ hasGoogleCredentials: () => true, useAdc: true, gcpServiceAccountPath: '' }));
 vi.mock('./env', async (importOriginal) => {
   const original = await importOriginal<typeof import('./env')>();
-  return { env: { ...original.env, ttsEngine: 'cloud', vertexProjectId: 'demo-test' } };
+  // `chirp`: a line Gemini cannot voice for quota goes to Chirp 3 HD at once, which the reuse test below relies on.
+  return { env: { ...original.env, ttsEngine: 'cloud', vertexProjectId: 'demo-test', ttsOnQuota: 'chirp' } };
 });
 // A cache of its own, so nothing a developer's server cached can answer for the model here.
 vi.mock('./paths', async (importOriginal) => {
@@ -42,13 +43,16 @@ import { routeSynthesizeSpeech } from './modelRouter';
 import { resetGeminiTtsStateForTests } from './googleTtsClient';
 import { pcmToWav } from './audioUtils';
 import { VOICES } from '../../src/data/mockData';
+import { col } from './mongo';
 
 const reply = (text: string) => ({ text, usageMetadata: {} });
 const linesIn = (request: { contents: unknown }) => JSON.parse(String(request.contents).split('Lines:\n')[1]) as { id: string; text: string }[];
 const toDevanagari = async (request: { contents: unknown }) =>
   reply(JSON.stringify({ translations: linesIn(request).map((l) => ({ id: l.id, translatedText: `देव ${l.text}` })) }));
 
-beforeEach(() => {
+beforeEach(async () => {
+  // Quota pauses and model turns are shared through the database; each test starts with none.
+  await col('aiPace').deleteMany({});
   mocks.generate.mockReset();
   mocks.synthesize.mockReset();
   mocks.listVoices.mockReset();

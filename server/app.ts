@@ -148,7 +148,8 @@ export function createApp(options: { serveFrontend?: boolean; logRequests?: bool
   app.use(
     ipRateLimit({
       windowMs: rateRules.allPerIp.windowMs,
-      limit: processShare(rateRules.allPerIp.max),
+      // Worked out per request: this process's share changes as processes are added and retired.
+      limit: () => processShare(rateRules.allPerIp.max),
       standardHeaders: 'draft-8',
       legacyHeaders: false,
       keyGenerator: (req) => ipKeyGenerator(clientIp(req) ?? 'unknown'),

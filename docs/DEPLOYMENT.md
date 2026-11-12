@@ -2,56 +2,44 @@
 
 Each server process runs everything: the API, the built frontend, jobs, and scheduled maintenance. A machine runs several of them by itself (`WEB_CONCURRENCY`), and any number of machines can share one MongoDB behind a load balancer; set `INSTANCE_COUNT` to the number of machines (see ARCHITECTURE.md → Scaling).
 
-## Current production: the office PC
+## Current production: the Docker container on the office PC
 
 | | |
 |---|---|
-| Machine | The Windows PC in the office, next to its local MongoDB (MONGODB.md). The GCE VM is gone, and so is auto-deploy |
-| Traffic | `https://dubly.scatterpie.workers.dev` (a Cloudflare Worker, free plan) → a Cloudflare tunnel → `127.0.0.1:8787`. Nothing on the PC listens on the network |
-| Process | `deploy/local-prod/run.ps1`: starts MongoDB, the tunnel and the app (`NODE_ENV=production`, `HOST=127.0.0.1`, sign-up closed), checks every 15 s and restarts whatever stopped |
-| Files | `%USERPROFILE%\dubly-prod` (logs, the tunnel's address, the Worker's shared secret); the database in `%USERPROFILE%\dubly-mongo`, never inside OneDrive |
+| Machine | The Windows PC in the office, running Docker Desktop. The GCE VM is gone, and so is auto-deploy |
+| Container | `dubly` (`compose.yaml`, [deploy/docker/README.md](../deploy/docker/README.md)): the app and its own MongoDB 9.0.4, `restart: unless-stopped`. Settings in `deploy/docker/dubly.env`, data in the `dubly_dubly-data` volume, daily backups at 03:00 into `%USERPROFILE%\dubly-prod\docker-backups` |
+| Traffic | `https://dubly.scatterpie.workers.dev` (a Cloudflare Worker, free plan) → a Cloudflare quick tunnel that the container opens and registers itself (`FRONT_DOOR_URL`) → the app. The container's port is published on `127.0.0.1:8787` only |
+| Since | 2026-11-12: the data moved over from the PC's own MongoDB (`%USERPROFILE%\dubly-mongo`), which still holds the copy from the moment of the move. The old launcher (`deploy/local-prod/run.ps1`) is retired; starting it again would take the Worker's address away from the container |
+| This network | The office antivirus (Kaspersky) inspects TLS: `DUBLY_EXTRA_CA` in the root `.env` names its root certificate, for the build and for the app's calls to Google and Gmail |
 
-Setup, the fixed address and backups are in [deploy/local-prod/README.md](../deploy/local-prod/README.md).
-
-**How a change reaches production:** push to `main` → CI and the Release gate check it on GitHub (≈15–20 min; the gate waits for GitHub's CodeQL scan of the same commit). **Nothing deploys from GitHub.** Once both are green, update the PC by hand: `git pull`, `npm ci` if the lockfile changed, `npm run build`, then `stop.ps1` and `run.ps1` (or end the `node server/index.ts` process and the launcher restarts it within 15 s). Don't update the PC to a commit with a red run.
+**How a change reaches production:** push to `main` → CI and the Release gate check it on GitHub (≈15–20 min; the gate waits for GitHub's CodeQL scan of the same commit). **Nothing deploys from GitHub.** Once both are green, update the PC by hand: `git pull`, then `docker compose up -d --build`. The old container drains running dubs before the new one starts on the same data. Don't update the PC to a commit with a red run.
 
 **What the Release gate checks** (`.github/workflows/release-gate.yml`; each job writes its numbers to the run's summary page):
 - **Dub performance and model-call budgets** (`npm run test:perf`, `server/perf/pipeline.perf.ts`): uploads a generated two-voice video, analyses, translates, dubs, re-dubs it unchanged, adds Hinglish, dubs that and retakes one line, all through the real API with real ffmpeg, voice activity and face detection against a throwaway MongoDB; only Google's models are faked (instant, counted, with the ~10 a minute Gemini 2.5 TTS quota). It fails if a step pays for model work it already had (a re-dub with nothing changed must make **no** model call; a one-line retake at most 3 voice and 4 text calls), or exceeds its time per video minute, main-thread stall, API latency during a dub, or memory budget. `PERF_BUDGET_SCALE` scales the time budgets.
 - **Production start, headers and bundle size**: the frontend's gzip size (`server/perf/bundle-budget.mjs`), then the server started the way production starts it (`server/perf/prod-smoke.mjs`): boot time, the built app and its security and cache headers (an enforced Content-Security-Policy among them), the API refusing unsigned requests, a 400-request burst, memory, and a clean stop on SIGTERM.
 - **Advisories, workflows and code scanning**: no critical advisory in any dependency and no high one in what ships, valid workflows (actionlint), and no open high or critical CodeQL alert on `main` (it waits for CodeQL to finish analysing the commit). `js/missing-rate-limiting` is allowed: CodeQL only recognises third-party rate-limit packages, while every route it reports is limited by `server/lib/rateLimit.ts`, `requireAuth` and the global `express-rate-limit` cap in `server/app.ts`. Dismiss those alerts as false positives on GitHub to keep the Security tab readable.
 
-**Still open:** the tunnel is a quick tunnel (its address changes on every restart; the Worker follows it, but uploads are capped at 100 MB per request and there is no uptime promise). A domain on Cloudflare would give a named tunnel. The PC must stay on and awake.
+**Still open:** the tunnel is a quick tunnel. Its address changes whenever it is replaced (the container re-registers it, and the Worker follows within a minute or two), uploads are capped at 100 MB per request, and there is no uptime promise. A domain on Cloudflare would allow a named tunnel. The PC must stay on and awake, with Docker Desktop starting at sign-in.
 
-## Container deployment (alternative)
+## Container deployment (one container)
 
-The same app ships as a Docker image, for hosts that run containers.
-
-## Build
+The whole of Dubly also ships as one Docker image and one container, `dubly`: the built frontend, the API and dub workers, **and its own MongoDB** 9.0.4 (a single-node replica set on the container's loopback, access control on, logins created on first start). A daily backup of the database goes to a host folder. Setup, data migration from the PC, backups, restore and Compass are in [deploy/docker/README.md](../deploy/docker/README.md).
 
 ```bash
-docker build -t dubly:<git-sha> .
+cp deploy/docker/dubly.env.example deploy/docker/dubly.env   # settings: WEB_ORIGIN, VERTEX_PROJECT_ID, SMTP_*...
+docker compose up -d --build                                 # builds dubly:latest and starts the container dubly
 ```
-- **Reproducibility:** `npm ci` from `package-lock.json`, and the base image is `node:24-trixie-slim`, which includes Debian's ffmpeg. For byte-for-byte rebuilds, pin the base image by digest (`--build-arg NODE_IMAGE=node:24-trixie-slim@sha256:…`), and tag images by git SHA.
-- **Not in the image:** the optional Python engines (CTC word timing, lip-sync, background separation). They need a torch virtualenv, so without it those features report as unavailable and the app falls back as designed.
-- **CI** (`.github/workflows/ci.yml`) builds the image on every push and PR, but **doesn't publish or deploy it**.
 
-## Run
-
-```bash
-docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
-  --stop-timeout 40 \
-  -e NODE_ENV=production -e WEB_ORIGIN=https://dubly.example.com -e TRUST_PROXY=1 \
-  -e VERTEX_PROJECT_ID=… -e CREDENTIALS_MODE=adc \
-  -e MONGODB_URI="$(cat /secure/dubly-mongodb-uri)" -e MONGODB_DB=dubly \
-  -v dubly-cache:/app/server/cache \
-  dubly:<git-sha>
-```
-- **Database:** the container reaches MongoDB on the host (or a MongoDB container on the same Docker network); it stays bound to localhost or that private network, never a public port. See MONGODB.md.
-- **Credentials:** prefer `CREDENTIALS_MODE=adc` with the host's Google service account (a GCE VM or Cloud Run) (permissions are listed in SECURITY.md). If key files are unavoidable, mount them read-only: `-v /secure/dubly-credentials:/app/server/credentials:ro`. Never bake them into the image.
-- **Secret settings** such as `GEMINI_API_KEY` and `SMTP_PASS` come from the platform's secret manager as environment variables, or from a mounted env file with `DUBLY_ENV_FILE`.
-- **Stop timeout:** `--stop-timeout` must be longer than `SHUTDOWN_GRACE_MS` (25 s). Docker's default of 10 s would kill the drain before it finishes.
-- **Health checks:** `GET /api/healthz` answers 200 as long as the process serves requests; the image's `HEALTHCHECK` uses it.
-- **Behind a proxy:** set `TRUST_PROXY` to the number of proxy hops, so per-IP limits see real client addresses and HSTS is sent.
+- **Data:** the `dubly-data` volume (`/data`) holds the database, its logins and the voice cache. `docker compose down -v` deletes it. Backups go to `DUBLY_BACKUP_DIR` (default `./backups`); keep it on another disk or machine.
+- **Network:** published on `127.0.0.1:${DUBLY_PORT:-8787}`, so a proxy or tunnel on the same machine gives it HTTPS (`TRUST_PROXY=1`, `WEB_ORIGIN=https://...`). `DUBLY_BIND=0.0.0.0` publishes on every interface. MongoDB is never published.
+- **Credentials:** `gcp-service-account.json` comes from `DUBLY_CREDENTIALS_DIR`, mounted read-only, or use `CREDENTIALS_MODE=adc` on Google Cloud. Secrets stay in `dubly.env`, never in the image.
+- **Another database:** set `MONGODB_URI` in `dubly.env`, and the built-in MongoDB stays off.
+- **Stop timeout:** compose allows 60 s (`docker run --stop-timeout 60`): the app drains for `SHUTDOWN_GRACE_MS` (25 s), then MongoDB shuts down cleanly. Docker's default of 10 s would cut that short.
+- **Health checks:** `GET /api/healthz` answers 200 while the process serves and MongoDB answers; the image's `HEALTHCHECK` uses it (90 s start period for a first start).
+- **Reproducibility:** `npm ci` from `package-lock.json`; base `node:24-trixie-slim` (Debian's ffmpeg); `mongod` and DeepFilterNet are downloaded pinned by SHA-256. For byte-for-byte rebuilds, pin the base image by digest (`--build-arg NODE_IMAGE=node:24-trixie-slim@sha256:...`) and tag images by git SHA.
+- **Not in the image:** the optional Python engines (CTC word timing, lip-sync, background separation by torch). Those features report as unavailable, and the app falls back as designed.
+- **CI** (`.github/workflows/ci.yml`) builds the image on every push and PR, and starts it once with its own MongoDB, but **doesn't publish or deploy it**.
+- **amd64 only**, and no container memory limit yet (the memory gate reads the machine's free memory).
 
 ## Configuration
 
@@ -125,12 +113,11 @@ The monthly minute allowance is 120 minutes per workspace, set in `server/lib/pr
 
 ## Releasing
 1. Merge to `main` with CI green (typecheck, tests, build, audit, secret scan, image build) and the Release gate green (see above).
-2. Build `dubly:<sha>` and push it to your registry.
-3. On the host: pull, then `docker stop dubly` (it drains), then `docker run … dubly:<sha>`. Queued dubs survive the restart. Dubs that were rendering and don't finish within the grace period are marked failed and refunded, and users see "interrupted by a server restart".
-4. Smoke test: `/api/healthz`, then sign in and open a project.
+2. On the container host: `git pull`, then `docker compose up -d --build`. The new image is built while the old container still serves; then the old one drains and stops, and the new one starts on the same `dubly-data` volume. Queued dubs survive the restart. Dubs that were rendering and don't finish within the grace period are marked failed and refunded, and users see "interrupted by a server restart".
+3. Smoke test: `docker compose ps` shows `healthy`, then sign in and open a project.
 
 ## Rollback
-- **App:** run the previous image tag (step 3 with the old SHA). Nothing in the data needs undoing, with one exception:
+- **App:** `git checkout <previous sha>` (one that has `compose.yaml`; older images don't contain MongoDB), then `docker compose up -d --build`. Nothing in the data needs undoing, with one exception:
 - **MongoDB move (2026-11-06):** images from before it use Firebase and cannot read MongoDB at all; there is no rolling back past it, only forward.
 - **Invitations:** older images still offer the old "add member" flow. Don't roll back past the invitation change unless you accept reopening finding C-1.
 

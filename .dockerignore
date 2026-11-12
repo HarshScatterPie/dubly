@@ -15,3 +15,13 @@ server/bin
 assets
 coverage
 *.log
+# Never in the image: the container's settings (secrets), backups, the leftover lip-sync venv, and documents/reports.
+deploy/docker/dubly.env
+backups
+server/lipsync
+deploy/loadtest
+deploy/sleep
+docs
+*.pdf
+*.xlsx
+*.docx

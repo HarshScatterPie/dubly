@@ -22,3 +22,7 @@ __pycache__/
 
 # Leftover local lip-sync venv and weights (feature removed)
 server/lipsync/
+
+# Docker: the container's settings (secrets) and the default backup folder
+deploy/docker/dubly.env
+/backups/

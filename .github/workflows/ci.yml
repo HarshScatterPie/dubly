@@ -83,3 +83,24 @@ jobs:
           docker run --rm --entrypoint ffmpeg dubly:ci -hide_banner -version | head -1
           docker run --rm --entrypoint /app/server/bin/deep-filter dubly:ci --version
           docker run --rm --entrypoint node dubly:ci -e "require('fs').accessSync('dist/index.html'); console.log('frontend bundle present')"
+      # The one-container deployment (compose.yaml): the first start initiates MongoDB's replica set and creates its logins, a restart
+      # reuses them, and a stop drains the app before MongoDB shuts down cleanly.
+      - name: Container starts with its own MongoDB, restarts, and stops cleanly
+        run: |
+          set -euo pipefail
+          healthy() {
+            for _ in $(seq 1 90); do
+              if curl -fsS http://127.0.0.1:8787/api/healthz; then echo; return 0; fi
+              sleep 2
+            done
+            docker logs dubly-ci 2>&1 | tail -60
+            return 1
+          }
+          docker run -d --name dubly-ci -p 127.0.0.1:8787:8787 dubly:ci
+          healthy
+          curl -fsS http://127.0.0.1:8787/ | grep -q 'id="root"'
+          docker restart -t 60 dubly-ci
+          healthy
+          docker stop -t 60 dubly-ci
+          docker logs dubly-ci 2>&1 | tail -8
+          test "$(docker inspect -f '{{.State.ExitCode}}' dubly-ci)" = 0

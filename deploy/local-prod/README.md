@@ -1,4 +1,6 @@
-# Running production on this PC
+# Running production on this PC (retired 2026-11-12)
+
+> **Retired.** Production now runs in the Docker container `dubly` ([deploy/docker/README.md](../docker/README.md)), which opens its own tunnel behind the same Worker. Don't start `run.ps1` again: it would take the Worker's address away from the container. The Worker code (`worker/index.js`) is still in use. The rest is kept for reference and as a fallback, with the data as it was at the move.
 
 Dubly runs on `127.0.0.1:8787` (built frontend + API, `NODE_ENV=production`, sign-up closed), next to the local MongoDB. It starts 2 processes sharing that port and adds one at a time, up to one fewer than the cores, while they are busy and memory allows, retiring idle ones when quiet (`MIN_PROCESSES` / `MAX_PROCESSES`, docs/DEPLOYMENT.md). Nothing listens on the network; people reach it through a tunnel. Everything lives in `%USERPROFILE%\dubly-prod`: `work\` (scratch files and the voice cache, kept out of the OneDrive folder), `log\` (launcher, app, tunnel, backup), `CURRENT_URL.txt` (the address in use).
 

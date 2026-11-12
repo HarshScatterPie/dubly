@@ -1,6 +1,7 @@
-// Dubly's fixed public address (https://dubly.<account>.workers.dev) for a PC with no domain of its own. Every request is passed,
-// unchanged and streamed, to the PC's current tunnel address, which deploy/local-prod/run.ps1 keeps in KV (key "origin") whenever the
-// tunnel starts. The visitor's IP goes along in X-Dubly-Client-IP with a shared secret, so the app's per-address limits still apply
+// Dubly's fixed public address (https://dubly.<account>.workers.dev) for a machine with no domain of its own. Every request is passed,
+// unchanged and streamed, to the current tunnel address, kept in KV (key "origin"). The Docker container sets it itself whenever it opens
+// a tunnel (deploy/docker/front-door.mjs, through POST /__dubly/origin below); the older PC launcher (deploy/local-prod/run.ps1) writes
+// KV with wrangler. The visitor's IP goes along in X-Dubly-Client-IP with a shared secret, so the app's per-address limits still apply
 // per visitor. Nothing is cached or stored here.
 // The Dubly mark (public/dubly-mark.svg), inline: when the PC is off, nothing can be fetched from it.
 const MARK =
@@ -15,8 +16,44 @@ function offline(status) {
   return new Response(OFFLINE, { status, headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Retry-After': '60' } });
 }
 
+const REGISTER_PATH = '/__dubly/origin';
+// Only a Cloudflare quick tunnel can become the origin, so even the holder of the secret cannot send visitors anywhere else.
+const QUICK_TUNNEL = /^https:\/\/[a-z0-9-]+\.trycloudflare\.com$/;
+
+function sameSecret(given, expected) {
+  if (!given || !expected) return false;
+  const a = new TextEncoder().encode(given);
+  const b = new TextEncoder().encode(expected);
+  return a.byteLength === b.byteLength && crypto.subtle.timingSafeEqual(a, b);
+}
+
+const plain = (status, text) => new Response(text, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' } });
+
+// The container's tunnel reporting its new address, with the secret the Worker and the app already share. The address must answer
+// /api/healthz with 200 (Dubly, with its database up) before it replaces the current one; KV is written only when it changes.
+async function register(request, env) {
+  if (!sameSecret(request.headers.get('X-Dubly-Edge-Secret'), env.EDGE_SECRET)) return plain(403, 'forbidden');
+  let origin;
+  try {
+    origin = String((await request.json()).origin || '').replace(/\/+$/, '');
+  } catch {
+    return plain(400, 'expected {"origin": "https://<name>.trycloudflare.com"}');
+  }
+  if (!QUICK_TUNNEL.test(origin)) return plain(400, 'origin must be https://<name>.trycloudflare.com');
+  try {
+    const probe = await fetch(new URL('/api/healthz', origin), { redirect: 'manual' });
+    if (probe.status !== 200) return plain(502, `${origin}/api/healthz answered ${probe.status}`);
+  } catch (err) {
+    return plain(502, `${origin} is not reachable yet: ${err}`);
+  }
+  const current = await env.DUBLY.get('origin');
+  if (current !== origin) await env.DUBLY.put('origin', origin);
+  return Response.json({ origin, changed: current !== origin }, { headers: { 'Cache-Control': 'no-store' } });
+}
+
 export default {
   async fetch(request, env) {
+    if (request.method === 'POST' && new URL(request.url).pathname === REGISTER_PATH) return register(request, env);
     const origin = await env.DUBLY.get('origin', { cacheTtl: 60 });
     if (!origin) return offline(503);
     const url = new URL(request.url);

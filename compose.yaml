@@ -1,0 +1,54 @@
+# Dubly in one container: the web app, the API and dub workers, and its own MongoDB. Build and start (or update) it with one command:
+#
+#   docker compose up -d --build
+#
+# App settings: deploy/docker/dubly.env (copy deploy/docker/dubly.env.example). Everything is explained in deploy/docker/README.md.
+# The host-side choices below can be changed without editing this file, in the shell or in a .env file next to it:
+#   DUBLY_BIND             host address the app is published on (127.0.0.1: only this machine / a proxy or tunnel on it)
+#   DUBLY_PORT             host port (8787)
+#   DUBLY_BACKUP_DIR       host folder for the daily database backups (./backups); best on another disk
+#   DUBLY_CREDENTIALS_DIR  host folder holding gcp-service-account.json for the AI models (./server/credentials)
+#   DUBLY_EXTRA_CA         only on a network that inspects TLS (an office antivirus or proxy): its root certificate (PEM), so npm can
+#                          download while building and the app can reach Google's AI and the mail server; never stored in the image
+name: dubly
+
+services:
+  dubly:
+    build:
+      context: .
+      secrets: [extra_ca]
+    image: dubly:latest
+    container_name: dubly
+    restart: unless-stopped
+    ports:
+      - "${DUBLY_BIND:-127.0.0.1}:${DUBLY_PORT:-8787}:8787"
+      # To open the database in Compass from this machine, uncomment this and set MONGO_LISTEN_ALL=true in dubly.env (README.md):
+      # - "127.0.0.1:27018:27017"
+    env_file:
+      - path: deploy/docker/dubly.env
+        required: false
+    environment:
+      BACKUP_DIR: /backups
+      # Empty, and so without effect, unless DUBLY_EXTRA_CA names a certificate.
+      NODE_EXTRA_CA_CERTS: /run/secrets/extra_ca
+    secrets: [extra_ca]
+    volumes:
+      # MongoDB (every record and every file), its logins, and the voice cache. `docker compose down -v` deletes it: never run that.
+      - dubly-data:/data
+      - "${DUBLY_BACKUP_DIR:-./backups}:/backups"
+      - "${DUBLY_CREDENTIALS_DIR:-./server/credentials}:/app/server/credentials:ro"
+    # The app finishes or settles running dubs (25 s), then MongoDB shuts down cleanly; Docker's default of 10 s would cut that short.
+    stop_grace_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: 20m
+        max-file: "5"
+
+volumes:
+  dubly-data:
+
+secrets:
+  extra_ca:
+    # An empty file unless DUBLY_EXTRA_CA names a certificate.
+    file: ${DUBLY_EXTRA_CA:-./deploy/docker/no-extra-ca.pem}

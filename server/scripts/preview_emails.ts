@@ -4,7 +4,16 @@ process.env.WEB_ORIGIN = process.env.PREVIEW_ORIGIN || 'https://dubly.example.co
 const { mkdirSync, writeFileSync } = await import('node:fs');
 const path = await import('node:path');
 const os = await import('node:os');
-const { buildMagicLinkEmail, buildMovedAccountEmail, buildNewDeviceEmail, buildPasswordChangedEmail, buildResetEmail, buildVerifyEmail, buildWelcomeEmail } = await import('../lib/authEmail');
+const {
+  buildConfirmedNoPasswordEmail,
+  buildMagicLinkEmail,
+  buildMovedAccountEmail,
+  buildNewDeviceEmail,
+  buildPasswordChangedEmail,
+  buildResetEmail,
+  buildVerifyEmail,
+  buildWelcomeEmail,
+} = await import('../lib/authEmail');
 const { buildInviteEmail } = await import('../lib/inviteEmail');
 const { buildQuotaReceiptEmail, buildQuotaRequestEmail } = await import('../lib/quotaRequests');
 const { buildUsageEmail } = await import('../lib/notifications');
@@ -43,6 +52,7 @@ const emails: [string, MailMessage][] = [
   ['New device sign-in (security)', buildNewDeviceEmail(to, { device: 'Safari on iPhone', location: 'Pune, Maharashtra, India', ip: '103.21.58.7', at: new Date(), method: 'Code from a sign-in email' })],
   ['Password reset', buildResetEmail(to, `${origin}/?reset=SAMPLE-TOKEN`)],
   ['Password changed (security)', buildPasswordChangedEmail(to, 'reset')],
+  ['Email confirmed, no password (security)', buildConfirmedNoPasswordEmail(to)],
   ['Usage 80% (admins)', buildUsageEmail(to, 'low', 'ScatterPie Developers', { used: 41.5, limit: 50, period: '2026-11', renewsMonthly: true, planName: 'Starter', resetsAt: nextMonth })],
   ['Usage 100% (admins)', buildUsageEmail(to, 'out', 'Aarav’s workspace', { used: 5, limit: 5, period: 'lifetime', renewsMonthly: false, planName: 'Free' })],
   ['Invitation', buildInviteEmail({ id: 'i', email: to, role: 'editor', invitedByName: 'Shaurya Sharma', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString() }, 'ScatterPie Developers', `${origin}/?invite=SAMPLE`)],

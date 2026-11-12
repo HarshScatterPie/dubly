@@ -63,6 +63,12 @@ describe('async route errors', () => {
     expect(redactUrl('/api/share/abcDEF123_-?x=1')).toBe('/api/share/[redacted]?x=1');
     expect(redactUrl('/api/projects/p1')).toBe('/api/projects/p1');
   });
+
+  it('redacts every emailed-link token from logged URLs, sign-in links included', () => {
+    for (const param of ['magic', 'verify', 'reset', 'invite', 'token']) {
+      expect(redactUrl(`/?${param}=abcDEF123_-xyz&x=1`)).toBe(`/?${param}=[redacted]&x=1`);
+    }
+  });
 });
 
 describe('graceful shutdown bookkeeping', () => {

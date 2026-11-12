@@ -1,7 +1,7 @@
 import { col } from './mongo';
 import { isMailConfigured, sendMail, type MailMessage } from './mailer';
 import { composeEmail } from './emailTemplates';
-import { appUrl, buildNewDeviceEmail, buildPasswordChangedEmail, buildWelcomeEmail, type RequestOrigin } from './authEmail';
+import { appUrl, buildConfirmedNoPasswordEmail, buildNewDeviceEmail, buildPasswordChangedEmail, buildWelcomeEmail, type RequestOrigin } from './authEmail';
 import { getMinuteStatus, type MinuteStatus } from './projectRepo';
 import { getWorkspaceName } from './workspaces';
 import { log } from './log';
@@ -69,6 +69,12 @@ export function notifyNewDevice(email: string, sign: RequestOrigin & { method: s
 export function notifyPasswordChanged(email: string, how: 'reset' | 'change'): void {
   if (!isMailConfigured()) return;
   inBackground(() => sendMail(buildPasswordChangedEmail(email, how)), 'password_notice_failed');
+}
+
+// The first confirmation of the address left the account with no password.
+export function notifyConfirmedWithoutPassword(email: string): void {
+  if (!isMailConfigured()) return;
+  inBackground(() => sendMail(buildConfirmedNoPasswordEmail(email)), 'confirmed_notice_failed');
 }
 
 // --- Usage ---------------------------------------------------------------------------------------------------------------

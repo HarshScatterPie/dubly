@@ -156,6 +156,67 @@ describe('sign-in by email link', () => {
   });
 });
 
+describe('the first proof of the inbox', () => {
+  // An account whose email nobody has confirmed, with a password someone set: what an invitation link's holder (the inviting admin,
+  // say) leaves behind, or a stranger who signed up with the address.
+  const unconfirmed = (email: string, password: string) => createUser(email, password, false);
+  const signInByLink = async (browser: Browser, email: string) => {
+    await browser.call('POST', '/api/auth/magic/request', { email });
+    const message = await waitForMail(/sign-in link/i, email);
+    mail.splice(mail.indexOf(message), 1);
+    return browser.call('POST', '/api/auth/magic/open', { token: linkToken(message) });
+  };
+
+  it('ends every earlier session and drops the password set before it', async () => {
+    const planted = await unconfirmed('invitee@team.test', 'set by someone else');
+    const stranger = new Browser();
+    expect((await stranger.call('POST', '/api/auth/login', { email: 'invitee@team.test', password: 'set by someone else' })).status).toBe(200);
+
+    const owner = new Browser();
+    const opened = await signInByLink(owner, 'invitee@team.test');
+    expect(opened.status).toBe(200);
+    expect(opened.body.user.emailVerified).toBe(true);
+
+    expect((await stranger.call('GET', '/api/auth/me')).status).toBe(401);
+    expect((await api.call('GET', '/api/auth/me', { token: planted.token })).status).toBe(401);
+    expect((await new Browser().call('POST', '/api/auth/login', { email: 'invitee@team.test', password: 'set by someone else' })).status).toBe(401);
+    expect((await owner.call('GET', '/api/auth/me')).status).toBe(200);
+    // The owner learns why, by email, and Settings says how to choose a password rather than asking for one they never had.
+    expect((await waitForMail(/email is confirmed/i, 'invitee@team.test')).text).toMatch(/Forgot password/);
+    const change = await owner.call('POST', '/api/auth/change-password', { currentPassword: 'set by someone else', newPassword: 'my own new phrase' });
+    expect(change.body.error.code).toBe('NO_PASSWORD');
+  });
+
+  it('keeps the password when the browser proving the inbox is already signed in with it', async () => {
+    const other = await unconfirmed('self.made@team.test', 'chosen by me 2026');
+    const laptop = new Browser();
+    expect((await laptop.call('POST', '/api/auth/login', { email: 'self.made@team.test', password: 'chosen by me 2026' })).status).toBe(200);
+    expect((await signInByLink(laptop, 'self.made@team.test')).status).toBe(200);
+
+    expect((await new Browser().call('POST', '/api/auth/login', { email: 'self.made@team.test', password: 'chosen by me 2026' })).status).toBe(200);
+    // Every other session still ends.
+    expect((await api.call('GET', '/api/auth/me', { token: other.token })).status).toBe(401);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(mail.filter((m) => /email is confirmed/i.test(m.subject))).toHaveLength(0);
+  });
+
+  it('applies to the code typed on the asking device too, and only the first time', async () => {
+    await unconfirmed('coded@team.test', 'set by someone else');
+    const laptop = new Browser();
+    const asked = await laptop.call('POST', '/api/auth/magic/request', { email: 'coded@team.test' });
+    const message = await waitForMail(/sign-in link/i, 'coded@team.test');
+    const shown = await new Browser().call('POST', '/api/auth/magic/open', { token: linkToken(message) });
+    expect((await laptop.call('POST', '/api/auth/magic/verify', { attemptId: asked.body.attemptId, code: shown.body.code })).status).toBe(200);
+    expect((await new Browser().call('POST', '/api/auth/login', { email: 'coded@team.test', password: 'set by someone else' })).status).toBe(401);
+
+    // Confirmed now: later proofs leave sessions alone.
+    const phone = new Browser();
+    mail.length = 0;
+    expect((await signInByLink(phone, 'coded@team.test')).status).toBe(200);
+    expect((await laptop.call('GET', '/api/auth/me')).status).toBe(200);
+  });
+});
+
 describe('new sign-in emails', () => {
   it('stays quiet for the first device and a known one, and tells the owner about a new one, with place and device', async () => {
     process.env.EDGE_SHARED_SECRET = 'edge-secret';

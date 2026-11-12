@@ -3,7 +3,11 @@ import { Router } from '../lib/router';
 import { env } from '../lib/env';
 import {
   AccountError,
+  accountHasPassword,
   checkCredentials,
+  checkSignIn,
+  compareWithPendingSignUp,
+  confirmInbox,
   consumeAuthToken,
   createSession,
   createUser,
@@ -23,15 +27,15 @@ import {
   type UserDoc,
 } from '../lib/accounts';
 import { authLink, buildMagicLinkEmail, buildResetEmail, buildVerifyEmail, deliverAuthEmail } from '../lib/authEmail';
-import { METHOD_LABELS, noteDevice, type SignInMethod } from '../lib/devices';
+import { isKnownDevice, METHOD_LABELS, noteDevice, type SignInMethod } from '../lib/devices';
 import { LINK_TTL_MS, openMagicLink, startMagicSignIn, verifyMagicCode } from '../lib/magicLink';
-import { clearSessionCookie, requireAuth, requireSameOrigin, sessionTokenOf, setSessionCookie } from '../lib/auth';
-import { clientIp, forget, hitShared, rateLimit, retryAfter } from '../lib/rateLimit';
+import { clearSessionCookie, holdsSessionOf, requireAuth, requireSameOrigin, sessionTokenOf, setSessionCookie } from '../lib/auth';
+import { clientIp, forget, giveBack, hitShared, rateLimit } from '../lib/rateLimit';
 import { rateRules } from '../lib/limits';
 import { schemas, validateBody } from '../lib/validation';
 import { invalidateMembership } from '../lib/workspaces';
 import { log } from '../lib/log';
-import { notifyNewDevice, notifyPasswordChanged, scheduleWelcome } from '../lib/notifications';
+import { notifyConfirmedWithoutPassword, notifyNewDevice, notifyPasswordChanged, scheduleWelcome } from '../lib/notifications';
 
 /**
  * Sign-in and account management, all against MongoDB (lib/accounts.ts). Answers never say whether an email has an account:
@@ -75,10 +79,25 @@ function sendAccountError(res: Response, err: unknown): void {
   throw err;
 }
 
-async function sendVerification(user: Pick<UserDoc, '_id' | 'email'>): Promise<boolean> {
-  const token = await issueAuthToken(user._id, user.email, 'verify-email');
+// `passwordHash`: a sign-up's password, which the link sets when it is used.
+async function sendVerification(user: Pick<UserDoc, '_id' | 'email'>, passwordHash?: string): Promise<boolean> {
+  const token = await issueAuthToken(user._id, user.email, 'verify-email', undefined, passwordHash);
   const link = authLink('verify', token);
   return deliverAuthEmail(buildVerifyEmail(user.email, link), link);
+}
+
+// The person used a link or code sent to the account's inbox (accounts.confirmInbox). Looked at before the sessions end: a browser
+// already signed in to this account keeps the password it signed in with.
+async function proveInbox(req: Request, account: Pick<UserDoc, '_id' | 'email'>, proof: { passwordHash?: string } = {}): Promise<void> {
+  const keepPassword = await holdsSessionOf(req, account._id);
+  const { first, passwordless } = await confirmInbox(account._id, { ...proof, keepPassword });
+  if (first) log.info('email_verified', { userId: account._id, passwordless });
+  if (passwordless) notifyConfirmedWithoutPassword(account.email);
+}
+
+function tooManyLogins(res: Response, wait: number, message: string): void {
+  res.setHeader('Retry-After', String(wait));
+  res.status(429).json({ error: message, code: 'RATE_LIMITED', retryAfterSeconds: wait });
 }
 
 async function sendReset(user: Pick<UserDoc, '_id' | 'email'>): Promise<boolean> {
@@ -112,15 +131,23 @@ authRouter.post('/signup', ipLimit('signup', rateRules.signupPerIp), validateBod
   if (await addressLimited(res, 'auth-email', email, rateRules.authEmailPerAddress)) return;
 
   const existing = await getUserByEmail(email);
-  if (existing) {
-    // Never changes the existing account: its owner gets a link to confirm (if they never did) or to reset their password.
-    inBackground(() => (existing.emailVerified ? sendReset(existing) : sendVerification(existing)), 'signup_existing_mail_failed');
-    // A new account spends a password hash before answering; this does too, so the time taken does not tell the two apart.
-    await hashPassword(password);
+  // Two password hashes in every case before answering, so the time taken does not tell the cases apart: this password hashed for
+  // the link, and compared with the one a sign-up still waiting for its link chose (or with a decoy).
+  const chosen = await hashPassword(password);
+  const waiting = await compareWithPendingSignUp(existing && !existing.emailVerified ? existing._id : null, password);
+  if (existing?.emailVerified) {
+    // Never changes a confirmed account: its owner gets a link to reset their password.
+    inBackground(() => sendReset(existing), 'signup_existing_mail_failed');
+  } else if (existing) {
+    // Not confirmed yet, so its owner gets a new link. It carries this password only if nobody else can have set one: the account has
+    // no password, and no sign-up with a different password is waiting. Otherwise whoever confirms chooses a password after.
+    const carry = waiting !== 'different' && !(await accountHasPassword(existing._id));
+    inBackground(() => sendVerification(existing, carry ? chosen : undefined), 'signup_existing_mail_failed');
   } else {
     try {
-      const user = await createUser({ email, password, displayName: name, emailVerified: false });
-      inBackground(() => sendVerification({ _id: user.uid, email: user.email }), 'signup_mail_failed');
+      // No password until the emailed link is used: the link carries the one chosen here, so only the inbox's owner can make it count.
+      const user = await createUser({ email, password: null, displayName: name, emailVerified: false });
+      inBackground(() => sendVerification({ _id: user.uid, email: user.email }, chosen), 'signup_mail_failed');
       log.info('account_created', { userId: user.uid });
     } catch (err) {
       // Created a moment ago by a parallel request: answered like any existing address.
@@ -133,15 +160,14 @@ authRouter.post('/signup', ipLimit('signup', rateRules.signupPerIp), validateBod
   res.status(202).json({ status: 'verify-email', email });
 });
 
-authRouter.post('/verify-email', ipLimit('auth-token', rateRules.signupPerIp), validateBody(schemas.authToken), async (req, res) => {
-  const user = await consumeAuthToken(req.body.token, 'verify-email');
-  if (!user) {
-    res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign in to send a new one.', code: 'INVALID_LINK' });
+authRouter.post('/verify-email', ipLimit('auth-token', rateRules.authTokenPerIp), validateBody(schemas.authToken), async (req, res) => {
+  const used = await consumeAuthToken(req.body.token, 'verify-email');
+  if (!used) {
+    res.status(400).json({ error: 'This confirmation link is invalid or has expired. Sign up again with the same password for a new one, or sign in with an emailed link.', code: 'INVALID_LINK' });
     return;
   }
-  await markEmailVerified(user._id);
-  log.info('email_verified', { userId: user._id });
-  await signIn(req, res, { ...user, emailVerified: true }, 'email-confirmation');
+  await proveInbox(req, used.user, { passwordHash: used.passwordHash });
+  await signIn(req, res, { ...used.user, emailVerified: true }, 'email-confirmation');
 });
 
 authRouter.post('/login', ipLimit('login', rateRules.loginPerIp), validateBody(schemas.login), async (req, res) => {
@@ -149,26 +175,36 @@ authRouter.post('/login', ipLimit('login', rateRules.loginPerIp), validateBody(s
   const address = normalizeEmail(email);
   const pairKey = `login-fail:${address}:${clientIp(req) ?? 'unknown'}`;
   const emailKey = `login-fail:${address}`;
-  // Checked before the password, counted only when it is wrong: someone guessing locks out themselves, not the account's owner.
-  const wait = Math.max(...(await Promise.all([retryAfter(pairKey, rateRules.loginFailuresPerEmailAndIp), retryAfter(emailKey, rateRules.loginFailuresPerEmail)])));
-  if (wait) {
-    res.setHeader('Retry-After', String(wait));
-    res.status(429).json({ error: 'Too many wrong passwords. Wait a few minutes, or reset it with "Forgot password?".', code: 'RATE_LIMITED', retryAfterSeconds: wait });
+  // Counted before the password is checked, each in one atomic step, so even a burst sent all at once gets no more checks than the
+  // limit allows; a right password gives its counts back, so only wrong ones add up.
+  const fromHere = await hitShared(pairKey, rateRules.loginFailuresPerEmailAndIp);
+  if (fromHere) {
+    tooManyLogins(res, fromHere, 'Too many wrong passwords. Wait a few minutes, or sign in with an emailed link instead.');
     return;
   }
-  const user = await checkCredentials(email, password);
-  if (!user) {
-    await Promise.all([hitShared(pairKey, rateRules.loginFailuresPerEmailAndIp), hitShared(emailKey, rateRules.loginFailuresPerEmail)]);
+  const fromEverywhere = await hitShared(emailKey, rateRules.loginFailuresPerEmail);
+  // Many addresses guessing together have filled this email's own ceiling. Its owner still gets in by emailed link, or with the password
+  // from a browser that has signed in to the account before, which no guesser has. The same answer whether or not the email has an account.
+  if (fromEverywhere && !(await isKnownDevice(req, address))) {
+    tooManyLogins(res, fromEverywhere, 'Too many wrong passwords have been tried for this email. Sign in with an emailed link instead, or from a device you have signed in on before.');
+    return;
+  }
+  const check = await checkSignIn(email, password);
+  if (check.kind === 'wrong') {
     res.status(401).json({ error: 'That email and password do not match.', code: 'INVALID_CREDENTIALS' });
     return;
   }
-  await forget(pairKey);
+  await Promise.all([forget(pairKey), fromEverywhere ? undefined : giveBack(emailKey)]);
   // Only said once the password is right, so it reveals nothing to someone guessing.
-  if (user.disabled) {
+  if (check.kind === 'unconfirmed') {
+    res.status(403).json({ error: `Confirm your email first: open the link we sent to ${check.user.email}. Signing up again with the same password sends a new one.`, code: 'EMAIL_NOT_CONFIRMED' });
+    return;
+  }
+  if (check.user.disabled) {
     res.status(403).json({ error: 'This account has been disabled. Contact ScatterPie.', code: 'ACCOUNT_DISABLED' });
     return;
   }
-  await signIn(req, res, user, 'password');
+  await signIn(req, res, check.user, 'password');
 });
 
 authRouter.post('/logout', async (req, res) => {
@@ -203,7 +239,7 @@ authRouter.post('/forgot-password', ipLimit('auth-email', rateRules.authEmailPer
   res.status(202).json({ status: 'sent-if-exists' });
 });
 
-authRouter.post('/reset-password', ipLimit('auth-token', rateRules.signupPerIp), validateBody(schemas.resetPassword), async (req, res) => {
+authRouter.post('/reset-password', ipLimit('auth-token', rateRules.authTokenPerIp), validateBody(schemas.resetPassword), async (req, res) => {
   const { token, password } = req.body as { token: string; password: string };
   const holder = await peekAuthToken(token, 'reset-password');
   if (!holder) {
@@ -215,7 +251,7 @@ authRouter.post('/reset-password', ipLimit('auth-token', rateRules.signupPerIp),
     res.status(400).json({ error: problem, code: 'WEAK_PASSWORD' });
     return;
   }
-  const user = await consumeAuthToken(token, 'reset-password');
+  const user = (await consumeAuthToken(token, 'reset-password'))?.user;
   if (!user) {
     res.status(400).json({ error: 'This reset link has already been used. Ask for a new one with "Forgot password?".', code: 'INVALID_LINK' });
     return;
@@ -238,6 +274,11 @@ authRouter.post(
     const { currentPassword, newPassword } = req.body as { currentPassword: string; newPassword: string };
     const user = await checkCredentials(req.email!, currentPassword);
     if (!user || user._id !== req.uid) {
+      // Signed in by emailed link to an account with no password (accounts.confirmInbox): there is nothing to compare with.
+      if (!(await accountHasPassword(req.uid!))) {
+        res.status(400).json({ error: 'This account has no password yet. Choose one with "Forgot password?" on the sign-in page.', code: 'NO_PASSWORD' });
+        return;
+      }
       res.status(400).json({ error: 'Your current password is not correct.', code: 'WRONG_PASSWORD' });
       return;
     }
@@ -274,7 +315,7 @@ authRouter.post('/magic/request', ipLimit('auth-email', rateRules.authEmailPerIp
 });
 
 /** The emailed link was opened: signs in the browser that asked, or shows a code to type there. */
-authRouter.post('/magic/open', ipLimit('auth-token', rateRules.signupPerIp), validateBody(schemas.authToken), async (req, res) => {
+authRouter.post('/magic/open', ipLimit('auth-token', rateRules.authTokenPerIp), validateBody(schemas.authToken), async (req, res) => {
   const result = await openMagicLink(req, req.body.token);
   if (result.kind === 'invalid') {
     res.status(400).json({ error: 'This sign-in link has expired or was already used. Ask for a new one on the sign-in page.', code: 'INVALID_LINK' });
@@ -285,7 +326,7 @@ authRouter.post('/magic/open', ipLimit('auth-token', rateRules.signupPerIp), val
     return;
   }
   // Opening the link proves the inbox.
-  await markEmailVerified(result.account._id);
+  await proveInbox(req, result.account);
   await signIn(req, res, { ...result.account, emailVerified: true }, 'email-link');
 });
 
@@ -304,6 +345,7 @@ authRouter.post('/magic/verify', ipLimit('magic-verify', rateRules.loginPerIp), 
     res.status(400).json({ error: 'This sign-in has expired. Ask for a new link.', code: 'INVALID_CODE' });
     return;
   }
-  await markEmailVerified(result.account._id);
+  // The code was read from the link, so this proves the inbox too.
+  await proveInbox(req, result.account);
   await signIn(req, res, { ...result.account, emailVerified: true }, 'email-code');
 });

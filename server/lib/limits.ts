@@ -98,16 +98,22 @@ export const rateRules = {
   mediaPerIp: hotRule('MEDIA_PER_MINUTE', 1200, 60 * 1000),
   // Sign-in attempts, per caller address and per email, so neither a single machine nor a botnet can guess one password for long.
   loginPerIp: rule('LOGIN_PER_15_MINUTES', 30, 15 * 60 * 1000),
-  // Only wrong passwords count, and per email from one address, so a stranger guessing at someone's account can lock out only
-  // themselves, never its owner. The second ceiling stops many addresses together guessing one account.
+  // Wrong passwords for one email from one address: a stranger guessing at someone's account locks out only themselves.
   loginFailuresPerEmailAndIp: rule('LOGIN_FAILURES_PER_EMAIL_IP_15_MINUTES', 10, 15 * 60 * 1000),
+  // Wrong passwords for one email from everywhere, against many addresses guessing together. Past it, only a browser that has signed
+  // in to the account before may still try its password (devices.isKnownDevice), so the owner keeps that and the emailed link.
   loginFailuresPerEmail: rule('LOGIN_FAILURES_PER_EMAIL_HOUR', 100, HOUR),
   // Password changes by a signed-in person.
   passwordChangePerUser: rule('PASSWORD_CHANGE_PER_15_MINUTES', 10, 15 * 60 * 1000),
-  // New accounts, password-reset and verification emails, per caller address and per email address.
+  // New accounts, per caller address.
   signupPerIp: rule('SIGNUP_PER_HOUR', 10, HOUR),
-  authEmailPerIp: rule('AUTH_EMAIL_PER_HOUR', 20, HOUR),
+  // Sign-in links, password-reset and confirmation emails sent on request, per caller address and per email address. The per-address
+  // ceiling leaves room for a whole office behind one public address asking in the same hour.
+  authEmailPerIp: rule('AUTH_EMAIL_PER_HOUR', 40, HOUR),
   authEmailPerAddress: rule('AUTH_EMAIL_PER_ADDRESS_HOUR', 5, HOUR),
+  // Using an emailed link (confirming an email, resetting a password, opening a sign-in link), per caller address. The links carry
+  // 256-bit tokens nobody can guess, so this only stops floods, and is high enough for an office behind one address.
+  authTokenPerIp: rule('AUTH_TOKEN_PER_HOUR', 60, HOUR),
   // The app's page itself (index.html for every client-side route), per caller address; far above what any person loads.
   pagePerIp: hotRule('PAGE_PER_MINUTE', 300, 60 * 1000),
   // Every request of any kind, per caller address: a ceiling far above a busy person (progress polls, video seeks), against floods.

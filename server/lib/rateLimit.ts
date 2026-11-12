@@ -95,6 +95,11 @@ export async function forget(key: string): Promise<void> {
   await sharedBuckets().deleteOne({ _id: key });
 }
 
+// Gives back one counted use, e.g. a sign-in attempt counted before its password was checked that turned out to be right.
+export async function giveBack(key: string): Promise<void> {
+  await sharedBuckets().updateOne({ _id: key, count: { $gt: 0 } }, { $inc: { count: -1 } });
+}
+
 type Scope = 'user' | 'workspace' | 'ip';
 
 /**

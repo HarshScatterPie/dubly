@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { Request, Response } from 'express';
 import { col, isDuplicateKeyError } from './mongo';
-import { sha256 } from './accounts';
+import { getUserByEmail, sha256 } from './accounts';
 import { cookieIsSecure, readCookie } from './auth';
 import { clientInfo, type ClientInfo } from './clientInfo';
 
@@ -38,6 +38,19 @@ const devices = () => col<DeviceDoc>('devices');
 export interface SignInContext extends ClientInfo {
   method: SignInMethod;
   at: Date;
+}
+
+/**
+ * Whether this browser has signed in to the account with this email before: its device cookie is on record for that account. A guesser
+ * has no such cookie (it is random and httpOnly), so this lets the owner in while guesses from elsewhere hold the account's sign-in shut.
+ * False for an email with no account, the same as for a browser never used with it.
+ */
+export async function isKnownDevice(req: Request, email: string): Promise<boolean> {
+  const deviceId = readCookie(req, DEVICE_COOKIE);
+  if (!deviceId || !/^[A-Za-z0-9_-]{24,64}$/.test(deviceId)) return false;
+  const account = await getUserByEmail(email);
+  if (!account) return false;
+  return (await devices().countDocuments({ _id: `${sha256(deviceId)}:${account._id}`, uid: account._id }, { limit: 1 })) > 0;
 }
 
 /** Remembers this device for the account; true when the account has signed in elsewhere before but never from here. */

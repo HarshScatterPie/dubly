@@ -1,5 +1,7 @@
 import { createHash, randomBytes, randomUUID, scrypt as scryptCb, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import { sharedInvalidator } from './cacheBus';
+import { guessableReason } from './commonPasswords';
+import { log } from './log';
 import { col, isDuplicateKeyError } from './mongo';
 
 /**
@@ -9,6 +11,9 @@ import { col, isDuplicateKeyError } from './mongo';
  *   leaked database or backup cannot be replayed as a sign-in. The same goes for reset and verification tokens.
  * - Sessions end after 30 days, or 7 days without use, and are deleted at once on sign-out, password change, password reset,
  *   "sign out everywhere", disabling or deleting the account; every request looks its session up, so that is immediate.
+ * - Until an account's email is confirmed, anyone could have set it up (typed someone else's address at sign-up, or used an
+ *   invitation link the inviting admin also holds). So the first time the inbox is proven (confirmInbox), every session ends and a
+ *   password set before then is dropped, unless the proof itself shows the same person set it.
  */
 export interface UserDoc {
   _id: string;
@@ -44,9 +49,13 @@ interface AuthTokenDoc {
   purpose: AuthTokenPurpose;
   // The address the link was sent to; a verification link is only good for the address the account still has.
   email: string;
+  // A sign-up's confirmation link: the hash of the password chosen at that sign-up, which takes effect only when the link is used.
+  passwordHash?: string;
   createdAt: Date;
   expiresAt: Date;
 }
+
+export type Account = Omit<UserDoc, 'passwordHash'>;
 
 export const SESSION_ABSOLUTE_MS = 30 * 24 * 60 * 60 * 1000;
 export const SESSION_IDLE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -80,8 +89,10 @@ export class AccountError extends Error {
 
 // --- Passwords --------------------------------------------------------------------------------------------------------------
 
-// scrypt with N=2^15, r=8 (32 MiB, about 100 ms per hash): memory-hard, built into Node, and run on the libuv pool, off the main thread.
-const SCRYPT = { N: 1 << 15, r: 8, p: 1, keyLength: 32 };
+// scrypt with N=2^16, r=8 (64 MiB, about 140 ms per hash on the production laptop): memory-hard, built into Node, and run on the
+// libuv pool, off the main thread. Each hash records its own cost, so one made at an earlier, lower cost still verifies, and is made
+// again at this cost the next time its owner signs in.
+const SCRYPT = { N: 1 << 16, r: 8, p: 1, keyLength: 32 };
 const scrypt = (password: string, salt: Buffer, keyLength: number, options: ScryptOptions) =>
   new Promise<Buffer>((resolve, reject) => scryptCb(password, salt, keyLength, options, (err, key) => (err ? reject(err) : resolve(key))));
 const scryptOptions = (N: number, r: number, p: number): ScryptOptions => ({ N, r, p, maxmem: 128 * N * r * 2 });
@@ -94,8 +105,23 @@ export function passwordProblem(password: unknown, email?: string): string | nul
   if (password.length > PASSWORD_MAX) return `Use at most ${PASSWORD_MAX} characters for the password.`;
   if (!password.trim()) return 'The password cannot be only spaces.';
   if (email && password.trim().toLowerCase() === normalizeEmail(email)) return 'The password cannot be your email address.';
-  return null;
+  return guessableReason(password, email);
 }
+
+// The stored hash of an account with no password: it signs in by emailed link until its owner chooses one. Nothing verifies against it.
+export const NO_PASSWORD = '';
+
+function parseHash(stored: string): { N: number; r: number; p: number; salt: Buffer; key: Buffer } | null {
+  const [scheme, n, r, p, saltB64, keyB64] = String(stored ?? '').split('$');
+  if (scheme !== 'scrypt' || !saltB64 || !keyB64) return null;
+  return { N: Number(n), r: Number(r), p: Number(p), salt: Buffer.from(saltB64, 'base64'), key: Buffer.from(keyB64, 'base64') };
+}
+
+export const hasPassword = (stored: string) => parseHash(stored) !== null;
+const isCurrentCost = (stored: string) => {
+  const hash = parseHash(stored);
+  return hash !== null && hash.N === SCRYPT.N && hash.r === SCRYPT.r && hash.p === SCRYPT.p;
+};
 
 export async function hashPassword(password: string): Promise<string> {
   const salt = randomBytes(16);
@@ -104,11 +130,29 @@ export async function hashPassword(password: string): Promise<string> {
 }
 
 export async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const [scheme, n, r, p, saltB64, keyB64] = stored.split('$');
-  if (scheme !== 'scrypt' || !saltB64 || !keyB64) return false;
-  const expected = Buffer.from(keyB64, 'base64');
-  const actual = await scrypt(password.normalize('NFKC'), Buffer.from(saltB64, 'base64'), expected.length, scryptOptions(Number(n), Number(r), Number(p)));
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  const hash = parseHash(stored);
+  if (!hash) return false;
+  const actual = await scrypt(password.normalize('NFKC'), hash.salt, hash.key.length, scryptOptions(hash.N, hash.r, hash.p));
+  return actual.length === hash.key.length && timingSafeEqual(actual, hash.key);
+}
+
+// After a wrong password against a hash made at a lower cost, the work it is short of, so an account not yet made again at today's
+// cost answers in the same time as any other account, and as an email with no account.
+async function padToCurrentCost(stored: string): Promise<void> {
+  const hash = parseHash(stored);
+  if (!hash || !(hash.N > 1) || hash.N >= SCRYPT.N) return;
+  const rounds = Math.min(15, Math.round(SCRYPT.N / hash.N) - 1);
+  for (let i = 0; i < rounds; i++) await scrypt(randomBytes(16).toString('hex'), randomBytes(16), SCRYPT.keyLength, scryptOptions(hash.N, hash.r, hash.p));
+}
+
+// Made again at today's cost once the right password is known, after the answer; only if the hash is still the one just checked,
+// so a password changed in the meantime is never overwritten.
+function upgradeHash(uid: string, stored: string, password: string): void {
+  setImmediate(() =>
+    void hashPassword(password)
+      .then((fresh) => users().updateOne({ _id: uid, passwordHash: stored }, { $set: { passwordHash: fresh } }))
+      .catch((err) => log.error('password_rehash_failed', err, { userId: uid }))
+  );
 }
 
 // Checked against when the email has no account, so a wrong email takes as long as a wrong password and reveals nothing.
@@ -186,17 +230,18 @@ export async function getUserByEmail(email: string): Promise<Omit<UserDoc, 'pass
   return users().findOne({ email: normalizeEmail(email) }, { projection: USER_PROJECTION });
 }
 
-export async function createUser(input: { email: string; password: string; displayName?: string; emailVerified?: boolean }): Promise<PublicUser> {
+// `password: null` makes an account with no password yet: a sign-up, whose password comes with its confirmation link (issueAuthToken).
+export async function createUser(input: { email: string; password: string | null; displayName?: string; emailVerified?: boolean }): Promise<PublicUser> {
   const email = normalizeEmail(input.email);
   if (!isEmail(email)) throw new AccountError(400, 'INVALID_EMAIL', 'Enter a valid email address.');
-  const problem = passwordProblem(input.password, email);
+  const problem = input.password === null ? null : passwordProblem(input.password, email);
   if (problem) throw new AccountError(400, 'WEAK_PASSWORD', problem);
   const now = new Date();
   const doc: UserDoc = {
     _id: `u-${randomUUID()}`,
     email,
     emailVerified: input.emailVerified === true,
-    passwordHash: await hashPassword(input.password),
+    passwordHash: input.password === null ? NO_PASSWORD : await hashPassword(input.password),
     passwordChangedAt: now,
     disabled: false,
     ...(input.displayName?.trim() ? { displayName: input.displayName.trim().slice(0, 80) } : {}),
@@ -212,18 +257,61 @@ export async function createUser(input: { email: string; password: string; displ
   return toPublicUser(doc);
 }
 
-/** The account for an email and password, or null; the same time and the same answer whether the email or the password is wrong. */
-export async function checkCredentials(email: string, password: string): Promise<Omit<UserDoc, 'passwordHash'> | null> {
+export type SignInCheck = { kind: 'ok'; user: Account } | { kind: 'unconfirmed'; user: Account } | { kind: 'wrong' };
+
+// The password chosen at a sign-up still waiting for its confirmation link, if there is one.
+async function pendingSignUpPassword(uid: string): Promise<string | null> {
+  const doc = await authTokens().findOne(
+    { uid, purpose: 'verify-email', passwordHash: { $exists: true }, expiresAt: { $gt: new Date() } },
+    { projection: { passwordHash: 1 }, sort: { createdAt: -1 } }
+  );
+  return doc?.passwordHash ?? null;
+}
+
+/**
+ * How `password` compares with the one chosen at the account's sign-up still waiting for its link ('none' when nothing is waiting, or
+ * `uid` is null). One hash comparison whatever the case, against a decoy when nothing is waiting, so the time taken tells nothing.
+ */
+export async function compareWithPendingSignUp(uid: string | null, password: string): Promise<'none' | 'same' | 'different'> {
+  const pending = uid ? await pendingSignUpPassword(uid) : null;
+  const matches = await verifyPassword(password, pending ?? (await decoy()));
+  return pending === null ? 'none' : matches ? 'same' : 'different';
+}
+
+/**
+ * An email and password checked, with one hash comparison whatever the case, so the time taken tells nothing apart: an email with no
+ * account is checked against a decoy, and an account with no password against the password of its sign-up still waiting for the
+ * emailed link (a match answers 'unconfirmed') or else the decoy. 'wrong' is the same answer for a wrong email and a wrong password.
+ */
+export async function checkSignIn(email: string, password: string): Promise<SignInCheck> {
+  if (typeof password !== 'string' || password.length > PASSWORD_MAX) return { kind: 'wrong' };
   const user = await users().findOne({ email: normalizeEmail(email) });
-  if (typeof password !== 'string' || password.length > PASSWORD_MAX) return null;
   if (!user) {
     await verifyPassword(password, await decoy());
-    return null;
+    return { kind: 'wrong' };
   }
-  if (!(await verifyPassword(password, user.passwordHash))) return null;
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  const { passwordHash, ...rest } = user;
-  return rest;
+  const { passwordHash, ...account } = user;
+  if (!hasPassword(passwordHash)) {
+    return (await compareWithPendingSignUp(user._id, password)) === 'same' ? { kind: 'unconfirmed', user: account } : { kind: 'wrong' };
+  }
+  if (!(await verifyPassword(password, passwordHash))) {
+    await padToCurrentCost(passwordHash);
+    return { kind: 'wrong' };
+  }
+  if (!isCurrentCost(passwordHash)) upgradeHash(user._id, passwordHash, password);
+  return { kind: 'ok', user: account };
+}
+
+/** The account for an email and password, or null; the same time and the same answer whether the email or the password is wrong. */
+export async function checkCredentials(email: string, password: string): Promise<Account | null> {
+  const result = await checkSignIn(email, password);
+  return result.kind === 'ok' ? result.user : null;
+}
+
+/** Whether the account has a password it can sign in with (one confirmed by email link may have none yet). */
+export async function accountHasPassword(uid: string): Promise<boolean> {
+  const user = await users().findOne({ _id: uid }, { projection: { passwordHash: 1 } });
+  return user !== null && hasPassword(user.passwordHash);
 }
 
 export async function setPassword(uid: string, password: string): Promise<void> {
@@ -251,6 +339,25 @@ export async function updateUserProfile(uid: string, patch: { displayName?: stri
 export async function markEmailVerified(uid: string): Promise<void> {
   await users().updateOne({ _id: uid }, { $set: { emailVerified: true, updatedAt: new Date() } });
   forgetAccount(uid);
+}
+
+/**
+ * The person proved they read the account's inbox (they used a link or code sent to it). The first time, what was set up before
+ * cannot be trusted, since anyone could have set it up: every session ends, and the password goes, unless this proof carries the one
+ * chosen at the sign-up that sent the link (`passwordHash`), or comes from a browser already signed in to this account, which so knew
+ * the password (`keepPassword`). Once confirmed, later proofs change nothing. `passwordless` says the account is left with no password.
+ */
+export async function confirmInbox(uid: string, proof: { passwordHash?: string; keepPassword?: boolean } = {}): Promise<{ first: boolean; passwordless: boolean }> {
+  const now = new Date();
+  const $set: Partial<UserDoc> = { emailVerified: true, updatedAt: now };
+  if (proof.passwordHash) Object.assign($set, { passwordHash: proof.passwordHash, passwordChangedAt: now });
+  else if (!proof.keepPassword) Object.assign($set, { passwordHash: NO_PASSWORD, passwordChangedAt: now });
+  const before = await users().findOneAndUpdate({ _id: uid, emailVerified: false }, { $set }, { projection: { passwordHash: 1 } });
+  forgetAccount(uid);
+  if (!before) return { first: false, passwordless: false };
+  await revokeAllSessions(uid);
+  const passwordless = !proof.passwordHash && (!proof.keepPassword || !hasPassword(before.passwordHash));
+  return { first: true, passwordless };
 }
 
 export async function setUserDisabled(uid: string, disabled: boolean): Promise<void> {
@@ -342,12 +449,27 @@ export async function revokeAllSessions(uid: string, keepSessionId?: string): Pr
 // --- One-time email tokens --------------------------------------------------------------------------------------------------
 
 // `ttlMs` overrides the usual life of the link, e.g. a longer one for accounts moved over from the old sign-in (scripts only).
-export async function issueAuthToken(uid: string, email: string, purpose: AuthTokenPurpose, ttlMs = TOKEN_TTL_MS[purpose]): Promise<string> {
+// `passwordHash` goes with a sign-up's confirmation link: the password chosen there, set when (and only if) the link is used.
+export async function issueAuthToken(
+  uid: string,
+  email: string,
+  purpose: AuthTokenPurpose,
+  ttlMs = TOKEN_TTL_MS[purpose],
+  passwordHash?: string
+): Promise<string> {
   const token = randomBytes(32).toString('base64url');
   const now = new Date();
   // Only the newest link of each kind works.
   await authTokens().deleteMany({ uid, purpose });
-  await authTokens().insertOne({ _id: sha256(token), uid, purpose, email: normalizeEmail(email), createdAt: now, expiresAt: new Date(now.getTime() + ttlMs) });
+  await authTokens().insertOne({
+    _id: sha256(token),
+    uid,
+    purpose,
+    email: normalizeEmail(email),
+    ...(passwordHash ? { passwordHash } : {}),
+    createdAt: now,
+    expiresAt: new Date(now.getTime() + ttlMs),
+  });
   return token;
 }
 
@@ -360,12 +482,15 @@ export async function peekAuthToken(token: string, purpose: AuthTokenPurpose): P
   return user && !user.disabled && user.email === doc.email ? user : null;
 }
 
-/** Uses up a token: it works once, for its purpose, before it expires, and only while the account still has the address it went to. */
-export async function consumeAuthToken(token: string, purpose: AuthTokenPurpose): Promise<Omit<UserDoc, 'passwordHash'> | null> {
+/**
+ * Uses up a token: it works once, for its purpose, before it expires, and only while the account still has the address it went to.
+ * `passwordHash` is the password a sign-up's confirmation link carries, if any.
+ */
+export async function consumeAuthToken(token: string, purpose: AuthTokenPurpose): Promise<{ user: Account; passwordHash?: string } | null> {
   if (typeof token !== 'string' || !token || token.length > 100) return null;
   const doc = await authTokens().findOneAndDelete({ _id: sha256(token), purpose });
   if (!doc || doc.expiresAt.getTime() <= Date.now()) return null;
   const user = await getUser(doc.uid);
   if (!user || user.disabled || user.email !== doc.email) return null;
-  return user;
+  return { user, ...(doc.passwordHash ? { passwordHash: doc.passwordHash } : {}) };
 }

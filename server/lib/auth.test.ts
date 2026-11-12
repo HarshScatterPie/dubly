@@ -1,7 +1,8 @@
+import { randomBytes, scryptSync } from 'node:crypto';
 import type { Request } from 'express';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { col, createUser, resetDatabase, signIn, startApi, type TestApi } from '../test/helpers';
-import { createSession, deleteUser, hashPassword, setUserDisabled, sha256, verifyPassword } from './accounts';
+import { createSession, deleteUser, hashPassword, passwordProblem, setUserDisabled, sha256, verifyPassword } from './accounts';
 import { cookieIsSecure } from './auth';
 import { env } from './env';
 import { setMailSenderForTests, type MailMessage } from './mailer';
@@ -56,10 +57,31 @@ describe('the Secure flag on cookies', () => {
 });
 
 describe('passwords', () => {
+  it('hashes at N=2^16, and makes an older, cheaper hash again the next time its owner signs in', async () => {
+    expect(await hashPassword('saffron lamp river')).toMatch(/^scrypt\$65536\$8\$1\$/);
+    const user = await createUser('legacy@team.test', 'saffron lamp river');
+    const salt = randomBytes(16);
+    const key = scryptSync('saffron lamp river', salt, 32, { N: 1 << 15, r: 8, p: 1, maxmem: 128 * (1 << 15) * 8 * 2 });
+    const legacy = ['scrypt', 1 << 15, 8, 1, salt.toString('base64'), key.toString('base64')].join('$');
+    await col('users').updateOne({ _id: user.uid as never }, { $set: { passwordHash: legacy } });
+    const login = (password: string) => api.call('POST', '/api/auth/login', { body: { email: 'legacy@team.test', password } });
+
+    expect((await login('not the password')).status).toBe(401);
+    expect((await col('users').findOne({ _id: user.uid as never }))?.passwordHash).toBe(legacy);
+    expect((await login('saffron lamp river')).status).toBe(200);
+    let stored = legacy;
+    for (let i = 0; i < 100 && stored === legacy; i++) {
+      await new Promise((r) => setTimeout(r, 20));
+      stored = (await col('users').findOne({ _id: user.uid as never }))?.passwordHash as string;
+    }
+    expect(stored).toMatch(/^scrypt\$65536\$/);
+    expect((await login('saffron lamp river')).status).toBe(200);
+  });
+
   it('hashes with scrypt and a fresh salt, and verifies only the right password', async () => {
     const a = await hashPassword('correct horse');
     const b = await hashPassword('correct horse');
-    expect(a).toMatch(/^scrypt\$32768\$8\$1\$/);
+    expect(a).toMatch(/^scrypt\$65536\$8\$1\$/);
     expect(a).not.toBe(b);
     expect(await verifyPassword('correct horse', a)).toBe(true);
     expect(await verifyPassword('correct horsf', a)).toBe(false);
@@ -124,18 +146,18 @@ describe('requireAuth', () => {
 });
 
 describe('sign-up, email confirmation and sign-in', () => {
-  it('creates an account that is used once its email is confirmed', async () => {
+  it('creates an account whose password counts only once its email is confirmed', async () => {
     const signup = await api.call('POST', '/api/auth/signup', { body: { name: 'Asha', email: 'Asha@Team.test', password: 'a good password' } });
     expect(signup.status).toBe(202);
     expect(signup.headers.get('set-cookie')).toBeNull();
 
-    // Signed in before confirming: no workspace (and no free minutes) yet.
+    // Before the link is used, the password signs nobody in; the person who chose it is told to confirm first.
     const early = await api.call('POST', '/api/auth/login', { body: { email: 'asha@team.test', password: 'a good password' } });
-    expect(early.status).toBe(200);
-    const earlyCookie = cookieOf(early.headers);
-    const blocked = await api.call('GET', '/api/bootstrap', { headers: { Cookie: earlyCookie } });
-    expect(blocked.status).toBe(403);
-    expect(blocked.body.error.code).toBe('EMAIL_NOT_VERIFIED');
+    expect(early.status).toBe(403);
+    expect(early.body.error.code).toBe('EMAIL_NOT_CONFIRMED');
+    expect(early.headers.get('set-cookie')).toBeNull();
+    // A wrong one gets the usual answer.
+    expect((await api.call('POST', '/api/auth/login', { body: { email: 'asha@team.test', password: 'not the one' } })).status).toBe(401);
 
     const message = await nextMail(/confirm your email/i);
     expect(message.to).toBe('asha@team.test');
@@ -150,8 +172,38 @@ describe('sign-up, email confirmation and sign-in', () => {
     expect(boot.status).toBe(200);
     expect(boot.body.workspace.members[0]).toMatchObject({ email: 'asha@team.test', name: 'Asha', role: 'admin' });
 
+    // The password chosen at sign-up signs in from now on.
+    expect((await api.call('POST', '/api/auth/login', { body: { email: 'asha@team.test', password: 'a good password' } })).status).toBe(200);
     // A link works once.
     expect((await api.call('POST', '/api/auth/verify-email', { body: { token: linkToken(message, 'verify') } })).status).toBe(400);
+  });
+
+  it('gives a stranger who signed up with your address no way in once you confirm it', async () => {
+    await api.call('POST', '/api/auth/signup', { body: { name: 'Mallory', email: 'bob@team.test', password: 'mallory knows this' } });
+    const strangersLink = linkToken(await nextMail(/confirm your email/i, 'bob@team.test'), 'verify');
+
+    // Bob signs up himself. Someone else's sign-up, with another password, is waiting, so his link carries no password at all.
+    await api.call('POST', '/api/auth/signup', { body: { name: 'Bob', email: 'bob@team.test', password: 'bobs own phrase' } });
+    const bobsLink = linkToken(await nextMail(/confirm your email/i, 'bob@team.test'), 'verify');
+    expect((await api.call('POST', '/api/auth/verify-email', { body: { token: strangersLink } })).status).toBe(400);
+    const confirmed = await api.call('POST', '/api/auth/verify-email', { body: { token: bobsLink } });
+    expect(confirmed.status).toBe(200);
+
+    expect((await api.call('POST', '/api/auth/login', { body: { email: 'bob@team.test', password: 'mallory knows this' } })).status).toBe(401);
+    expect((await api.call('POST', '/api/auth/login', { body: { email: 'bob@team.test', password: 'bobs own phrase' } })).status).toBe(401);
+    // Bob is signed in by the link, and told by email to choose a password.
+    expect((await api.call('GET', '/api/auth/me', { headers: { Cookie: cookieOf(confirmed.headers) } })).status).toBe(200);
+    expect((await nextMail(/email is confirmed/i, 'bob@team.test')).text).toMatch(/no password/i);
+  });
+
+  it('keeps the password on a new link when the same sign-up is sent again', async () => {
+    await api.call('POST', '/api/auth/signup', { body: { name: 'Ravi', email: 'ravi@team.test', password: 'ravi types this' } });
+    const first = linkToken(await nextMail(/confirm your email/i, 'ravi@team.test'), 'verify');
+    await api.call('POST', '/api/auth/signup', { body: { name: 'Ravi', email: 'ravi@team.test', password: 'ravi types this' } });
+    const second = linkToken(await nextMail(/confirm your email/i, 'ravi@team.test'), 'verify');
+    expect((await api.call('POST', '/api/auth/verify-email', { body: { token: first } })).status).toBe(400);
+    expect((await api.call('POST', '/api/auth/verify-email', { body: { token: second } })).status).toBe(200);
+    expect((await api.call('POST', '/api/auth/login', { body: { email: 'ravi@team.test', password: 'ravi types this' } })).status).toBe(200);
   });
 
   it('answers sign-up for an existing email exactly like a new one, and never changes that account', async () => {
@@ -170,6 +222,18 @@ describe('sign-up, email confirmation and sign-in', () => {
     expect(short.body.error.code).toBe('WEAK_PASSWORD');
     const sameAsEmail = await api.call('POST', '/api/auth/signup', { body: { name: 'A', email: 'a@team.test', password: 'a@team.test' } });
     expect(sameAsEmail.body.error.code).toBe('WEAK_PASSWORD');
+    const common = await api.call('POST', '/api/auth/signup', { body: { name: 'A', email: 'a@team.test', password: 'Password123!' } });
+    expect(common.body.error).toMatchObject({ code: 'WEAK_PASSWORD', message: expect.stringMatching(/too easy to guess/) });
+  });
+
+  it('knows the passwords anyone would guess first', () => {
+    for (const guessable of ['password', 'Password123!', 'P@ssw0rd', '12345678', '87654321', '01011990', 'aaaaaaaa', 'abcabcabc', 'qwertyuiop', 'iloveyou2', 'dubly2026', 'Scatterpie@1', 'jaishriram']) {
+      expect(passwordProblem(guessable, 'someone@team.test'), guessable).toMatch(/too easy to guess/);
+    }
+    expect(passwordProblem('asha.k2026', 'asha.k@team.test')).toMatch(/email address/);
+    for (const fine of ['a good password', 'correct-horse-battery', 'saffron lamp river', 'old password 1', 'hunter2hunter2', 'Mumbai rain 1987 chai']) {
+      expect(passwordProblem(fine, 'someone@team.test'), fine).toBeNull();
+    }
   });
 
   it('fails a wrong password and an unknown email the same way', async () => {
@@ -207,6 +271,47 @@ describe('sign-up, email confirmation and sign-in', () => {
       delete process.env.EDGE_SHARED_SECRET;
     }
   });
+
+  it('checks no more wrong passwords than the limit, even sent all at once', async () => {
+    await createUser('burst@team.test', 'the right password');
+    const guesses = await Promise.all(
+      Array.from({ length: 25 }, (_, i) => api.call('POST', '/api/auth/login', { body: { email: 'burst@team.test', password: `parallel guess ${i}` } }))
+    );
+    expect(guesses.filter((g) => g.status === 401)).toHaveLength(10);
+    expect(guesses.filter((g) => g.status === 429)).toHaveLength(15);
+  });
+
+  it("lets the owner's own devices in when guesses from many addresses fill the account's ceiling", async () => {
+    process.env.EDGE_SHARED_SECRET = 'edge-test-secret';
+    try {
+      await createUser('popular@team.test', 'the right password');
+      const from = (ip: string, cookie?: string) => ({ 'X-Dubly-Edge-Secret': 'edge-test-secret', 'X-Dubly-Client-IP': ip, ...(cookie ? { Cookie: cookie } : {}) });
+      const login = (ip: string, password: string, cookie?: string) => api.call('POST', '/api/auth/login', { headers: from(ip, cookie), body: { email: 'popular@team.test', password } });
+      // The owner signed in on this laptop before: it carries the device cookie.
+      const earlier = await login('198.51.100.7', 'the right password');
+      const device = earlier.headers.getSetCookie().map((c) => c.split(';')[0]).find((c) => c.startsWith('dubly_device='))!;
+      expect(device).toBeTruthy();
+
+      // 100 wrong guesses (the ceiling) from 10 addresses, 10 each, in parallel.
+      const statuses = await Promise.all(
+        Array.from({ length: 10 }, async (_, ip) => {
+          const seen: number[] = [];
+          for (let i = 0; i < 10; i++) seen.push((await login(`203.0.113.${ip + 1}`, `guess ${i}`)).status);
+          return seen;
+        })
+      );
+      expect(statuses.flat().every((s) => s === 401)).toBe(true);
+
+      const strangerDevice = await login('192.0.2.50', 'the right password');
+      expect(strangerDevice.status).toBe(429);
+      expect(strangerDevice.body.error.message).toMatch(/emailed link/);
+      // The laptop the owner used before still gets its password checked, right or wrong.
+      expect((await login('198.51.100.7', 'the right password', device)).status).toBe(200);
+      expect((await login('198.51.100.7', 'not it at all', device)).status).toBe(401);
+    } finally {
+      delete process.env.EDGE_SHARED_SECRET;
+    }
+  }, 60_000);
 
   it('sends an enforced content security policy and the per-address request ceiling', async () => {
     const res = await fetch(`${api.baseUrl}/api/healthz`);

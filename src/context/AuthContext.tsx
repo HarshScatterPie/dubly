@@ -82,7 +82,8 @@ const toAuthUser = (u: ServerUser): AuthUser => ({ uid: u.uid, email: u.email, e
 
 export function friendlyAuthError(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 429) return 'Too many attempts. Wait a few minutes, or reset your password with "Forgot password?".';
+    // Dubly's own limits say what to do instead (e.g. sign in with an emailed link); anything else in the way gets the general advice.
+    if (err.status === 429) return err.code === 'RATE_LIMITED' && err.message ? err.message : 'Too many attempts. Wait a few minutes, or sign in with an emailed link instead.';
     if (err.status === 0) return 'Could not reach Dubly. Check your connection and try again.';
     return err.message;
   }

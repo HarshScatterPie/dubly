@@ -109,6 +109,11 @@ docker run -d --name dubly --restart unless-stopped -p 8787:8787 \
 | `RATE_INVITE_PER_HOUR` / `RATE_INVITE_PER_WORKSPACE_DAY` | 20 / 100 | Invitations created (each may send an email), per admin and per workspace |
 | `RATE_SHARE_VIEW_PER_MINUTE` | 60 | Public share page, per IP (its logo has a separate bucket of the same size) |
 | `RATE_PAGE_PER_MINUTE` | 300 | The app page (`index.html` for every client-side route), per IP |
+| `RATE_LOGIN_PER_15_MINUTES` | 30 | Sign-in attempts, per IP |
+| `RATE_LOGIN_FAILURES_PER_EMAIL_IP_15_MINUTES` / `RATE_LOGIN_FAILURES_PER_EMAIL_HOUR` | 10 / 100 | Wrong passwords for one email, from one IP / from everywhere. Past the second, only a browser that has signed in to the account before may try a password |
+| `RATE_AUTH_EMAIL_PER_HOUR` / `RATE_AUTH_EMAIL_PER_ADDRESS_HOUR` | 40 / 5 | Sign-in links, reset and confirmation emails, per IP / per email |
+| `RATE_AUTH_TOKEN_PER_HOUR` | 60 | Using an emailed link (confirm email, reset, sign-in link), per IP |
+| `RATE_SIGNUP_PER_HOUR` | 10 | New accounts, per IP |
 
 The monthly minute allowance is 120 minutes per workspace, set in `server/lib/projectRepo.ts`.
 

@@ -110,7 +110,7 @@ export function redactUrl(url: string): string {
   return url
     .replace(/(\/api\/share\/)[^/?#]+/, '$1[redacted]')
     .replace(/(\/api\/media\/)[^?#]*(\?[^#]*)?/, '$1[redacted]')
-    .replace(/([?&](?:invite|verify|reset|token)=)[^&#]+/g, '$1[redacted]');
+    .replace(/([?&](?:invite|verify|reset|magic|token)=)[^&#]+/g, '$1[redacted]');
 }
 
 export function createApp(options: { serveFrontend?: boolean; logRequests?: boolean } = {}): express.Express {

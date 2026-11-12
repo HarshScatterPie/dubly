@@ -92,6 +92,14 @@ export function requireSameOrigin(req: Request, res: Response, next: NextFunctio
   next();
 }
 
+// Whether the request carries a live session of the account `uid`: whoever holds one signed in to it, so knew how to.
+export async function holdsSessionOf(req: Request, uid: string): Promise<boolean> {
+  const presented = sessionTokenOf(req);
+  if (!presented) return false;
+  const session = await resolveSession(presented.token);
+  return session?.user._id === uid;
+}
+
 // Signs the caller in from their session; every request checks the session in the database, so a revoked one stops working at once.
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const presented = sessionTokenOf(req);

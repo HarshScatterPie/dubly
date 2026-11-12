@@ -179,6 +179,26 @@ export function buildPasswordChangedEmail(to: string, how: 'reset' | 'change', w
   });
 }
 
+// The first confirmation of an address left the account without a password (accounts.confirmInbox): says why, and how to choose one.
+export function buildConfirmedNoPasswordEmail(to: string, when = new Date()): MailMessage {
+  return composeEmail({
+    to,
+    subject: 'Your Dubly email is confirmed',
+    preheader: 'You are signed in. Choose a password if you want to sign in with one.',
+    hero: 'night',
+    eyebrow: 'Security notice',
+    title: 'Your email is confirmed',
+    paragraphs: [
+      `This address was confirmed on **${IST(when)}**, with a link or code we sent here, and that device is signed in.`,
+      'The account has **no password** right now. For safety, a password set before an address is confirmed is not kept, because anyone could have set it, and every other device was signed out.',
+      'To sign in with a password, choose one with **Forgot password?** on the sign-in page. Or keep signing in with an emailed link.',
+    ],
+    callout: { tone: 'security', title: "Wasn't you?", text: 'Someone used a link sent to this inbox. Use **Sign out everywhere** in Settings, and tell your workspace admin.' },
+    button: { label: 'Go to Dubly', url: appUrl() },
+    footnote: 'We send this once, when an account first confirms its email.',
+  });
+}
+
 /**
  * Sends a verification or reset email. Without SMTP outside production the link goes to the server log instead, so a local
  * install works without a mail account; in production it is never logged (the link is as good as the password).

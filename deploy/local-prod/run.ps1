@@ -66,13 +66,20 @@ function Get-TunnelUrl($tunnel) {
   return $null
 }
 
-# Points the Worker at the tunnel's current address.
+# Points the Worker at the tunnel's current address; true once it has (or when there is no front door). Cloudflare's API sometimes
+# refuses a call with "Authentication error [code: 10000]" and accepts the same one moments later, and until the address is written
+# the public link answers 502, so it tries three times here and the watchdog below keeps trying after that.
 function Publish-Origin([string]$tunnelUrl) {
-  if (-not (Test-Path $FrontDoorFile)) { return }
-  if (-not $tunnelUrl) { Log 'no tunnel address to give the front door'; return }
+  if (-not (Test-Path $FrontDoorFile)) { return $true }
+  if (-not $tunnelUrl) { Log 'no tunnel address to give the front door'; return $false }
   $namespace = First-Line $FrontDoorFile 1
-  & node --use-system-ca $Wrangler kv key put origin $tunnelUrl --namespace-id $namespace --remote 2>&1 | Out-File -Append -Encoding utf8 $LauncherLog
-  if ($LASTEXITCODE -eq 0) { Log "front door now forwards to $tunnelUrl (live within a minute)" } else { Log 'could not update the front door; see above' }
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    & node --use-system-ca $Wrangler kv key put origin $tunnelUrl --namespace-id $namespace --remote 2>&1 | Out-File -Append -Encoding utf8 $LauncherLog
+    if ($LASTEXITCODE -eq 0) { Log "front door now forwards to $tunnelUrl (live within a minute)"; return $true }
+    Log "could not update the front door (attempt $attempt of 3); see above"
+    Start-Sleep -Seconds (10 * $attempt)
+  }
+  return $false
 }
 
 # The address the app is known by (emails, cookies, cross-site checks).
@@ -116,7 +123,7 @@ function Start-App([string]$url) {
 Ensure-Mongo
 $tunnel = Start-Tunnel
 $tunnelUrl = Get-TunnelUrl $tunnel
-Publish-Origin $tunnelUrl
+$published = Publish-Origin $tunnelUrl
 $url = Get-PublicUrl $tunnelUrl
 Set-Content -Encoding utf8 $CurrentUrlFile $url
 Log "address: $url"
@@ -132,7 +139,7 @@ while ($true) {
     Log "tunnel stopped (exit $($tunnel.ExitCode)); starting a new one"
     $tunnel = Start-Tunnel
     $tunnelUrl = Get-TunnelUrl $tunnel
-    Publish-Origin $tunnelUrl
+    $published = Publish-Origin $tunnelUrl
     $new = Get-PublicUrl $tunnelUrl
     if ($new -ne $url) {
       # Only without a fixed address: the app's links must follow the new one.
@@ -146,5 +153,10 @@ while ($true) {
   if (-not $app -or $app.HasExited) {
     if ($app) { Log "app stopped (exit $($app.ExitCode)); restarting" }
     $app = Start-App $url
+  }
+  # The front door still points at an old tunnel: keep trying until it takes the current one.
+  if (-not $published -and $tunnel -and -not $tunnel.HasExited) {
+    Log 'front door not updated yet; trying again'
+    $published = Publish-Origin $tunnelUrl
   }
 }

@@ -144,7 +144,10 @@ const fake = vi.hoisted(() => {
     if (request.voice?.modelName) {
       const now = Date.now();
       state.geminiTtsAt = state.geminiTtsAt.filter((t) => now - t < 60_000);
-      if (state.geminiTtsAt.length >= 10) throw Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded for gemini-2.5-flash-tts'), { code: 8 });
+      if (state.geminiTtsAt.length >= 10) {
+        count('tts:quota-refused');
+        throw Object.assign(new Error('8 RESOURCE_EXHAUSTED: Quota exceeded for gemini-2.5-flash-tts'), { code: 8 });
+      }
       state.geminiTtsAt.push(now);
       count('tts:gemini');
       return [{ audioContent: tone(Math.max(0.6, text.length * 0.1)) }];
@@ -199,8 +202,13 @@ vi.mock('@google-cloud/text-to-speech', () => ({
 
 import { appendFile, readFile, rm, writeFile } from 'node:fs/promises';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { createUser, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
+import { col, createUser, resetEmulators, startApi, type TestApi, type TestUser } from '../test/helpers';
 import { resetGeminiTtsStateForTests } from '../lib/googleTtsClient';
+import { setModelRpmForTests } from '../lib/aiPacing';
+import { limits } from '../lib/limits';
+
+// Gemini 2.5 TTS is paced to its quota as in production (AI_MODEL_RPM's default), and its lines wait for it (TTS_ON_QUOTA=wait).
+const GEMINI_TTS_RPM = 10;
 import { probeMedia } from '../lib/ffmpeg';
 import { cacheDir } from '../lib/paths';
 
@@ -225,6 +233,7 @@ beforeAll(async () => {
   api = await startApi();
   await resetEmulators();
   user = await createUser('perf@gate.test');
+  setModelRpmForTests({ 'gemini-2.5-flash-tts': GEMINI_TTS_RPM });
 });
 afterAll(async () => {
   clearInterval(rssSampler);
@@ -270,6 +279,7 @@ async function phase(name: string, run: () => Promise<PhaseResult['api'] | void>
   // Each step starts in a fresh quota minute, as it would minutes apart in real use; leftover pauses would hide re-bought voices.
   fake.state.geminiTtsAt = [];
   resetGeminiTtsStateForTests();
+  await col('aiPace').deleteMany({});
   const lag = monitorEventLoopDelay({ resolution: 10 });
   lag.enable();
   const started = Date.now();
@@ -382,7 +392,13 @@ it('dubs a video within its budgets and never pays twice for the same model work
   // Time and responsiveness: per minute of video, scaled by PERF_BUDGET_SCALE.
   atMost('upload', upload.seconds / videoMinutes, 10 * scale, ' s per video minute');
   atMost('transcription', transcribe.seconds / videoMinutes, 12 * scale, ' s per video minute');
-  for (const p of [firstDub, redub, hinglishDub, retake]) atMost(`${p.phase}`, p.seconds / videoMinutes, 45 * scale, ' s per video minute');
+  // Lines wait for the Gemini voice quota by design: one turn every 6 s at 10 a minute, and a pause after any refusal. That time is
+  // the quota's, not the pipeline's, so it is taken off before the per-minute budget applies; everything else counts in full.
+  const quotaWait = (p: PhaseResult) =>
+    Math.max(0, calls(p, 'tts:gemini') - 1) * (60 / GEMINI_TTS_RPM) + calls(p, 'tts:quota-refused') * (limits.aiQuotaPauseMs / 1000);
+  for (const p of [firstDub, redub, hinglishDub, retake]) {
+    atMost(`${p.phase} (beyond ${Math.round(quotaWait(p))} s waiting for the voice quota)`, (p.seconds - quotaWait(p)) / videoMinutes, 45 * scale, ' s per video minute');
+  }
   for (const p of results) {
     atMost(`${p.phase}: longest main-thread stall`, p.loopLagMs.max, 1500 * scale, ' ms');
     // The upload step also includes this test reading and posting the whole video from the same process.

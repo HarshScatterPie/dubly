@@ -162,8 +162,9 @@ export function ttsRouteFor(engine: VoiceEngine, opts: { premium?: boolean; engi
 // Cloud TTS Gemini request limits: 4,000 bytes of text, 8,000 of text and prompt together.
 const CLOUD_GEMINI_MAX_TEXT_BYTES = 4000;
 const CLOUD_GEMINI_MAX_TOTAL_BYTES = 8000;
-// With TTS_ON_QUOTA=chirp, the longest a line waits for a Gemini model's turn before Chirp 3 HD voices it instead.
-const CHIRP_POLICY_WAIT_MS = 15_000;
+// With TTS_ON_QUOTA=chirp a line never waits for a Gemini model's turn: when the turn is not free right now, Chirp 3 HD voices it,
+// as before pacing existed, so the model still gets its quota's worth of lines and the dub is not slowed down.
+const CHIRP_POLICY_WAIT_MS = 0;
 // The pacing name of Chirp 3 HD on Cloud TTS (aiPacing.ts).
 export const CHIRP_PACE = 'chirp-3-hd';
 // Model not enabled or not permitted for this project: an operator has to act, so stop trying for longer.
